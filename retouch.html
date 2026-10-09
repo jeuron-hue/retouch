@@ -1,0 +1,1749 @@
+<!doctype html>
+<!--
+retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
+
+APP_VERSION 0.1.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+
+Build notes: vendored files and their pinned versions. Never upgrade one silently;
+change the version here in the same commit as the file.
+  vendor/fonts/source-sans-3-latin-400-normal.woff2    @fontsource/source-sans-3 5.3.0 (font v19), SIL OFL 1.1
+  vendor/fonts/source-sans-3-latin-600-normal.woff2    @fontsource/source-sans-3 5.3.0 (font v19), SIL OFL 1.1
+  vendor/fonts/jetbrains-mono-latin-400-normal.woff2   @fontsource/jetbrains-mono 5.3.0 (font v24), SIL OFL 1.1
+  vendor/fonts/jetbrains-mono-latin-500-normal.woff2   @fontsource/jetbrains-mono 5.3.0 (font v24), SIL OFL 1.1
+  vendor/fonts/OFL-source-sans-3.txt                   licence text from @fontsource/source-sans-3 5.3.0
+  vendor/fonts/OFL-jetbrains-mono.txt                  licence text from @fontsource/jetbrains-mono 5.3.0
+
+How the file is laid out:
+  1. Content-Security-Policy: the browser itself refuses any network call to
+     another origin (connect-src 'self'), so photos cannot leave the phone.
+  2. CSS: Lab Book tokens, then layout (top bar, stage, bottom sheet, tool bar).
+  3. HTML: the stage canvas, the sheets for each tool, the tool bar.
+  4. Script:
+     a. Constants (working-size ceiling, history depth, ratios).
+     b. CORE: pure image functions (geometry, crop, resize, add canvas,
+        metadata strip, edit history). Tests and the mutation runner target this block.
+     c. App: view (zoom, pan), tools, open, export, service worker.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#1F6F8B">
+<meta name="color-scheme" content="light dark">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-180.png">
+<title>retouch</title>
+<style>
+@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:400;font-display:swap;src:url(vendor/fonts/source-sans-3-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:600;font-display:swap;src:url(vendor/fonts/source-sans-3-latin-600-normal.woff2) format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:400;font-display:swap;src:url(vendor/fonts/jetbrains-mono-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:500;font-display:swap;src:url(vendor/fonts/jetbrains-mono-latin-500-normal.woff2) format("woff2")}
+
+:root{
+  --paper:#F7F8F6; --paper-raised:#FFFFFF; --line:#DDE3E6; --line-strong:#7A8A94;
+  --ink:#1E2A33; --ink-muted:#5B6B75;
+  --accent:#1F6F8B; --accent-soft:#E3EEF2; --on-accent:#FFFFFF;
+  --accent-2:#7B4B94; --accent-2-soft:#F1E9F5;
+  --accent-3:#A0522D; --accent-3-soft:#F6E7DE;
+  --pass:#2E7D4F; --watch:#B7791F; --fail:#B23A3A;
+  --font-sans:"Source Sans 3",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,monospace;
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-6:24px; --space-10:40px;
+  --radius-sm:4px; --radius-md:6px;
+  --check-a:#FFFFFF; --check-b:#DDE3E6;
+  --tap:44px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --paper:#182026; --paper-raised:#222C33; --line:#34414A; --line-strong:#6E7D87;
+  --ink:#E8EDF0; --ink-muted:#9BAAB3;
+  --accent:#66BAD6; --accent-soft:#1E3A45; --on-accent:#0E1B1F;
+  --accent-2:#C49AD8; --accent-2-soft:#36283F;
+  --accent-3:#E09A72; --accent-3-soft:#3F2A1F;
+  --pass:#5BBF85; --watch:#E0A84A; --fail:#E57373;
+  --check-a:#222C33; --check-b:#34414A;
+}}
+:root[data-theme="dark"]{
+  --paper:#182026; --paper-raised:#222C33; --line:#34414A; --line-strong:#6E7D87;
+  --ink:#E8EDF0; --ink-muted:#9BAAB3;
+  --accent:#66BAD6; --accent-soft:#1E3A45; --on-accent:#0E1B1F;
+  --accent-2:#C49AD8; --accent-2-soft:#36283F;
+  --accent-3:#E09A72; --accent-3-soft:#3F2A1F;
+  --pass:#5BBF85; --watch:#E0A84A; --fail:#E57373;
+  --check-a:#222C33; --check-b:#34414A;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--paper);color:var(--ink)}
+body{
+  font:15px/22px var(--font-sans);
+  display:flex;flex-direction:column;height:100dvh;overflow:hidden;
+  overscroll-behavior:none;-webkit-tap-highlight-color:transparent;
+  user-select:none;-webkit-user-select:none;
+}
+.mono,input[type=number]{font-family:var(--font-mono);font-variant-ligatures:none;font-variant-numeric:tabular-nums}
+.muted{color:var(--ink-muted)}
+.small{font-size:13px;line-height:18px;color:var(--ink-muted)}
+[hidden]{display:none !important}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* Buttons. Every tap target is at least 44 px in both directions. */
+button{font:inherit;color:inherit;cursor:pointer;min-height:var(--tap);min-width:var(--tap);touch-action:manipulation}
+button:disabled{cursor:default;opacity:.4}
+.btn{border:1px solid var(--line-strong);background:var(--paper-raised);color:var(--ink);border-radius:var(--radius-sm);padding:0 var(--space-4);font-weight:600}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.icon-btn{border:1px solid transparent;background:transparent;border-radius:var(--radius-sm);display:inline-flex;align-items:center;justify-content:center;padding:0}
+.icon-btn svg,.tool svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.chip{border:1px solid var(--line-strong);background:transparent;color:var(--ink);border-radius:var(--radius-sm);padding:0 var(--space-3);font-family:var(--font-mono);font-variant-ligatures:none;font-size:13.5px;white-space:nowrap;flex:0 0 auto}
+.chip.word{font-family:var(--font-sans);font-size:15px}
+.chip[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);color:var(--ink)}
+
+/* Top bar */
+.topbar{display:flex;align-items:center;gap:var(--space-1);padding:var(--space-1) var(--space-2);padding-top:max(var(--space-1),env(safe-area-inset-top));background:var(--paper-raised);border-bottom:1px solid var(--line);flex:0 0 auto}
+.app-name{font-weight:600;font-size:18px;line-height:24px;padding:0 var(--space-2) 0 var(--space-1)}
+.topbar .dims{font-size:12px;color:var(--ink-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.spacer{flex:1}
+
+/* Stage: the photo fills everything between the bars. */
+#stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;touch-action:none}
+#view{position:absolute;inset:0;width:100%;height:100%;display:block}
+.compare-main{position:absolute;right:var(--space-3);bottom:var(--space-3)}
+.busy{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius-md);padding:var(--space-2) var(--space-4);font-family:var(--font-mono);font-size:13.5px}
+
+/* Notices sit over the top of the stage. */
+#notices{position:absolute;left:var(--space-2);right:var(--space-2);top:var(--space-2);display:flex;flex-direction:column;gap:var(--space-2);z-index:5;pointer-events:none}
+.notice{pointer-events:auto;display:flex;align-items:center;gap:var(--space-2);background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius-md);padding:0 0 0 var(--space-3);font-size:13px;line-height:18px}
+.notice .text{flex:1;padding:var(--space-2) 0}
+.notice .word{font-weight:600}
+.notice.pass .word{color:var(--pass)} .notice.watch .word{color:var(--watch)} .notice.fail .word{color:var(--fail)}
+.notice.info{background:var(--accent-soft);border-color:var(--accent)}
+.notice .close{border:0;background:transparent;color:var(--ink-muted);font-size:20px}
+
+/* Empty state: the one title block on graph paper. */
+.title-block{position:absolute;inset:var(--space-4);margin:auto;max-width:420px;height:fit-content;
+  background-color:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius-md);padding:var(--space-6);
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:12px 12px}
+.title-block h1{font-size:22px;line-height:28px;font-weight:600;margin:var(--space-1) 0 var(--space-2)}
+.title-block p{margin:0 0 var(--space-4)}
+.title-block .btn-primary{width:100%;min-height:52px;font-size:16px;margin-bottom:var(--space-3)}
+.title-block .btn{width:100%;margin-bottom:var(--space-3)}
+.entry-code{font-family:var(--font-mono);font-variant-ligatures:none;font-size:11px;line-height:16px;color:var(--accent);letter-spacing:.02em}
+
+/* Bottom: tool bar, and the sheet that replaces it while a tool is open. */
+.toolbar{display:flex;flex:0 0 auto;background:var(--paper-raised);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+.tool{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:60px;border:0;background:transparent;color:var(--ink);font-size:13px;line-height:18px}
+.sheet{flex:0 0 auto;background:var(--paper-raised);border-top:1px solid var(--line);padding:var(--space-3) var(--space-3) max(var(--space-3),env(safe-area-inset-bottom));max-height:52dvh;overflow-y:auto}
+.sheet-head{display:flex;align-items:flex-start;gap:var(--space-2);margin-bottom:var(--space-2)}
+.sheet-head .grow{flex:1;min-width:0}
+.sheet-head h2{font-size:18px;line-height:24px;font-weight:600;margin:0}
+.hold{font-weight:400;padding:0 var(--space-3);touch-action:none}
+.hold[data-active="true"]{background:var(--accent-soft);border-color:var(--accent)}
+.row{display:flex;align-items:center;gap:var(--space-2);margin:var(--space-2) 0}
+.row label,.lbl{font-size:13px;color:var(--ink-muted);min-width:64px}
+.scroller{display:flex;gap:var(--space-2);overflow-x:auto;padding-bottom:2px;scrollbar-width:none;touch-action:pan-x}
+.scroller::-webkit-scrollbar{display:none}
+input[type=range]{flex:1;min-width:0;height:var(--tap);accent-color:var(--accent);margin:0;touch-action:pan-y}
+input[type=number]{width:96px;height:var(--tap);border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink);padding:0 var(--space-2);font-size:15px;text-align:right}
+input[type=color]{width:var(--tap);height:var(--tap);border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:transparent;padding:2px}
+.readout{font-family:var(--font-mono);font-variant-ligatures:none;font-variant-numeric:tabular-nums;font-size:13.5px;min-width:64px;text-align:right}
+.key{color:var(--accent);font-weight:500}
+.swatch{width:var(--tap);height:var(--tap);border:1px solid var(--line-strong);border-radius:var(--radius-sm);padding:0}
+.swatch[aria-pressed="true"]{outline:2px solid var(--accent);outline-offset:2px}
+.sheet-foot{display:flex;gap:var(--space-2);margin-top:var(--space-3)}
+.sheet-foot .btn{flex:1}
+.note{font-size:13px;line-height:18px;background:var(--accent-2-soft);border:1px solid var(--accent-2);border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3);margin:var(--space-2) 0}
+table.lb{width:100%;border-collapse:collapse;font-size:13px;margin:var(--space-2) 0}
+table.lb td{padding:var(--space-2);border-bottom:1px solid var(--line)}
+table.lb td.num{text-align:right;font-family:var(--font-mono);font-variant-ligatures:none;font-variant-numeric:tabular-nums;font-size:13.5px}
+.status-pass{color:var(--pass);font-weight:600} .status-fail{color:var(--fail);font-weight:600}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <span class="app-name">retouch</span>
+  <span class="dims mono" id="dims"></span>
+  <span class="spacer"></span>
+  <button class="icon-btn" id="btn-open" aria-label="Open photo" title="Open photo">
+    <svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="1"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-5 4 4 2.5-2.5L20 17"/></svg>
+  </button>
+  <button class="icon-btn" id="btn-undo" aria-label="Undo" title="Undo" disabled>
+    <svg viewBox="0 0 24 24"><path d="M9 7L5 11l4 4"/><path d="M5 11h9a5 5 0 0 1 0 10h-3"/></svg>
+  </button>
+  <button class="icon-btn" id="btn-redo" aria-label="Redo" title="Redo" disabled>
+    <svg viewBox="0 0 24 24"><path d="M15 7l4 4-4 4"/><path d="M19 11h-9a5 5 0 0 0 0 10h3"/></svg>
+  </button>
+  <button class="btn btn-primary" id="btn-export" disabled>Export</button>
+</header>
+
+<main id="stage">
+  <canvas id="view" aria-label="Photo"></canvas>
+  <div id="notices" aria-live="polite"></div>
+
+  <section class="title-block" id="empty">
+    <div class="entry-code" id="empty-code"></div>
+    <h1>retouch</h1>
+    <p>Edits stay on this phone. Nothing is uploaded.</p>
+    <button class="btn btn-primary" id="btn-open-empty">Open a photo</button>
+    <button class="btn" id="btn-install" hidden>Install app</button>
+    <p class="small">Or share a photo to retouch from Google Photos.</p>
+    <p class="small mono" id="version"></p>
+  </section>
+
+  <button class="btn hold compare-main" id="hold-main" data-hold hidden>Hold: original</button>
+  <div class="busy" id="busy" hidden>Working</div>
+</main>
+
+<section class="sheet" id="sheet" hidden>
+
+  <div class="sheet-panel" data-tool="crop" hidden>
+    <div class="sheet-head">
+      <div class="grow"><div class="entry-code" data-entry></div><h2>Crop and straighten</h2></div>
+      <button class="btn hold" data-hold>Hold: before</button>
+    </div>
+    <div class="scroller" id="crop-ratios" role="group" aria-label="Crop ratio"></div>
+    <div class="row">
+      <label for="crop-straighten">Straighten</label>
+      <input type="range" id="crop-straighten" min="-45" max="45" step="0.1" value="0">
+      <span class="readout" id="crop-angle">0.0°</span>
+    </div>
+    <div class="row">
+      <button class="btn" id="crop-rotate">Rotate 90°</button>
+      <button class="btn" id="crop-flip-h">Flip H</button>
+      <button class="btn" id="crop-flip-v">Flip V</button>
+      <span class="spacer"></span>
+      <button class="btn" id="crop-reset">Reset</button>
+    </div>
+    <div class="small" id="crop-out"></div>
+    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
+  </div>
+
+  <div class="sheet-panel" data-tool="resize" hidden>
+    <div class="sheet-head">
+      <div class="grow"><div class="entry-code" data-entry></div><h2>Resize</h2></div>
+      <button class="btn hold" data-hold>Hold: before</button>
+    </div>
+    <div class="scroller" role="group" aria-label="Resize preset">
+      <button class="chip word" id="resize-ig" aria-pressed="false">Instagram 1080 wide</button>
+      <button class="chip" data-long="2048" aria-pressed="false">2048</button>
+      <button class="chip" data-long="1600" aria-pressed="false">1600</button>
+      <button class="chip" data-long="1080" aria-pressed="false">1080</button>
+    </div>
+    <div class="row">
+      <label for="resize-long">Long edge</label>
+      <input type="range" id="resize-slider" min="64" max="1000" step="1" aria-label="Long edge slider">
+      <input type="number" id="resize-long" inputmode="numeric" min="16" step="1">
+      <span class="small">px</span>
+    </div>
+    <table class="lb"><tr><td>Now</td><td class="num" id="resize-from"></td></tr><tr><td>After</td><td class="num key" id="resize-to"></td></tr></table>
+    <div class="small" id="resize-note"></div>
+    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
+  </div>
+
+  <div class="sheet-panel" data-tool="pad" hidden>
+    <div class="sheet-head">
+      <div class="grow"><div class="entry-code" data-entry></div><h2>Add canvas</h2></div>
+      <button class="btn hold" data-hold>Hold: before</button>
+    </div>
+    <div class="scroller" id="pad-ratios" role="group" aria-label="Frame ratio"></div>
+    <div class="row">
+      <label for="pad-margin">Margin</label>
+      <input type="range" id="pad-margin" min="0" max="25" step="0.5" value="0">
+      <span class="readout" id="pad-margin-out">0 %</span>
+    </div>
+    <div class="row scroller" role="group" aria-label="Fill">
+      <button class="chip word" data-fill="colour" aria-pressed="true">Colour</button>
+      <button class="chip word" data-fill="blur" aria-pressed="false">Blur</button>
+      <button class="chip word" data-fill="transparent" aria-pressed="false">Transparent</button>
+    </div>
+    <div class="row" id="pad-colour-row">
+      <button class="swatch" data-colour="#FFFFFF" style="background:#FFFFFF" aria-label="White" aria-pressed="true"></button>
+      <button class="swatch" data-colour="#000000" style="background:#000000" aria-label="Black" aria-pressed="false"></button>
+      <button class="swatch" data-colour="#F7F8F6" style="background:#F7F8F6" aria-label="Paper" aria-pressed="false"></button>
+      <input type="color" id="pad-colour" value="#ffffff" aria-label="Pick colour">
+    </div>
+    <div class="row" id="pad-blur-row" hidden>
+      <label for="pad-blur">Blur</label>
+      <input type="range" id="pad-blur" min="0" max="100" step="1" value="50">
+      <span class="readout" id="pad-blur-out">50</span>
+    </div>
+    <div class="row">
+      <span class="small grow" id="pad-out" style="flex:1"></span>
+      <button class="btn" id="pad-centre">Centre</button>
+    </div>
+    <div class="small">Drag the photo to move it inside the frame.</div>
+    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
+  </div>
+
+  <div class="sheet-panel" data-tool="export" hidden>
+    <div class="sheet-head">
+      <div class="grow"><div class="entry-code" data-entry></div><h2>Export</h2></div>
+      <button class="btn hold" data-hold>Hold: original</button>
+    </div>
+    <div class="scroller" role="group" aria-label="Format">
+      <button class="chip" data-format="jpeg" aria-pressed="true">JPEG</button>
+      <button class="chip" data-format="png" aria-pressed="false">PNG</button>
+      <button class="chip" data-format="webp" aria-pressed="false">WebP</button>
+    </div>
+    <div class="row" id="export-quality-row">
+      <label for="export-quality">Quality</label>
+      <input type="range" id="export-quality" min="50" max="100" step="1" value="92">
+      <span class="readout" id="export-quality-out">92</span>
+    </div>
+    <div class="note" id="export-alpha-note" hidden>This image has transparent areas, so it exports as PNG.</div>
+    <table class="lb">
+      <tr><td>Size</td><td class="num" id="export-dims"></td></tr>
+      <tr><td>File</td><td class="num key" id="export-size"></td></tr>
+      <tr><td>Metadata</td><td class="num" id="export-meta"></td></tr>
+    </table>
+    <div class="sheet-foot">
+      <button class="btn" data-cancel>Close</button>
+      <button class="btn" id="export-download" disabled>Download</button>
+      <button class="btn btn-primary" id="export-share" disabled>Share</button>
+    </div>
+  </div>
+</section>
+
+<nav class="toolbar" id="toolbar" aria-label="Tools">
+  <button class="tool" data-open-tool="crop" disabled>
+    <svg viewBox="0 0 24 24"><path d="M7 3v14h14"/><path d="M3 7h14v14"/></svg>Crop
+  </button>
+  <button class="tool" data-open-tool="resize" disabled>
+    <svg viewBox="0 0 24 24"><rect x="3.5" y="10.5" width="10" height="10" rx="1"/><path d="M13 4h7v7"/><path d="M20 4l-8 8"/></svg>Resize
+  </button>
+  <button class="tool" data-open-tool="pad" disabled>
+    <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1"/><rect x="7.5" y="8.5" width="9" height="7" rx="0.5"/></svg>Canvas
+  </button>
+</nav>
+
+<input type="file" id="file" accept="image/*,.avif,.heic,.heif,.webp" hidden>
+
+<script>
+'use strict';
+
+/* ============================================================
+   a. Constants
+   ============================================================ */
+
+const APP_VERSION = '0.1.0';
+
+// Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
+// anything up to that is edited at full resolution. Bigger images (50 MP mode,
+// 8160 x 6144) are scaled down to fit on load, with a notice.
+const MAX_WORKING_PIXELS = 4080 * 3072;
+
+// Undo depth. Each step holds a full bitmap (about 50 MB at 12.5 MP), so the
+// stack is capped. The original is always kept on top of this.
+const HISTORY_DEPTH = 10;
+
+// When straightening, keep the crop this many pixels inside the rotated photo so
+// the anti-aliased edge never leaks a transparent sliver into the result.
+const CROP_ROTATE_MARGIN = 2;
+
+const SHARE_CACHE = 'retouch-share';
+const SHARE_KEY = 'shared-image';
+
+// Ratios as width / height. 'orig' means the photo's own ratio.
+const RATIOS = [
+  { id: 'free', label: 'Free', r: null },
+  { id: 'original', label: 'Original', r: 'orig' },
+  { id: '1:1', label: '1:1', r: 1 },
+  { id: '4:5', label: '4:5', r: 4 / 5 },
+  { id: '1.91:1', label: '1.91:1', r: 1.91 },
+  { id: '9:16', label: '9:16', r: 9 / 16 },
+  { id: '3:4', label: '3:4', r: 3 / 4 },
+];
+
+/* ============================================================
+   b. CORE: pure image functions.
+   Plain inputs in, new canvas or numbers out. Nothing here touches the page,
+   so the tests can call each one directly and check the numbers.
+   ============================================================ */
+// CORE:BEGIN
+const core = {};
+
+core.makeCanvas = (w, h) => {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return c;
+};
+
+core.release = (img) => {
+  if (!img) return;
+  if (typeof img.close === 'function') img.close();
+  else if ('width' in img) { img.width = 0; img.height = 0; }
+};
+
+// Scale (w, h) down, keeping the ratio, until it has at most maxPixels.
+core.fitWithin = (w, h, maxPixels) => {
+  if (w * h <= maxPixels) return { w, h, scaled: false };
+  const s = Math.sqrt(maxPixels / (w * h));
+  let nw = Math.max(1, Math.floor(w * s + 1e-9));
+  let nh = Math.max(1, Math.floor(h * s + 1e-9));
+  while (nw * nh > maxPixels) { if (nw >= nh) nw--; else nh--; }
+  return { w: nw, h: nh, scaled: true };
+};
+
+/* Crop geometry.
+   The photo is first turned by quarter turns and flipped; call that the base
+   image, w0 x h0. Straightening then rotates the base image by theta about its
+   centre. The crop rectangle {cx, cy, w, h} stays upright on screen and is
+   measured in base pixels from the base image centre. A crop is valid when all
+   four of its corners land inside the rotated photo. */
+
+core.baseDims = (W, H, quarter) => (quarter % 2 ? { w: H, h: W } : { w: W, h: H });
+
+// How far a centred w x h rectangle reaches along the base image's own axes.
+core.cropExtent = (w, h, theta) => {
+  const c = Math.abs(Math.cos(theta)), s = Math.abs(Math.sin(theta));
+  return { x: (w / 2) * c + (h / 2) * s, y: (w / 2) * s + (h / 2) * c };
+};
+
+// Largest centred rectangle of ratio R (w / h) that fits inside the rotated photo.
+core.cropMaxRect = (w0, h0, theta, R, margin = 0) => {
+  const ratio = R || w0 / h0;
+  const c = Math.abs(Math.cos(theta)), s = Math.abs(Math.sin(theta));
+  const hw = w0 / 2 - margin, hh = h0 / 2 - margin;
+  const b = Math.min(hw / (ratio * c + s), hh / (ratio * s + c));
+  return { cx: 0, cy: 0, w: 2 * b * ratio, h: 2 * b };
+};
+
+core.cropIsValid = (rect, w0, h0, theta, margin = 0) => {
+  const c = Math.cos(theta), s = Math.sin(theta);
+  const u = c * rect.cx + s * rect.cy, v = -s * rect.cx + c * rect.cy;
+  const e = core.cropExtent(rect.w, rect.h, theta);
+  const eps = 1e-6;
+  return Math.abs(u) + e.x <= w0 / 2 - margin + eps && Math.abs(v) + e.y <= h0 / 2 - margin + eps;
+};
+
+// Move a rectangle's centre the least distance needed to make it valid.
+core.cropClampCenter = (rect, w0, h0, theta, margin = 0) => {
+  const c = Math.cos(theta), s = Math.sin(theta);
+  const e = core.cropExtent(rect.w, rect.h, theta);
+  const lu = Math.max(0, w0 / 2 - margin - e.x), lv = Math.max(0, h0 / 2 - margin - e.y);
+  let u = c * rect.cx + s * rect.cy, v = -s * rect.cx + c * rect.cy;
+  u = Math.min(lu, Math.max(-lu, u));
+  v = Math.min(lv, Math.max(-lv, v));
+  return { cx: c * u - s * v, cy: s * u + c * v, w: rect.w, h: rect.h };
+};
+
+// Shrink a rectangle about its centre (keeping its ratio) just enough to fit,
+// then nudge it inside. Used when the straighten angle changes.
+core.cropFitRect = (rect, w0, h0, theta, margin = 0) => {
+  const e = core.cropExtent(rect.w, rect.h, theta);
+  const k = Math.min(1, (w0 / 2 - margin) / e.x, (h0 / 2 - margin) / e.y);
+  return core.cropClampCenter({ cx: rect.cx, cy: rect.cy, w: rect.w * k, h: rect.h * k }, w0, h0, theta, margin);
+};
+
+// Whole-pixel crop box (left, top, width, height in base pixels) for an unrotated crop.
+core.cropSnap = (rect, w0, h0) => {
+  const W = Math.min(w0, Math.max(1, Math.round(rect.w)));
+  const H = Math.min(h0, Math.max(1, Math.round(rect.h)));
+  const L = Math.min(w0 - W, Math.max(0, Math.round(rect.cx - rect.w / 2 + w0 / 2)));
+  const T = Math.min(h0 - H, Math.max(0, Math.round(rect.cy - rect.h / 2 + h0 / 2)));
+  return { L, T, W, H };
+};
+
+// Exact matrices for quarter turns (clockwise), so 90 degree turns copy pixels without blur.
+core.QUARTER = [[1, 0, 0, 1], [0, 1, -1, 0], [-1, 0, 0, -1], [0, -1, 1, 0]];
+
+// Output size of a crop with these settings.
+core.cropOutputDims = (srcW, srcH, p) => {
+  const b = core.baseDims(srcW, srcH, p.quarter);
+  if (!p.theta) { const s = core.cropSnap(p.rect, b.w, b.h); return { w: s.W, h: s.H }; }
+  return { w: Math.max(1, Math.round(p.rect.w)), h: Math.max(1, Math.round(p.rect.h)) };
+};
+
+// p = { quarter, flipH, flipV, theta, rect }. Returns a new canvas.
+core.renderCrop = (src, p) => {
+  const SW = src.width, SH = src.height;
+  const b = core.baseDims(SW, SH, p.quarter);
+  let W, H, cx, cy;
+  if (!p.theta) {
+    const s = core.cropSnap(p.rect, b.w, b.h);
+    W = s.W; H = s.H;
+    cx = s.L + W / 2 - b.w / 2;
+    cy = s.T + H / 2 - b.h / 2;
+  } else {
+    W = Math.max(1, Math.round(p.rect.w)); H = Math.max(1, Math.round(p.rect.h));
+    cx = p.rect.cx; cy = p.rect.cy;
+  }
+  const out = core.makeCanvas(W, H);
+  const ctx = out.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.translate(W / 2 - cx, H / 2 - cy);
+  if (p.theta) ctx.rotate(p.theta);
+  ctx.scale(p.flipH ? -1 : 1, p.flipV ? -1 : 1);
+  const q = core.QUARTER[((p.quarter % 4) + 4) % 4];
+  ctx.transform(q[0], q[1], q[2], q[3], 0, 0);
+  ctx.drawImage(src, -SW / 2, -SH / 2);
+  return out;
+};
+
+/* Resize. mode 'long': value is the long edge in px. mode 'width': value is the width. */
+core.resizeDims = (w, h, mode, value) => {
+  const v = Math.max(1, Math.round(value));
+  if (mode === 'width') return { w: v, h: Math.max(1, Math.round(h * v / w)) };
+  if (w >= h) return { w: v, h: Math.max(1, Math.round(h * v / w)) };
+  return { w: Math.max(1, Math.round(w * v / h)), h: v };
+};
+
+// Largest long edge that still fits under the working-size ceiling.
+core.maxLongEdge = (w, h, maxPixels) => {
+  const long = Math.max(w, h), short = Math.min(w, h);
+  return Math.floor(Math.sqrt(maxPixels * long / short));
+};
+
+core.renderResize = async (src, W, H) => {
+  // createImageBitmap with resizeQuality 'high' uses the browser's best
+  // downscaling filter, which is better than one plain drawImage.
+  return createImageBitmap(src, { resizeWidth: W, resizeHeight: H, resizeQuality: 'high' });
+};
+
+/* Add canvas: pad the photo out to ratio R (null keeps the photo's own shape),
+   with an optional margin on every side, without cropping anything. */
+core.padDims = (w, h, R, margin = 0) => {
+  const iw = w + 2 * margin, ih = h + 2 * margin;
+  if (!R) return { W: iw, H: ih };
+  if (iw / ih >= R) return { W: iw, H: Math.max(ih, Math.round(iw / R)) };
+  return { W: Math.max(iw, Math.round(ih * R)), H: ih };
+};
+
+// Scale factor that keeps a W x H result under the working-size ceiling (1 if it already fits).
+core.padScale = (W, H, maxPixels) => {
+  if (W * H <= maxPixels) return 1;
+  let k = Math.sqrt(maxPixels / (W * H));
+  while (Math.max(1, Math.round(W * k)) * Math.max(1, Math.round(H * k)) > maxPixels) k *= 0.9999;
+  return k;
+};
+
+// px, py run 0 to 1: where the photo sits in the spare room (0.5 is centred).
+core.padOffset = (W, H, w, h, px, py) => ({
+  x: Math.round((W - w) * Math.min(1, Math.max(0, px))),
+  y: Math.round((H - h) * Math.min(1, Math.max(0, py))),
+});
+
+// o = { W, H, x, y, fill: 'colour' | 'blur' | 'transparent', colour, blur (0 to 1) }.
+// k scales the whole drawing (1 for the real result, smaller for a quick preview).
+core.renderPad = (src, o, k = 1) => {
+  const W = Math.max(1, Math.round(o.W * k)), H = Math.max(1, Math.round(o.H * k));
+  const out = core.makeCanvas(W, H);
+  const ctx = out.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  if (o.fill === 'colour') {
+    ctx.fillStyle = o.colour;
+    ctx.fillRect(0, 0, W, H);
+  } else if (o.fill === 'blur') {
+    core.drawBlurCover(ctx, src, W, H, o.blur);
+  }
+  if (k === 1) ctx.drawImage(src, o.x, o.y);
+  else ctx.drawImage(src, o.x * k, o.y * k, src.width * k, src.height * k);
+  return out;
+};
+
+// Fill W x H with the photo stretched to cover it, then blurred. The blur is
+// done on a small copy (fast), drawn larger than the frame so its soft edges
+// fall outside, then scaled up.
+core.drawBlurCover = (ctx, src, W, H, amount) => {
+  const SMALL = 256;
+  const k = SMALL / Math.max(W, H);
+  const sw = Math.max(1, Math.round(W * k)), sh = Math.max(1, Math.round(H * k));
+  const radius = 1 + 15 * Math.min(1, Math.max(0, amount));
+  const pad = Math.ceil(radius * 3);
+  const small = core.makeCanvas(sw, sh);
+  const sctx = small.getContext('2d');
+  const cover = Math.max((sw + 2 * pad) / src.width, (sh + 2 * pad) / src.height);
+  const dw = src.width * cover, dh = src.height * cover;
+  sctx.filter = 'blur(' + radius + 'px)';
+  sctx.imageSmoothingQuality = 'high';
+  sctx.drawImage(src, (sw - dw) / 2, (sh - dh) / 2, dw, dh);
+  ctx.drawImage(small, 0, 0, W, H);
+  core.release(small);
+};
+
+// True if any pixel is not fully opaque. Read in strips to keep memory low.
+core.hasTransparency = (src) => {
+  const w = src.width, h = src.height;
+  const c = core.makeCanvas(w, h);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0);
+  const rows = Math.max(1, Math.floor(2000000 / w));
+  try {
+    for (let y = 0; y < h; y += rows) {
+      const d = ctx.getImageData(0, y, w, Math.min(rows, h - y)).data;
+      for (let i = 3; i < d.length; i += 4) if (d[i] !== 255) return true;
+    }
+    return false;
+  } finally { core.release(c); }
+};
+
+/* Metadata. Encoders in Chrome do not normally write EXIF, but exports are
+   still parsed byte by byte, anything that is not image data is removed, and
+   the result is checked again before it is handed over. */
+core.meta = {};
+
+core.meta.ascii = (b, at, n) => {
+  let s = '';
+  for (let i = 0; i < n && at + i < b.length; i++) s += String.fromCharCode(b[at + i]);
+  return s;
+};
+
+core.meta.sniff = (b) => {
+  if (b.length > 3 && b[0] === 0xFF && b[1] === 0xD8) return 'jpeg';
+  if (b.length > 8 && b[0] === 0x89 && core.meta.ascii(b, 1, 3) === 'PNG') return 'png';
+  if (b.length > 12 && core.meta.ascii(b, 0, 4) === 'RIFF' && core.meta.ascii(b, 8, 4) === 'WEBP') return 'webp';
+  return null;
+};
+
+core.meta.concat = (parts) => {
+  const n = parts.reduce((a, p) => a + p.length, 0);
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+};
+
+// JPEG: walk the segments. visit(marker, segmentBytes) returns true to keep it.
+core.meta.walkJpeg = (b, visit) => {
+  const out = [b.subarray(0, 2)];
+  let i = 2;
+  while (i < b.length) {
+    if (b[i] !== 0xFF) throw new Error('JPEG structure not recognised');
+    const m = b[i + 1];
+    if (m === 0xFF) { i++; continue; }
+    if (m === 0xD9) { out.push(b.subarray(i, i + 2)); break; }       // end of image; drop anything after
+    if ((m >= 0xD0 && m <= 0xD7) || m === 0x01) { out.push(b.subarray(i, i + 2)); i += 2; continue; }
+    const len = (b[i + 2] << 8) | b[i + 3];
+    const end = i + 2 + len;
+    if (m === 0xDA) {                                                  // start of scan: copy entropy data
+      let j = end;
+      while (j < b.length - 1) {
+        if (b[j] === 0xFF) {
+          const n = b[j + 1];
+          if (n === 0x00 || (n >= 0xD0 && n <= 0xD7)) { j += 2; continue; }
+          if (n === 0xFF) { j++; continue; }
+          break;
+        }
+        j++;
+      }
+      out.push(b.subarray(i, j));
+      i = j;
+      continue;
+    }
+    const seg = b.subarray(i, end);
+    if (visit(m, seg)) out.push(seg);
+    i = end;
+  }
+  return core.meta.concat(out);
+};
+
+// Which JPEG application segments are image data rather than metadata.
+core.meta.jpegKeep = (m, seg) => {
+  if (m === 0xFE) return false;                                         // comment
+  if (m < 0xE0 || m > 0xEF) return true;                                // tables, frame headers
+  if (m === 0xE0) return core.meta.ascii(seg, 4, 5) === 'JFIF\0';
+  if (m === 0xE2) return core.meta.ascii(seg, 4, 12) === 'ICC_PROFILE\0';  // colour profile
+  if (m === 0xEE) return core.meta.ascii(seg, 4, 5) === 'Adobe';        // colour transform flag
+  return false;                                                         // EXIF, XMP, IPTC, MPF and the rest
+};
+
+core.meta.PNG_KEEP = ['IHDR', 'PLTE', 'IDAT', 'IEND', 'tRNS', 'gAMA', 'cHRM', 'sRGB', 'iCCP', 'sBIT', 'pHYs', 'bKGD', 'cICP'];
+core.meta.WEBP_KEEP = ['VP8 ', 'VP8L', 'VP8X', 'ALPH', 'ANIM', 'ANMF', 'ICCP'];
+
+core.meta.strip = (bytes) => {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const kind = core.meta.sniff(b);
+  if (kind === 'jpeg') return core.meta.walkJpeg(b, core.meta.jpegKeep);
+  if (kind === 'png') {
+    const parts = [b.subarray(0, 8)];
+    let i = 8;
+    while (i + 8 <= b.length) {
+      const len = ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3];
+      const type = core.meta.ascii(b, i + 4, 4);
+      const end = i + 12 + len;
+      if (core.meta.PNG_KEEP.includes(type)) parts.push(b.subarray(i, end));
+      i = end;
+      if (type === 'IEND') break;
+    }
+    return core.meta.concat(parts);
+  }
+  if (kind === 'webp') {
+    const parts = [];
+    let i = 12;
+    while (i + 8 <= b.length) {
+      const type = core.meta.ascii(b, i, 4);
+      const len = b[i + 4] | (b[i + 5] << 8) | (b[i + 6] << 16) | (b[i + 7] << 24);
+      const end = i + 8 + len + (len & 1);
+      if (core.meta.WEBP_KEEP.includes(type)) {
+        const chunk = b.slice(i, Math.min(end, b.length));
+        if (type === 'VP8X') chunk[8] &= ~(0x08 | 0x04);              // clear the EXIF and XMP flags
+        parts.push(chunk);
+      }
+      i = end;
+    }
+    const body = core.meta.concat(parts);
+    const head = new Uint8Array(12);
+    head.set(b.subarray(0, 12));
+    const size = body.length + 4;
+    head[4] = size & 255; head[5] = (size >> 8) & 255; head[6] = (size >> 16) & 255; head[7] = (size >>> 24) & 255;
+    return core.meta.concat([head, body]);
+  }
+  throw new Error('Unknown image format');
+};
+
+// List any metadata still present. An empty list means clean.
+core.meta.find = (bytes) => {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const kind = core.meta.sniff(b);
+  const found = [];
+  if (kind === 'jpeg') {
+    core.meta.walkJpeg(b, (m, seg) => {
+      if (m === 0xE1 && core.meta.ascii(seg, 4, 6) === 'Exif\0\0') {
+        found.push('EXIF');
+        if (core.meta.exifHasGps(seg.subarray(10))) found.push('GPS');
+      } else if (m === 0xE1 && core.meta.ascii(seg, 4, 40).includes('ns.adobe.com/xap')) found.push('XMP');
+      else if (m === 0xED) found.push('IPTC');
+      else if (m === 0xFE) found.push('comment');
+      else if (!core.meta.jpegKeep(m, seg)) found.push('APP' + (m - 0xE0));
+      return true;
+    });
+  } else if (kind === 'png') {
+    let i = 8;
+    while (i + 8 <= b.length) {
+      const len = ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3];
+      const type = core.meta.ascii(b, i + 4, 4);
+      if (!core.meta.PNG_KEEP.includes(type)) found.push(type);
+      i += 12 + len;
+      if (type === 'IEND') break;
+    }
+  } else if (kind === 'webp') {
+    let i = 12;
+    while (i + 8 <= b.length) {
+      const type = core.meta.ascii(b, i, 4);
+      const len = b[i + 4] | (b[i + 5] << 8) | (b[i + 6] << 16) | (b[i + 7] << 24);
+      if (!core.meta.WEBP_KEEP.includes(type)) found.push(type.trim());
+      if (type === 'VP8X' && (b[i + 8] & 0x0C)) found.push('VP8X metadata flag');
+      i += 8 + len + (len & 1);
+    }
+  } else found.push('unknown format');
+  return found;
+};
+
+// Does a TIFF/EXIF block point to a GPS directory (tag 0x8825) in IFD0?
+core.meta.exifHasGps = (t) => {
+  if (t.length < 8) return false;
+  const le = t[0] === 0x49;
+  const u16 = (o) => (le ? t[o] | (t[o + 1] << 8) : (t[o] << 8) | t[o + 1]);
+  const u32 = (o) => (le ? (t[o] | (t[o + 1] << 8) | (t[o + 2] << 16)) + t[o + 3] * 16777216
+                         : (t[o] * 16777216) + ((t[o + 1] << 16) | (t[o + 2] << 8) | t[o + 3]));
+  const ifd = u32(4);
+  if (ifd + 2 > t.length) return false;
+  const n = u16(ifd);
+  for (let k = 0; k < n; k++) {
+    const e = ifd + 2 + k * 12;
+    if (e + 2 > t.length) break;
+    if (u16(e) === 0x8825) return true;
+  }
+  return false;
+};
+
+/* Edit history. stack[0] is the original and is never released. Each pixel
+   operation pushes a new bitmap. Past HISTORY_DEPTH steps the oldest edit
+   (never the original) is dropped. */
+class EditHistory {
+  constructor(original, depth) {
+    this.depth = depth;
+    this.stack = [{ bmp: original, label: 'Original', time: Date.now() }];
+    this.index = 0;
+  }
+  get current() { return this.stack[this.index].bmp; }
+  get original() { return this.stack[0].bmp; }
+  get canUndo() { return this.index > 0; }
+  get canRedo() { return this.index < this.stack.length - 1; }
+  push(bmp, label) {
+    for (const e of this.stack.splice(this.index + 1)) core.release(e.bmp);
+    this.stack.push({ bmp, label, time: Date.now() });
+    while (this.stack.length > this.depth + 1) {
+      const [old] = this.stack.splice(1, 1);
+      core.release(old.bmp);
+    }
+    this.index = this.stack.length - 1;
+  }
+  undo() { if (this.canUndo) this.index--; return this.current; }
+  redo() { if (this.canRedo) this.index++; return this.current; }
+  dispose() { for (const e of this.stack) core.release(e.bmp); this.stack = []; this.index = -1; }
+}
+core.EditHistory = EditHistory;
+// CORE:END
+
+/* ============================================================
+   c. App
+   ============================================================ */
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+const app = {
+  edits: null,         // EditHistory once a photo is open
+  fileName: '',
+  tool: null,          // the open tool, or null
+  preview: null,       // { src, w, h } a tool's live preview, drawn instead of the current image
+  holding: false,      // the before / after button is held down
+  busyCount: 0,
+};
+
+/* ---------- Small helpers ---------- */
+
+const pad2 = (n) => String(n).padStart(2, '0');
+function stamp(d = new Date()) {
+  return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + '/' + pad2(d.getFullYear() % 100) +
+    ' · ' + pad2(d.getHours()) + pad2(d.getMinutes()) + ' hrs';
+}
+function entryCode() {
+  const step = app.edits ? app.edits.index : 0;
+  return 'RT-' + String(step).padStart(3, '0') + ' · ' + stamp();
+}
+const fmtDims = (w, h) => w + ' × ' + h;
+const fmtMP = (w, h) => (w * h / 1e6).toFixed(1) + ' MP';
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return Math.round(n / 1024) + ' kB';
+  return (n / 1048576).toFixed(1) + ' MB';
+}
+
+/* ---------- Notices ---------- */
+
+function notify(text, kind = 'info', opts = {}) {
+  const el = document.createElement('div');
+  el.className = 'notice ' + kind;
+  el.dataset.kind = kind;
+  const words = { pass: 'Pass', watch: 'Watch', fail: 'Fail' };
+  const body = document.createElement('span');
+  body.className = 'text';
+  if (words[kind]) {
+    const w = document.createElement('span');
+    w.className = 'word';
+    w.textContent = words[kind] + ' ';
+    body.append(w);
+  }
+  body.append(document.createTextNode(text));
+  el.append(body);
+  if (opts.action) {
+    const b = document.createElement('button');
+    b.className = 'btn btn-primary';
+    b.textContent = opts.action.label;
+    b.addEventListener('click', () => { opts.action.fn(); el.remove(); });
+    el.append(b);
+  }
+  const x = document.createElement('button');
+  x.className = 'close';
+  x.setAttribute('aria-label', 'Dismiss');
+  x.textContent = '×';
+  x.addEventListener('click', () => el.remove());
+  el.append(x);
+  if (opts.id) { const old = document.querySelector('.notice[data-id="' + opts.id + '"]'); if (old) old.remove(); el.dataset.id = opts.id; }
+  $('#notices').append(el);
+  if (!opts.sticky) setTimeout(() => el.remove(), opts.timeout || 6000);
+  return el;
+}
+
+function busy(on) {
+  app.busyCount += on ? 1 : -1;
+  $('#busy').hidden = app.busyCount <= 0;
+}
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+
+/* ---------- View: draws the photo on the stage, with zoom and pan ---------- */
+
+const view = {
+  canvas: $('#view'), ctx: null, dpr: 1, cssW: 1, cssH: 1,
+  scale: 1, tx: 0, ty: 0, fitMode: true, contentW: 0, contentH: 0,
+  pending: false, checker: null,
+};
+view.ctx = view.canvas.getContext('2d');
+
+function viewResize() {
+  const r = $('#stage').getBoundingClientRect();
+  view.dpr = window.devicePixelRatio || 1;
+  view.cssW = Math.max(1, r.width); view.cssH = Math.max(1, r.height);
+  view.canvas.width = Math.round(view.cssW * view.dpr);
+  view.canvas.height = Math.round(view.cssH * view.dpr);
+  view.checker = null;
+  if (view.fitMode) fitView();
+  requestDraw();
+}
+
+function fitView() {
+  const d = displayed();
+  if (!d) return;
+  const m = 12;
+  view.scale = Math.min((view.cssW - 2 * m) / d.w, (view.cssH - 2 * m) / d.h);
+  view.tx = (view.cssW - d.w * view.scale) / 2;
+  view.ty = (view.cssH - d.h * view.scale) / 2;
+  view.contentW = d.w; view.contentH = d.h;
+  view.fitMode = true;
+}
+
+// What the stage shows right now: { src, w, h, which }.
+function displayed() {
+  if (!app.edits) return null;
+  if (app.holding) {
+    const src = app.tool ? app.edits.current : app.edits.original;
+    return { src, w: src.width, h: src.height, which: 'before' };
+  }
+  if (app.preview) return { ...app.preview, which: 'after' };
+  const src = app.edits.current;
+  return { src, w: src.width, h: src.height, which: 'after' };
+}
+
+function requestDraw() {
+  if (view.pending) return;
+  view.pending = true;
+  requestAnimationFrame(draw);
+}
+
+function checkerPattern(ctx) {
+  if (view.checker) return view.checker;
+  const cs = getComputedStyle(document.documentElement);
+  const t = core.makeCanvas(16, 16), c = t.getContext('2d');
+  c.fillStyle = cs.getPropertyValue('--check-a').trim() || '#fff'; c.fillRect(0, 0, 16, 16);
+  c.fillStyle = cs.getPropertyValue('--check-b').trim() || '#ddd'; c.fillRect(0, 0, 8, 8); c.fillRect(8, 8, 8, 8);
+  view.checker = ctx.createPattern(t, 'repeat');
+  return view.checker;
+}
+
+function draw() {
+  view.pending = false;
+  const ctx = view.ctx;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, view.canvas.width, view.canvas.height);
+  const d = displayed();
+  app.showing = d ? d.which : null;
+  if (!d) return;
+  if (app.tool && app.tool.draw && !app.holding) { app.tool.draw(ctx); return; }
+  if (d.w !== view.contentW || d.h !== view.contentH) {
+    if (view.fitMode || app.holding) fitView();
+  }
+  let s = view.scale, tx = view.tx, ty = view.ty;
+  if (d.w !== view.contentW || d.h !== view.contentH) {          // before image of another size: fit it
+    const m = 12;
+    s = Math.min((view.cssW - 2 * m) / d.w, (view.cssH - 2 * m) / d.h);
+    tx = (view.cssW - d.w * s) / 2; ty = (view.cssH - d.h * s) / 2;
+  }
+  ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+  ctx.fillStyle = checkerPattern(ctx);
+  ctx.fillRect(tx, ty, d.w * s, d.h * s);
+  ctx.imageSmoothingEnabled = s * view.dpr < 2;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(d.src, tx, ty, d.w * s, d.h * s);
+}
+
+/* ---------- Gestures on the stage: pinch to zoom, drag to pan, double tap ---------- */
+
+const gesture = { pointers: new Map(), start: null, lastTap: 0, lastTapX: 0, lastTapY: 0, toolDrag: false };
+
+function stagePoint(e) {
+  const r = view.canvas.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+function beginPinchOrPan() {
+  const pts = Array.from(gesture.pointers.values());
+  if (pts.length >= 2) {
+    const [a, b] = pts;
+    gesture.start = { kind: 'pinch', d: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, s: view.scale, tx: view.tx, ty: view.ty };
+  } else if (pts.length === 1) {
+    gesture.start = { kind: 'pan', x: pts[0].x, y: pts[0].y, tx: view.tx, ty: view.ty };
+  } else gesture.start = null;
+}
+
+function zoomAbout(px, py, newScale) {
+  const d = displayed(); if (!d) return;
+  const fit = Math.min((view.cssW - 24) / d.w, (view.cssH - 24) / d.h);
+  newScale = Math.min(Math.max(newScale, fit * 0.5), 16);
+  const ix = (px - view.tx) / view.scale, iy = (py - view.ty) / view.scale;
+  view.scale = newScale;
+  view.tx = px - ix * newScale; view.ty = py - iy * newScale;
+  view.fitMode = false;
+  requestDraw();
+}
+
+view.canvas.addEventListener('pointerdown', (e) => {
+  if (!app.edits) return;
+  try { view.canvas.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
+  const p = stagePoint(e);
+  gesture.pointers.set(e.pointerId, p);
+  if (gesture.pointers.size === 1 && app.tool && app.tool.pointerDown && !app.holding) {
+    gesture.toolDrag = app.tool.pointerDown(p) === true;
+    if (gesture.toolDrag) return;
+  }
+  if (gesture.pointers.size === 2 && gesture.toolDrag) {        // second finger: stop the tool drag, zoom instead
+    if (app.tool.pointerUp) app.tool.pointerUp();
+    gesture.toolDrag = false;
+  }
+  if (app.tool && app.tool.fixedView) return;
+  beginPinchOrPan();
+});
+
+view.canvas.addEventListener('pointermove', (e) => {
+  if (!gesture.pointers.has(e.pointerId)) return;
+  const p = stagePoint(e);
+  gesture.pointers.set(e.pointerId, p);
+  if (gesture.toolDrag) { app.tool.pointerMove(p); return; }
+  if (app.tool && app.tool.fixedView) return;
+  const st = gesture.start;
+  if (!st) return;
+  if (st.kind === 'pinch' && gesture.pointers.size >= 2) {
+    const [a, b] = Array.from(gesture.pointers.values());
+    const dd = Math.hypot(a.x - b.x, a.y - b.y);
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    const ix = (st.mx - st.tx) / st.s, iy = (st.my - st.ty) / st.s;
+    const d = displayed();
+    const fit = Math.min((view.cssW - 24) / d.w, (view.cssH - 24) / d.h);
+    view.scale = Math.min(Math.max(st.s * dd / st.d, fit * 0.5), 16);
+    view.tx = mx - ix * view.scale; view.ty = my - iy * view.scale;
+    view.fitMode = false;
+    requestDraw();
+  } else if (st.kind === 'pan') {
+    if (view.fitMode && Math.hypot(p.x - st.x, p.y - st.y) < 4) return;
+    view.tx = st.tx + p.x - st.x; view.ty = st.ty + p.y - st.y;
+    view.fitMode = false;
+    requestDraw();
+  }
+});
+
+function endPointer(e) {
+  if (!gesture.pointers.has(e.pointerId)) return;
+  const p = stagePoint(e);
+  gesture.pointers.delete(e.pointerId);
+  if (gesture.toolDrag) {
+    if (gesture.pointers.size === 0) { gesture.toolDrag = false; if (app.tool && app.tool.pointerUp) app.tool.pointerUp(); }
+    return;
+  }
+  if (app.tool && app.tool.fixedView) return;
+  beginPinchOrPan();
+  if (gesture.pointers.size === 0 && e.type === 'pointerup') {
+    const now = performance.now();
+    if (now - gesture.lastTap < 300 && Math.hypot(p.x - gesture.lastTapX, p.y - gesture.lastTapY) < 30) {
+      // Double tap: toggle between fit and actual pixels.
+      if (view.fitMode) zoomAbout(p.x, p.y, 1 / view.dpr);
+      else { fitView(); requestDraw(); }
+      gesture.lastTap = 0;
+    } else { gesture.lastTap = now; gesture.lastTapX = p.x; gesture.lastTapY = p.y; }
+  }
+}
+view.canvas.addEventListener('pointerup', endPointer);
+view.canvas.addEventListener('pointercancel', endPointer);
+view.canvas.addEventListener('wheel', (e) => {
+  if (!app.edits || (app.tool && app.tool.fixedView)) return;
+  e.preventDefault();
+  const p = stagePoint(e);
+  zoomAbout(p.x, p.y, view.scale * Math.exp(-e.deltaY * 0.0015));
+}, { passive: false });
+view.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+/* ---------- Before / after hold buttons ---------- */
+
+for (const b of $$('[data-hold]')) {
+  const on = (e) => { e.preventDefault(); app.holding = true; b.dataset.active = 'true'; requestDraw(); };
+  const off = () => { if (!app.holding) return; app.holding = false; b.dataset.active = 'false'; requestDraw(); };
+  b.addEventListener('pointerdown', on);
+  b.addEventListener('pointerup', off);
+  b.addEventListener('pointercancel', off);
+  b.addEventListener('pointerleave', off);
+  b.addEventListener('contextmenu', (e) => e.preventDefault());
+  b.addEventListener('keydown', (e) => { if (e.key === ' ' || e.key === 'Enter') on(e); });
+  b.addEventListener('keyup', off);
+}
+
+/* ---------- History: apply an operation, undo, redo ---------- */
+
+// Run an operation on the current image and push the result as a new step.
+async function commit(label, produce) {
+  busy(true);
+  try {
+    await nextFrame();
+    const out = await produce(app.edits.current);
+    const bmp = (typeof ImageBitmap !== 'undefined' && out instanceof ImageBitmap) ? out : await createImageBitmap(out);
+    if (bmp !== out) core.release(out);
+    app.edits.push(bmp, label);
+    afterHistoryChange();
+  } catch (err) {
+    notify('That step failed: ' + (err && err.message ? err.message : err), 'fail', { sticky: true });
+    throw err;
+  } finally { busy(false); }
+}
+
+function afterHistoryChange() {
+  const e = app.edits;
+  $('#btn-undo').disabled = !e || !e.canUndo;
+  $('#btn-redo').disabled = !e || !e.canRedo;
+  $('#btn-export').disabled = !e;
+  for (const b of $$('[data-open-tool]')) b.disabled = !e;
+  $('#hold-main').hidden = !e || !!app.tool;
+  $('#empty').hidden = !!e;
+  if (e) {
+    const c = e.current;
+    $('#dims').textContent = fmtDims(c.width, c.height);
+  } else $('#dims').textContent = '';
+  view.fitMode = true;
+  fitView();
+  requestDraw();
+}
+
+function undo() { if (app.tool || !app.edits || !app.edits.canUndo) return; app.edits.undo(); afterHistoryChange(); }
+function redo() { if (app.tool || !app.edits || !app.edits.canRedo) return; app.edits.redo(); afterHistoryChange(); }
+$('#btn-undo').addEventListener('click', undo);
+$('#btn-redo').addEventListener('click', redo);
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
+  e.preventDefault();
+  if (e.shiftKey) redo(); else undo();
+});
+
+/* ---------- Opening a photo ---------- */
+
+const RAW_EXT = /\.(dng|cr2|cr3|nef|arw|orf|rw2|raf|srw|pef|raw)$/i;
+
+async function openFile(file) {
+  if (!file) return false;
+  if (app.tool) closeTool();
+  if (RAW_EXT.test(file.name || '')) {
+    notify('RAW files are not supported. Open a JPEG, PNG, WebP or AVIF instead.', 'fail', { sticky: true, id: 'open' });
+    return false;
+  }
+  busy(true);
+  try {
+    await nextFrame();
+    let bmp;
+    try {
+      // 'from-image' applies the EXIF rotation now, before the metadata is dropped.
+      bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch (err) {
+      const what = /hei[cf]$/i.test(file.name || '') || /hei[cf]/i.test(file.type || '') ? 'This HEIC photo' : 'This file';
+      notify(what + ' could not be opened: Chrome on this phone cannot decode it. Save it as JPEG and try again.', 'fail', { sticky: true, id: 'open' });
+      return false;
+    }
+    const fit = core.fitWithin(bmp.width, bmp.height, MAX_WORKING_PIXELS);
+    if (fit.scaled) {
+      const small = await createImageBitmap(bmp, { resizeWidth: fit.w, resizeHeight: fit.h, resizeQuality: 'high' });
+      notify('Scaled down from ' + fmtDims(bmp.width, bmp.height) + ' (' + fmtMP(bmp.width, bmp.height) + ') to ' +
+        fmtDims(fit.w, fit.h) + ', the ' + (MAX_WORKING_PIXELS / 1e6).toFixed(1) + ' MP working limit.', 'info', { sticky: true, id: 'downscale' });
+      bmp.close();
+      bmp = small;
+    } else {
+      const old = document.querySelector('.notice[data-id="downscale"]'); if (old) old.remove();
+    }
+    const oldOpen = document.querySelector('.notice[data-id="open"]'); if (oldOpen) oldOpen.remove();
+    if (app.edits) app.edits.dispose();
+    app.edits = new EditHistory(bmp, HISTORY_DEPTH);
+    app.fileName = file.name || 'photo';
+    afterHistoryChange();
+    return true;
+  } finally { busy(false); }
+}
+
+$('#file').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (f) openFile(f);
+});
+const pickFile = () => $('#file').click();
+$('#btn-open').addEventListener('click', pickFile);
+$('#btn-open-empty').addEventListener('click', pickFile);
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const f = e.dataTransfer && e.dataTransfer.files[0];
+  if (f) openFile(f);
+});
+
+// A photo shared from another app arrives through the service worker,
+// which parks it in a cache and opens retouch.html?shared=1.
+async function receiveShared() {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('shared')) return;
+  window.history.replaceState(null, '', location.pathname);
+  if (q.get('shared') !== '1' || !('caches' in window)) {
+    notify('The shared photo did not arrive. Open it from the Open button instead.', 'fail', { sticky: true });
+    return;
+  }
+  const cache = await caches.open(SHARE_CACHE);
+  const key = new URL(SHARE_KEY, location.href).href;
+  const res = await cache.match(key);
+  await cache.delete(key);
+  if (!res) { notify('The shared photo did not arrive. Open it from the Open button instead.', 'fail', { sticky: true }); return; }
+  const blob = await res.blob();
+  const name = decodeURIComponent(res.headers.get('x-filename') || 'shared');
+  await openFile(new File([blob], name, { type: blob.type }));
+}
+
+/* ---------- Tools: shared sheet handling ---------- */
+
+const tools = {};
+
+function openTool(id) {
+  if (!app.edits || app.busyCount > 0) return;
+  if (app.tool) closeTool();
+  const t = tools[id];
+  app.tool = t;
+  app.preview = null;
+  $('#toolbar').hidden = true;
+  $('#sheet').hidden = false;
+  for (const p of $$('.sheet-panel')) p.hidden = p.dataset.tool !== id;
+  const panel = $('.sheet-panel[data-tool="' + id + '"]');
+  $('[data-entry]', panel).textContent = entryCode();
+  $('#hold-main').hidden = true;
+  t.open();
+  viewResize();                     // the stage just got shorter; lay out before the first touch
+}
+
+function closeTool() {
+  if (!app.tool) return;
+  if (app.tool.close) app.tool.close();
+  app.tool = null;
+  if (app.preview && app.preview.src) core.release(app.preview.src);
+  app.preview = null;
+  app.holding = false;
+  $('#sheet').hidden = true;
+  $('#toolbar').hidden = false;
+  $('#hold-main').hidden = !app.edits;
+  view.fitMode = true;
+  viewResize();
+}
+
+for (const b of $$('[data-open-tool]')) b.addEventListener('click', () => openTool(b.dataset.openTool));
+for (const b of $$('[data-cancel]')) b.addEventListener('click', closeTool);
+for (const b of $$('[data-apply]')) b.addEventListener('click', async () => {
+  const t = app.tool;
+  if (!t || app.busyCount > 0) return;
+  try { await t.apply(); } catch (e) { return; }
+  closeTool();
+});
+
+function setPressed(buttons, isOn) { for (const b of buttons) b.setAttribute('aria-pressed', isOn(b) ? 'true' : 'false'); }
+
+function ratioChips(container, ids, onPick) {
+  container.textContent = '';
+  for (const r of RATIOS.filter((x) => ids.includes(x.id))) {
+    const b = document.createElement('button');
+    b.className = 'chip' + (r.label.match(/^[A-Z]/) ? ' word' : '');
+    b.textContent = r.label;
+    b.dataset.ratio = r.id;
+    b.setAttribute('aria-pressed', 'false');
+    b.addEventListener('click', () => onPick(r.id));
+    container.append(b);
+  }
+}
+
+/* ---------- Tool: crop and straighten ---------- */
+
+tools.crop = {
+  fixedView: true,
+  s: null,
+  open() {
+    this.s = { quarter: 0, flipH: false, flipV: false, theta: 0, ratio: 'free', user: null, drag: null };
+    ratioChips($('#crop-ratios'), RATIOS.map((r) => r.id), (id) => { this.setRatio(id); });
+    this.resetRect();
+    this.sync();
+  },
+  src() { return app.edits.current; },
+  base() { const s = this.src(); return core.baseDims(s.width, s.height, this.s.quarter); },
+  ratio() {
+    const r = RATIOS.find((x) => x.id === this.s.ratio).r;
+    if (r === 'orig') { const b = this.base(); return b.w / b.h; }
+    return r;
+  },
+  margin() { return this.s.theta ? CROP_ROTATE_MARGIN : 0; },
+  resetRect() { const b = this.base(); this.s.user = core.cropMaxRect(b.w, b.h, 0, this.ratio(), 0); },
+  rect() { const b = this.base(); return core.cropFitRect(this.s.user, b.w, b.h, this.s.theta, this.margin()); },
+  params() {
+    return { quarter: this.s.quarter, flipH: this.s.flipH, flipV: this.s.flipV, theta: this.s.theta, rect: this.rect() };
+  },
+  setRatio(id) { this.s.ratio = id; this.resetRect(); this.sync(); },
+  setStraighten(deg) { this.s.theta = deg * Math.PI / 180; this.sync(); },
+  rotate() { this.s.quarter = (this.s.quarter + 1) % 4; this.resetRect(); this.sync(); },
+  flip(axis) {
+    if (axis === 'h') { this.s.flipH = !this.s.flipH; this.s.user = { ...this.s.user, cx: -this.s.user.cx }; }
+    else { this.s.flipV = !this.s.flipV; this.s.user = { ...this.s.user, cy: -this.s.user.cy }; }
+    this.s.theta = -this.s.theta;                                  // keep a levelled horizon level
+    this.sync();
+  },
+  reset() { this.s.quarter = 0; this.s.flipH = this.s.flipV = false; this.s.theta = 0; this.s.ratio = 'free'; this.resetRect(); this.sync(); },
+  changed() {
+    const s = this.s, b = this.base(), r = this.rect();
+    return s.quarter !== 0 || s.flipH || s.flipV || s.theta !== 0 || Math.abs(r.w - b.w) > 0.5 || Math.abs(r.h - b.h) > 0.5;
+  },
+  sync() {
+    setPressed($$('#crop-ratios .chip'), (b) => b.dataset.ratio === this.s.ratio);
+    const deg = this.s.theta * 180 / Math.PI;
+    $('#crop-straighten').value = deg.toFixed(1);
+    $('#crop-angle').textContent = (deg > 0 ? '+' : '') + deg.toFixed(1) + '°';
+    const src = this.src();
+    const o = core.cropOutputDims(src.width, src.height, this.params());
+    $('#crop-out').textContent = 'Result ' + fmtDims(o.w, o.h) + ' px';
+    requestDraw();
+  },
+  // Screen layout: the base image is fitted in the stage with room for the handles.
+  layout() {
+    const b = this.base(), M = 28;
+    const k = Math.min((view.cssW - 2 * M) / b.w, (view.cssH - 2 * M) / b.h);
+    return { k, cx: view.cssW / 2, cy: view.cssH / 2 };
+  },
+  toScreen(p, L) { return { x: L.cx + p.x * L.k, y: L.cy + p.y * L.k }; },
+  toFrame(p, L) { return { x: (p.x - L.cx) / L.k, y: (p.y - L.cy) / L.k }; },
+  draw(ctx) {
+    const L = this.layout(), src = this.src(), s = this.s, b = this.base();
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    ctx.save();
+    ctx.translate(L.cx, L.cy);
+    ctx.scale(L.k, L.k);
+    ctx.rotate(s.theta);
+    ctx.scale(s.flipH ? -1 : 1, s.flipV ? -1 : 1);
+    const q = core.QUARTER[s.quarter];
+    ctx.transform(q[0], q[1], q[2], q[3], 0, 0);
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, -src.width / 2, -src.height / 2);
+    ctx.restore();
+    // Shade the photo outside the crop.
+    const r = this.rect();
+    const tl = this.toScreen({ x: r.cx - r.w / 2, y: r.cy - r.h / 2 }, L);
+    const rw = r.w * L.k, rh = r.h * L.k;
+    const c = Math.cos(s.theta), sn = Math.sin(s.theta);
+    ctx.beginPath();
+    [[-1, -1], [1, -1], [1, 1], [-1, 1]].forEach(([sx, sy], i) => {
+      const x = sx * b.w / 2, y = sy * b.h / 2;
+      const p = this.toScreen({ x: c * x - sn * y, y: sn * x + c * y }, L);
+      if (i) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y);
+    });
+    ctx.closePath();
+    ctx.rect(tl.x, tl.y, rw, rh);
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fill('evenodd');
+    // Frame, thirds, corner handles.
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tl.x + 0.5, tl.y + 0.5, rw - 1, rh - 1);
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+    ctx.beginPath();
+    for (let i = 1; i < 3; i++) {
+      ctx.moveTo(tl.x + rw * i / 3, tl.y); ctx.lineTo(tl.x + rw * i / 3, tl.y + rh);
+      ctx.moveTo(tl.x, tl.y + rh * i / 3); ctx.lineTo(tl.x + rw, tl.y + rh * i / 3);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 3;
+    const H = Math.min(18, rw / 3, rh / 3);
+    ctx.beginPath();
+    for (const [x, y, dx, dy] of [[tl.x, tl.y, 1, 1], [tl.x + rw, tl.y, -1, 1], [tl.x + rw, tl.y + rh, -1, -1], [tl.x, tl.y + rh, 1, -1]]) {
+      ctx.moveTo(x + dx * H, y); ctx.lineTo(x, y); ctx.lineTo(x, y + dy * H);
+    }
+    ctx.stroke();
+  },
+  pointerDown(p) {
+    const L = this.layout(), r = this.rect();
+    const left = L.cx + (r.cx - r.w / 2) * L.k, right = L.cx + (r.cx + r.w / 2) * L.k;
+    const top = L.cy + (r.cy - r.h / 2) * L.k, bottom = L.cy + (r.cy + r.h / 2) * L.k;
+    const HIT = 28;
+    let best = null, bestD = HIT;
+    for (const [sx, sy, x, y] of [[-1, -1, left, top], [1, -1, right, top], [1, 1, right, bottom], [-1, 1, left, bottom]]) {
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d < bestD) { bestD = d; best = { kind: 'corner', sx, sy }; }
+    }
+    if (!best && !this.ratio()) {
+      const inY = p.y > top && p.y < bottom, inX = p.x > left && p.x < right;
+      if (inY && Math.abs(p.x - left) < 22) best = { kind: 'edge', side: 'l' };
+      else if (inY && Math.abs(p.x - right) < 22) best = { kind: 'edge', side: 'r' };
+      else if (inX && Math.abs(p.y - top) < 22) best = { kind: 'edge', side: 't' };
+      else if (inX && Math.abs(p.y - bottom) < 22) best = { kind: 'edge', side: 'b' };
+    }
+    if (!best && p.x > left && p.x < right && p.y > top && p.y < bottom) best = { kind: 'move' };
+    if (!best) return false;
+    this.s.drag = { ...best, r0: r, p0: this.toFrame(p, L) };
+    return true;
+  },
+  pointerMove(p) {
+    const d = this.s.drag; if (!d) return;
+    const L = this.layout();
+    const P = this.toFrame(p, L);
+    this.s.user = this.dragRect(d, P, L.k);
+    this.sync();
+  },
+  pointerUp() { this.s.drag = null; requestDraw(); },
+  // Work out the new crop for a drag to frame point P. Stays valid at all times.
+  dragRect(d, P, k) {
+    const b = this.base(), th = this.s.theta, m = this.margin(), R = this.ratio(), r0 = d.r0;
+    const valid = (r) => core.cropIsValid(r, b.w, b.h, th, m);
+    const minS = Math.min(Math.max(16, 48 / k), b.w / 2, b.h / 2);
+    const search = (ok) => { let lo = 0, hi = 1; for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (ok(mid)) lo = mid; else hi = mid; } return lo; };
+    const lerp = (a, z, t) => a + (z - a) * t;
+    if (d.kind === 'move') {
+      return core.cropClampCenter({ ...r0, cx: r0.cx + P.x - d.p0.x, cy: r0.cy + P.y - d.p0.y }, b.w, b.h, th, m);
+    }
+    if (d.kind === 'edge') {
+      let l = r0.cx - r0.w / 2, rr = r0.cx + r0.w / 2, t = r0.cy - r0.h / 2, bt = r0.cy + r0.h / 2;
+      const make = (v) => {
+        let L2 = l, R2 = rr, T2 = t, B2 = bt;
+        if (d.side === 'l') L2 = Math.min(v, rr - minS);
+        if (d.side === 'r') R2 = Math.max(v, l + minS);
+        if (d.side === 't') T2 = Math.min(v, bt - minS);
+        if (d.side === 'b') B2 = Math.max(v, t + minS);
+        return { cx: (L2 + R2) / 2, cy: (T2 + B2) / 2, w: R2 - L2, h: B2 - T2 };
+      };
+      const from = { l, r: rr, t, b: bt }[d.side], to = (d.side === 'l' || d.side === 'r') ? P.x : P.y;
+      const target = make(to);
+      if (valid(target)) return target;
+      return make(lerp(from, to, search((u) => valid(make(lerp(from, to, u))))));
+    }
+    // Corner: the opposite corner F stays put.
+    const F = { x: r0.cx - d.sx * r0.w / 2, y: r0.cy - d.sy * r0.h / 2 };
+    const C0 = { x: r0.cx + d.sx * r0.w / 2, y: r0.cy + d.sy * r0.h / 2 };
+    const make = (Q) => {
+      let w = Math.max(minS, d.sx * (Q.x - F.x)), h = Math.max(minS, d.sy * (Q.y - F.y));
+      if (R) { if (w / h > R) h = w / R; else w = h * R; }
+      return { cx: F.x + d.sx * w / 2, cy: F.y + d.sy * h / 2, w, h };
+    };
+    const target = make(P);
+    if (valid(target)) return target;
+    const at = (t) => ({ x: lerp(C0.x, P.x, t), y: lerp(C0.y, P.y, t) });
+    let Q = at(search((t) => valid(make(at(t)))));
+    if (!R) {                                                         // free ratio: slide along each edge
+      const tx = search((t) => valid(make({ x: lerp(Q.x, P.x, t), y: Q.y })));
+      Q = { x: lerp(Q.x, P.x, tx), y: Q.y };
+      const ty = search((t) => valid(make({ x: Q.x, y: lerp(Q.y, P.y, t) })));
+      Q = { x: Q.x, y: lerp(Q.y, P.y, ty) };
+    }
+    return make(Q);
+  },
+  async apply() {
+    if (!this.changed()) return;
+    const p = this.params();
+    await commit('Crop', (src) => core.renderCrop(src, p));
+  },
+};
+
+$('#crop-straighten').addEventListener('input', (e) => tools.crop.setStraighten(parseFloat(e.target.value)));
+$('#crop-straighten').addEventListener('dblclick', () => tools.crop.setStraighten(0));
+$('#crop-rotate').addEventListener('click', () => tools.crop.rotate());
+$('#crop-flip-h').addEventListener('click', () => tools.crop.flip('h'));
+$('#crop-flip-v').addEventListener('click', () => tools.crop.flip('v'));
+$('#crop-reset').addEventListener('click', () => tools.crop.reset());
+
+/* ---------- Tool: resize ---------- */
+
+tools.resize = {
+  s: null,
+  open() {
+    const c = app.edits.current;
+    const long = Math.max(c.width, c.height);
+    const maxL = Math.min(core.maxLongEdge(c.width, c.height, MAX_WORKING_PIXELS), long * 4);
+    const slider = $('#resize-slider');
+    slider.min = String(Math.min(64, long)); slider.max = String(maxL);
+    $('#resize-long').max = String(maxL);
+    this.s = { mode: 'long', value: long, maxL };
+    this.sync();
+  },
+  dims() { const c = app.edits.current; return core.resizeDims(c.width, c.height, this.s.mode, this.s.value); },
+  setLong(v) {
+    const c = app.edits.current;
+    v = Math.round(v);
+    if (!(v > 0)) return;
+    this.s.mode = 'long';
+    this.s.value = Math.min(this.s.maxL, Math.max(16, v));
+    this.sync();
+  },
+  setInstagram() {
+    const c = app.edits.current;
+    const d = core.resizeDims(c.width, c.height, 'width', 1080);
+    if (d.w * d.h > MAX_WORKING_PIXELS) { notify('1080 wide would pass the working-size limit for this shape.', 'watch'); return; }
+    this.s.mode = 'width'; this.s.value = 1080; this.sync();
+  },
+  sync() {
+    const c = app.edits.current, d = this.dims();
+    const long = Math.max(d.w, d.h);
+    $('#resize-slider').value = String(long);
+    if (document.activeElement !== $('#resize-long')) $('#resize-long').value = String(long);
+    $('#resize-from').textContent = fmtDims(c.width, c.height);
+    $('#resize-to').textContent = fmtDims(d.w, d.h);
+    $('#resize-ig').setAttribute('aria-pressed', this.s.mode === 'width' ? 'true' : 'false');
+    setPressed($$('[data-long]'), (b) => this.s.mode === 'long' && +b.dataset.long === this.s.value);
+    const up = d.w > c.width;
+    $('#resize-note').textContent = up ? 'Upscaling makes the file bigger but adds no detail.' : '';
+  },
+  async apply() {
+    const c = app.edits.current, d = this.dims();
+    if (d.w === c.width && d.h === c.height) return;
+    await commit('Resize', (src) => core.renderResize(src, d.w, d.h));
+  },
+};
+$('#resize-slider').addEventListener('input', (e) => tools.resize.setLong(+e.target.value));
+$('#resize-long').addEventListener('change', (e) => tools.resize.setLong(+e.target.value));
+$('#resize-long').addEventListener('input', (e) => { if (+e.target.value >= 16) tools.resize.setLong(+e.target.value); });
+$('#resize-ig').addEventListener('click', () => tools.resize.setInstagram());
+for (const b of $$('[data-long]')) b.addEventListener('click', () => tools.resize.setLong(+b.dataset.long));
+
+/* ---------- Tool: add canvas ---------- */
+
+tools.pad = {
+  s: null,
+  open() {
+    if (!this.s) this.s = { ratio: '4:5', marginPct: 0, fill: 'colour', colour: '#FFFFFF', blur: 0.5 };
+    this.s.px = 0.5; this.s.py = 0.5;
+    ratioChips($('#pad-ratios'), ['original', '1:1', '4:5', '1.91:1', '9:16', '3:4'], (id) => { this.s.ratio = id; this.sync(); });
+    this.sync();
+  },
+  close() { this.s.drag = null; },
+  options() {
+    const c = app.edits.current;
+    const r = RATIOS.find((x) => x.id === this.s.ratio).r;
+    const R = r === 'orig' ? c.width / c.height : r;
+    const margin = Math.round(this.s.marginPct / 100 * Math.max(c.width, c.height));
+    const { W, H } = core.padDims(c.width, c.height, R, margin);
+    const { x, y } = core.padOffset(W, H, c.width, c.height, this.s.px, this.s.py);
+    // A big frame around a 12.5 MP photo would pass the working-size ceiling; scale the result to fit.
+    const k = core.padScale(W, H, MAX_WORKING_PIXELS);
+    return { W, H, x, y, fill: this.s.fill, colour: this.s.colour, blur: this.s.blur, k };
+  },
+  sync() {
+    const s = this.s;
+    setPressed($$('#pad-ratios .chip'), (b) => b.dataset.ratio === s.ratio);
+    setPressed($$('[data-fill]'), (b) => b.dataset.fill === s.fill);
+    setPressed($$('[data-colour]'), (b) => b.dataset.colour.toLowerCase() === s.colour.toLowerCase());
+    $('#pad-colour').value = s.colour.toLowerCase();
+    $('#pad-colour-row').hidden = s.fill !== 'colour';
+    $('#pad-blur-row').hidden = s.fill !== 'blur';
+    $('#pad-margin').value = String(s.marginPct);
+    $('#pad-margin-out').textContent = s.marginPct + ' %';
+    $('#pad-blur').value = String(Math.round(s.blur * 100));
+    $('#pad-blur-out').textContent = String(Math.round(s.blur * 100));
+    const o = this.options();
+    $('#pad-out').textContent = 'Result ' + fmtDims(Math.round(o.W * o.k), Math.round(o.H * o.k)) + ' px' +
+      (o.k < 1 ? ', scaled to the ' + (MAX_WORKING_PIXELS / 1e6).toFixed(1) + ' MP limit' : '');
+    this.renderPreview();
+  },
+  renderPreview() {
+    const o = this.options();
+    const maxSide = Math.max(view.cssW, view.cssH) * view.dpr;
+    const k = Math.min(1, Math.max(256, maxSide) / Math.max(o.W, o.H));
+    const old = app.preview;
+    app.preview = { src: core.renderPad(app.edits.current, o, k), w: o.W, h: o.H };
+    if (old && old.src) core.release(old.src);
+    if (old && (old.w !== o.W || old.h !== o.H)) view.fitMode = true;
+    if (view.fitMode) fitView();
+    requestDraw();
+  },
+  pointerDown(p) {
+    const o = this.options();
+    if (o.W === app.edits.current.width && o.H === app.edits.current.height) return false;
+    this.s.drag = { p0: p, px: this.s.px, py: this.s.py, o };
+    return true;
+  },
+  pointerMove(p) {
+    const d = this.s.drag; if (!d) return;
+    const c = app.edits.current;
+    const freeX = d.o.W - c.width, freeY = d.o.H - c.height;
+    if (freeX > 0) this.s.px = Math.min(1, Math.max(0, d.px + (p.x - d.p0.x) / view.scale / freeX));
+    if (freeY > 0) this.s.py = Math.min(1, Math.max(0, d.py + (p.y - d.p0.y) / view.scale / freeY));
+    this.sync();
+  },
+  pointerUp() { this.s.drag = null; },
+  async apply() {
+    const o = this.options(), c = app.edits.current;
+    if (o.W === c.width && o.H === c.height) return;
+    await commit('Add canvas', (src) => core.renderPad(src, o, o.k));
+  },
+};
+$('#pad-margin').addEventListener('input', (e) => { tools.pad.s.marginPct = +e.target.value; tools.pad.sync(); });
+$('#pad-blur').addEventListener('input', (e) => { tools.pad.s.blur = +e.target.value / 100; tools.pad.sync(); });
+$('#pad-colour').addEventListener('input', (e) => { tools.pad.s.colour = e.target.value.toUpperCase(); tools.pad.sync(); });
+for (const b of $$('[data-fill]')) b.addEventListener('click', () => { tools.pad.s.fill = b.dataset.fill; tools.pad.sync(); });
+for (const b of $$('[data-colour]')) b.addEventListener('click', () => { tools.pad.s.colour = b.dataset.colour; tools.pad.sync(); });
+$('#pad-centre').addEventListener('click', () => { tools.pad.s.px = 0.5; tools.pad.s.py = 0.5; tools.pad.sync(); });
+
+/* ---------- Export ---------- */
+
+const FORMATS = { jpeg: { mime: 'image/jpeg', ext: 'jpg', label: 'JPEG' }, png: { mime: 'image/png', ext: 'png', label: 'PNG' }, webp: { mime: 'image/webp', ext: 'webp', label: 'WebP' } };
+
+// Encode, strip metadata, then check the bytes again. Returns { file, bytes, found }.
+async function encodeImage(src, format, quality, name) {
+  const f = FORMATS[format];
+  const c = core.makeCanvas(src.width, src.height);
+  c.getContext('2d').drawImage(src, 0, 0);
+  const blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Encoding failed'))), f.mime, quality));
+  core.release(c);
+  if (blob.type !== f.mime) throw new Error(f.label + ' encoding is not available in this browser');
+  const raw = new Uint8Array(await blob.arrayBuffer());
+  const bytes = core.meta.strip(raw);
+  const found = core.meta.find(bytes);
+  if (found.length) throw new Error('Metadata survived stripping: ' + found.join(', '));
+  return { file: new File([bytes], name + '.' + f.ext, { type: f.mime }), bytes, found };
+}
+
+function exportName() {
+  const d = new Date();
+  return 'retouch-' + pad2(d.getFullYear() % 100) + pad2(d.getMonth() + 1) + pad2(d.getDate()) + '-' + pad2(d.getHours()) + pad2(d.getMinutes());
+}
+
+tools.export = {
+  s: { format: 'jpeg', quality: 92 },
+  open() {
+    this.s.result = null;
+    this.s.alpha = core.hasTransparency(app.edits.current);
+    if (this.s.alpha) this.s.format = 'png';
+    else if (this.s.format === 'png' && this.s.forced) this.s.format = 'jpeg';
+    this.s.forced = this.s.alpha;
+    $('#export-alpha-note').hidden = !this.s.alpha;
+    for (const b of $$('[data-format]')) b.disabled = this.s.alpha && b.dataset.format !== 'png';
+    $('#export-share').hidden = !navigator.share;
+    this.sync();
+  },
+  sync() {
+    setPressed($$('[data-format]'), (b) => b.dataset.format === this.s.format);
+    $('#export-quality-row').hidden = this.s.format === 'png';
+    $('#export-quality').value = String(this.s.quality);
+    $('#export-quality-out').textContent = String(this.s.quality);
+    const c = app.edits.current;
+    $('#export-dims').textContent = fmtDims(c.width, c.height);
+    this.encode();
+  },
+  async encode() {
+    const ticket = (this.ticket = (this.ticket || 0) + 1);
+    $('#export-download').disabled = true; $('#export-share').disabled = true;
+    $('#export-size').textContent = 'encoding';
+    $('#export-meta').textContent = '';
+    this.s.result = null;
+    this.s.pending = (async () => {
+      await nextFrame();
+      if (ticket !== this.ticket || app.tool !== this) return null;
+      try {
+        const r = await encodeImage(app.edits.current, this.s.format, this.s.quality / 100, exportName());
+        if (ticket !== this.ticket) return null;
+        this.s.result = r;
+        $('#export-size').textContent = fmtBytes(r.file.size);
+        $('#export-meta').innerHTML = '<span class="status-pass">Pass</span> none found';
+        $('#export-download').disabled = false; $('#export-share').disabled = false;
+        return r;
+      } catch (err) {
+        $('#export-size').textContent = '';
+        $('#export-meta').innerHTML = '<span class="status-fail">Fail</span> ';
+        $('#export-meta').append(document.createTextNode(err.message));
+        return null;
+      }
+    })();
+    return this.s.pending;
+  },
+  confirm(r, how) {
+    const c = app.edits.current;
+    notify(how + ' ' + r.file.name + ', ' + fmtDims(c.width, c.height) + ', ' + fmtBytes(r.file.size) +
+      '. Metadata stripped: no EXIF, XMP, IPTC, GPS or text chunks.', 'pass', { id: 'export', timeout: 8000 });
+  },
+  download() {
+    const r = this.s.result; if (!r) return;
+    const url = URL.createObjectURL(r.file);
+    const a = document.createElement('a');
+    a.href = url; a.download = r.file.name;
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    this.confirm(r, 'Saved');
+  },
+  async share() {
+    const r = this.s.result; if (!r) return;
+    const data = { files: [r.file] };
+    if (!navigator.canShare || !navigator.canShare(data)) {
+      notify('This browser cannot share files. Use Download instead.', 'watch');
+      return;
+    }
+    try {
+      await navigator.share(data);
+      this.confirm(r, 'Shared');
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      notify('Sharing failed: ' + err.message, 'fail');
+    }
+  },
+};
+for (const b of $$('[data-format]')) b.addEventListener('click', () => { tools.export.s.format = b.dataset.format; tools.export.sync(); });
+$('#export-quality').addEventListener('change', (e) => { tools.export.s.quality = +e.target.value; tools.export.sync(); });
+$('#export-quality').addEventListener('input', (e) => { $('#export-quality-out').textContent = e.target.value; });
+$('#export-download').addEventListener('click', () => tools.export.download());
+$('#export-share').addEventListener('click', () => tools.export.share());
+$('#btn-export').addEventListener('click', () => openTool('export'));
+
+/* ---------- Service worker: offline, share target, update prompt ---------- */
+
+let updateRequested = false;
+function showUpdate(reg) {
+  notify('Update available. Export first if you want to keep this edit.', 'info', {
+    sticky: true, id: 'update',
+    action: { label: 'Reload', fn: () => {
+      updateRequested = true;
+      if (reg.waiting) reg.waiting.postMessage('skip-waiting'); else location.reload();
+    } },
+  });
+}
+
+function startServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    const watch = (w) => {
+      if (!w) return;
+      w.addEventListener('statechange', () => {
+        if (w.state === 'installed' && navigator.serviceWorker.controller) showUpdate(reg);
+      });
+    };
+    if (reg.waiting && navigator.serviceWorker.controller) showUpdate(reg);
+    watch(reg.installing);
+    reg.addEventListener('updatefound', () => watch(reg.installing));
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') reg.update().catch(() => {});
+    });
+  }).catch(() => {});
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (updateRequested) { updateRequested = false; location.reload(); }
+  });
+}
+
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  $('#btn-install').hidden = false;
+});
+$('#btn-install').addEventListener('click', async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  await installPrompt.userChoice.catch(() => {});
+  installPrompt = null;
+  $('#btn-install').hidden = true;
+});
+
+/* ---------- Start ---------- */
+
+$('#empty-code').textContent = 'RT-000 · ' + stamp();
+$('#version').textContent = 'v' + APP_VERSION + ' · working limit ' + (MAX_WORKING_PIXELS / 1e6).toFixed(1) + ' MP';
+new ResizeObserver(() => viewResize()).observe($('#stage'));
+viewResize();
+afterHistoryChange();
+startServiceWorker();
+receiveShared().catch((err) => notify('The shared photo could not be opened: ' + err.message, 'fail', { sticky: true }));
+
+// Handles for the test suites. Read-only use; the app does not depend on it.
+window.retouch = {
+  APP_VERSION, MAX_WORKING_PIXELS, HISTORY_DEPTH, CROP_ROTATE_MARGIN, RATIOS,
+  core, app, view, tools, openFile, openTool, closeTool, commit, encodeImage, undo, redo,
+  readPixels(src, x = 0, y = 0, w = src.width, h = src.height) {
+    const c = core.makeCanvas(src.width, src.height);
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(src, 0, 0);
+    const d = Array.from(ctx.getImageData(x, y, w, h).data);
+    core.release(c);
+    return d;
+  },
+};
+</script>
+</body>
+</html>
