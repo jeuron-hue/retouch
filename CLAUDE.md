@@ -12,7 +12,7 @@ retouch is Gary's personal photo editor for his Pixel 9 Pro XL, installed as a P
 
 ## Architecture
 - Vanilla JS and CSS. No framework, no build step, no bundler, no server.
-- retouch.html holds the whole app. Allowed extra files, and only these: manifest.webmanifest, sw.js, icons/, vendor/ (MediaPipe wasm and model, fonts). This is the minimum a PWA needs; do not split the app logic into more files.
+- retouch.html holds the whole app. Allowed extra files, and only these: manifest.webmanifest, sw.js, icons/, vendor/ (MediaPipe wasm and model, fonts), and index.html as a no-script redirect stub so jeuron-hue.github.io/retouch/ opens the app. This is the minimum a PWA needs; do not split the app logic into more files. Test tooling (package.json pinning Playwright, the three test files) sits beside it; retouch_checks.cjs enforces the allowed set.
 - sw.js caches the app shell and vendor/ on install so retouch works offline.
 - Manifest share_target: retouch must appear in Android's share sheet, so Gary can share a photo from Google Photos straight in. Handle it in the service worker.
 - Output goes out two ways: navigator.share with the file (straight to Instagram) and a plain download.
