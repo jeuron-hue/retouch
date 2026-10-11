@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.1.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.2.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -10,8 +10,16 @@ change the version here in the same commit as the file.
   vendor/fonts/source-sans-3-latin-600-normal.woff2    @fontsource/source-sans-3 5.3.0 (font v19), SIL OFL 1.1
   vendor/fonts/jetbrains-mono-latin-400-normal.woff2   @fontsource/jetbrains-mono 5.3.0 (font v24), SIL OFL 1.1
   vendor/fonts/jetbrains-mono-latin-500-normal.woff2   @fontsource/jetbrains-mono 5.3.0 (font v24), SIL OFL 1.1
+  vendor/fonts/playfair-display-latin-700-normal.woff2 @fontsource/playfair-display 5.3.0 (font v40), SIL OFL 1.1
+  vendor/fonts/bebas-neue-latin-400-normal.woff2       @fontsource/bebas-neue 5.3.0 (font v16), SIL OFL 1.1
+  vendor/fonts/caveat-latin-600-normal.woff2           @fontsource/caveat 5.3.0 (font v23), SIL OFL 1.1
   vendor/fonts/OFL-source-sans-3.txt                   licence text from @fontsource/source-sans-3 5.3.0
   vendor/fonts/OFL-jetbrains-mono.txt                  licence text from @fontsource/jetbrains-mono 5.3.0
+  vendor/fonts/OFL-playfair-display.txt                licence text from @fontsource/playfair-display 5.3.0
+  vendor/fonts/OFL-bebas-neue.txt                      licence text from @fontsource/bebas-neue 5.3.0
+  vendor/fonts/OFL-caveat.txt                          licence text from @fontsource/caveat 5.3.0
+  Text tool fonts: Source Sans 3 600 (shared with the UI), Playfair Display 700,
+  Bebas Neue 400, Caveat 600. Latin subset only.
 
 How the file is laid out:
   1. Content-Security-Policy: the browser itself refuses any network call to
@@ -21,7 +29,8 @@ How the file is laid out:
   4. Script:
      a. Constants (working-size ceiling, history depth, ratios).
      b. CORE: pure image functions (geometry, crop, resize, add canvas,
-        metadata strip, edit history). Tests and the mutation runner target this block.
+        text layout and drawing, metadata strip, edit history). Tests and the
+        mutation runner target this block.
      c. App: view (zoom, pan), tools, open, export, service worker.
 -->
 <html lang="en">
@@ -40,6 +49,9 @@ How the file is laid out:
 @font-face{font-family:"Source Sans 3";font-style:normal;font-weight:600;font-display:swap;src:url(vendor/fonts/source-sans-3-latin-600-normal.woff2) format("woff2")}
 @font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:400;font-display:swap;src:url(vendor/fonts/jetbrains-mono-latin-400-normal.woff2) format("woff2")}
 @font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:500;font-display:swap;src:url(vendor/fonts/jetbrains-mono-latin-500-normal.woff2) format("woff2")}
+@font-face{font-family:"Playfair Display";font-style:normal;font-weight:700;font-display:swap;src:url(vendor/fonts/playfair-display-latin-700-normal.woff2) format("woff2")}
+@font-face{font-family:"Bebas Neue";font-style:normal;font-weight:400;font-display:swap;src:url(vendor/fonts/bebas-neue-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"Caveat";font-style:normal;font-weight:600;font-display:swap;src:url(vendor/fonts/caveat-latin-600-normal.woff2) format("woff2")}
 
 :root{
   --paper:#F7F8F6; --paper-raised:#FFFFFF; --line:#DDE3E6; --line-strong:#7A8A94;
@@ -157,6 +169,18 @@ table.lb{width:100%;border-collapse:collapse;font-size:13px;margin:var(--space-2
 table.lb td{padding:var(--space-2);border-bottom:1px solid var(--line)}
 table.lb td.num{text-align:right;font-family:var(--font-mono);font-variant-ligatures:none;font-variant-numeric:tabular-nums;font-size:13.5px}
 .status-pass{color:var(--pass);font-weight:600} .status-fail{color:var(--fail);font-weight:600}
+
+/* Text sheet */
+textarea{flex:1;min-width:0;min-height:var(--tap);max-height:88px;resize:none;border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink);font:16px/22px var(--font-sans);padding:10px var(--space-2);user-select:text;-webkit-user-select:text}
+fieldset{border:0;margin:0;padding:0;min-width:0}
+fieldset:disabled{opacity:.4}
+.chip.font-sans{font-family:"Source Sans 3",sans-serif;font-weight:600;font-size:16px}
+.chip.font-serif{font-family:"Playfair Display",serif;font-weight:700;font-size:16px}
+.chip.font-bebas{font-family:"Bebas Neue",sans-serif;font-size:19px;letter-spacing:.02em}
+.chip.font-hand{font-family:"Caveat",cursive;font-weight:600;font-size:20px}
+.divider{flex:0 0 1px;align-self:stretch;background:var(--line)}
+.scroller .swatch,.scroller input[type=color]{flex:0 0 auto}
+.sheet-panel.typing .text-more{display:none}
 </style>
 </head>
 <body>
@@ -276,6 +300,54 @@ table.lb td.num{text-align:right;font-family:var(--font-mono);font-variant-ligat
     <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
   </div>
 
+  <div class="sheet-panel" data-tool="text" hidden>
+    <div class="sheet-head">
+      <div class="grow"><div class="entry-code" data-entry></div><h2>Text</h2></div>
+      <button class="btn hold" data-hold>Hold: before</button>
+    </div>
+    <div class="row">
+      <textarea id="text-input" rows="1" aria-label="Text" placeholder="Type here" spellcheck="true"></textarea>
+      <button class="btn" id="text-add">Add</button>
+      <button class="icon-btn" id="text-delete" aria-label="Delete text box" title="Delete text box">
+        <svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9 7V4.5h6V7"/><path d="M6.5 7l1 13h9l1-13"/></svg>
+      </button>
+    </div>
+    <fieldset class="text-more" id="text-style">
+      <div class="scroller" id="text-fonts" role="group" aria-label="Font"></div>
+      <div class="row">
+        <label for="text-size">Size</label>
+        <input type="range" id="text-size" min="8" max="400" step="1" value="40">
+        <span class="readout" id="text-size-out"></span>
+      </div>
+      <div class="row scroller" role="group" aria-label="Colour">
+        <button class="chip word" data-target="fill" aria-pressed="true">Text</button>
+        <button class="chip word" data-target="outline" aria-pressed="false">Outline</button>
+        <span class="divider"></span>
+        <button class="swatch" data-tcolour="#FFFFFF" style="background:#FFFFFF" aria-label="White" aria-pressed="false"></button>
+        <button class="swatch" data-tcolour="#000000" style="background:#000000" aria-label="Black" aria-pressed="false"></button>
+        <button class="swatch" data-tcolour="#F2C94C" style="background:#F2C94C" aria-label="Yellow" aria-pressed="false"></button>
+        <button class="swatch" data-tcolour="#E2556B" style="background:#E2556B" aria-label="Pink" aria-pressed="false"></button>
+        <button class="swatch" data-tcolour="#1F6F8B" style="background:#1F6F8B" aria-label="Teal" aria-pressed="false"></button>
+        <input type="color" id="text-colour" value="#ffffff" aria-label="Pick colour">
+      </div>
+      <div class="row">
+        <label for="text-outline">Outline</label>
+        <input type="range" id="text-outline" min="0" max="20" step="1" value="0">
+        <span class="readout" id="text-outline-out">Off</span>
+      </div>
+      <div class="row scroller" role="group" aria-label="Alignment and shadow">
+        <button class="chip word" data-align="left" aria-pressed="false">Left</button>
+        <button class="chip word" data-align="center" aria-pressed="true">Centre</button>
+        <button class="chip word" data-align="right" aria-pressed="false">Right</button>
+        <span class="divider"></span>
+        <button class="chip word" data-shadow="none" aria-pressed="false">No shadow</button>
+        <button class="chip word" data-shadow="soft" aria-pressed="true">Soft</button>
+        <button class="chip word" data-shadow="hard" aria-pressed="false">Hard</button>
+      </div>
+    </fieldset>
+    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
+  </div>
+
   <div class="sheet-panel" data-tool="export" hidden>
     <div class="sheet-head">
       <div class="grow"><div class="entry-code" data-entry></div><h2>Export</h2></div>
@@ -315,6 +387,9 @@ table.lb td.num{text-align:right;font-family:var(--font-mono);font-variant-ligat
   <button class="tool" data-open-tool="pad" disabled>
     <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1"/><rect x="7.5" y="8.5" width="9" height="7" rx="0.5"/></svg>Canvas
   </button>
+  <button class="tool" data-open-tool="text" disabled>
+    <svg viewBox="0 0 24 24"><path d="M5 6.5V4.5h14v2"/><path d="M12 4.5v15"/><path d="M9 19.5h6"/></svg>Text
+  </button>
 </nav>
 
 <input type="file" id="file" accept="image/*,.avif,.heic,.heif,.webp" hidden>
@@ -326,7 +401,7 @@ table.lb td.num{text-align:right;font-family:var(--font-mono);font-variant-ligat
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.2.0';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -353,6 +428,14 @@ const RATIOS = [
   { id: '1.91:1', label: '1.91:1', r: 1.91 },
   { id: '9:16', label: '9:16', r: 9 / 16 },
   { id: '3:4', label: '3:4', r: 3 / 4 },
+];
+
+// Text fonts. Each is a vendored woff2 declared in the @font-face rules above.
+const TEXT_FONTS = [
+  { id: 'sans', label: 'Sans', family: 'Source Sans 3', weight: 600 },
+  { id: 'serif', label: 'Serif', family: 'Playfair Display', weight: 700 },
+  { id: 'bebas', label: 'Bebas', family: 'Bebas Neue', weight: 400 },
+  { id: 'hand', label: 'Hand', family: 'Caveat', weight: 600 },
 ];
 
 /* ============================================================
@@ -455,20 +538,20 @@ core.cropOutputDims = (srcW, srcH, p) => {
   return { w: Math.max(1, Math.round(p.rect.w)), h: Math.max(1, Math.round(p.rect.h)) };
 };
 
+// The result's size W x H, and its centre (cx, cy) in the centred base frame.
+core.cropFrame = (SW, SH, p) => {
+  const b = core.baseDims(SW, SH, p.quarter);
+  if (!p.theta) {
+    const s = core.cropSnap(p.rect, b.w, b.h);
+    return { W: s.W, H: s.H, cx: s.L + s.W / 2 - b.w / 2, cy: s.T + s.H / 2 - b.h / 2 };
+  }
+  return { W: Math.max(1, Math.round(p.rect.w)), H: Math.max(1, Math.round(p.rect.h)), cx: p.rect.cx, cy: p.rect.cy };
+};
+
 // p = { quarter, flipH, flipV, theta, rect }. Returns a new canvas.
 core.renderCrop = (src, p) => {
   const SW = src.width, SH = src.height;
-  const b = core.baseDims(SW, SH, p.quarter);
-  let W, H, cx, cy;
-  if (!p.theta) {
-    const s = core.cropSnap(p.rect, b.w, b.h);
-    W = s.W; H = s.H;
-    cx = s.L + W / 2 - b.w / 2;
-    cy = s.T + H / 2 - b.h / 2;
-  } else {
-    W = Math.max(1, Math.round(p.rect.w)); H = Math.max(1, Math.round(p.rect.h));
-    cx = p.rect.cx; cy = p.rect.cy;
-  }
+  const { W, H, cx, cy } = core.cropFrame(SW, SH, p);
   const out = core.makeCanvas(W, H);
   const ctx = out.getContext('2d');
   ctx.imageSmoothingEnabled = true;
@@ -579,6 +662,164 @@ core.hasTransparency = (src) => {
     return false;
   } finally { core.release(c); }
 };
+
+/* Text. A text box is a small plain object, kept apart from the pixels until export:
+     { id, text, font, size, colour, align, outline, outlineColour, shadow, x, y, rotation }
+   x, y is the centre of the box in image pixels, size is the font size in image
+   pixels, rotation is in radians (clockwise, like the canvas). outline is the
+   outline thickness as a fraction of the font size (0 is off). shadow is
+   'none', 'soft' or 'hard'. Lines are split on newlines. */
+
+core.TEXT_LINE = 1.2;                                                   // line height, times the font size
+core.TEXT_SHADOWS = {
+  soft: { offset: 0.04, blur: 0.12, colour: 'rgba(0,0,0,0.55)' },      // offset and blur in font sizes
+  hard: { offset: 0.06, blur: 0, colour: 'rgba(0,0,0,0.8)' },
+};
+
+core.textFont = (box) => {
+  const f = TEXT_FONTS.find((x) => x.id === box.font) || TEXT_FONTS[0];
+  return f.weight + ' ' + box.size + 'px "' + f.family + '"';
+};
+
+core.scratch = () => (core.scratchCtx = core.scratchCtx || core.makeCanvas(1, 1).getContext('2d'));
+
+// Size of the box in image pixels: the widest line by the number of lines.
+core.textMeasure = (box, ctx = core.scratch()) => {
+  ctx.font = core.textFont(box);
+  const lines = String(box.text).split('\n');
+  const lh = box.size * core.TEXT_LINE;
+  const w = Math.max(box.size * 0.5, ...lines.map((l) => ctx.measureText(l).width));
+  return { lines, lh, w, h: lines.length * lh };
+};
+
+// Turn an angle into the range -pi to pi.
+core.textAngle = (a) => {
+  const t = 2 * Math.PI;
+  a = ((a % t) + t) % t;
+  return a > Math.PI ? a - t : a;
+};
+
+// Image point to the box's own frame (origin at its centre, x along the lines), and back.
+core.textToLocal = (box, px, py) => {
+  const c = Math.cos(box.rotation), s = Math.sin(box.rotation);
+  const dx = px - box.x, dy = py - box.y;
+  return { x: c * dx + s * dy, y: -s * dx + c * dy };
+};
+core.textToImage = (box, lx, ly) => {
+  const c = Math.cos(box.rotation), s = Math.sin(box.rotation);
+  return { x: box.x + c * lx - s * ly, y: box.y + s * lx + c * ly };
+};
+
+// Is the image point inside the box (m from textMeasure), with some slack around it?
+core.textHit = (box, m, px, py, slack = 0) => {
+  const p = core.textToLocal(box, px, py);
+  return Math.abs(p.x) <= m.w / 2 + slack && Math.abs(p.y) <= m.h / 2 + slack;
+};
+
+// The id of the top box under a point (later boxes sit on top), or null.
+core.textPick = (texts, px, py, slack = 0) => {
+  for (let i = texts.length - 1; i >= 0; i--) {
+    if (core.textHit(texts[i], core.textMeasure(texts[i]), px, py, slack)) return texts[i].id;
+  }
+  return null;
+};
+
+// Two fingers moved from a0, b0 to a1, b1. Move, scale and turn the box the same
+// way, as if it were pinned to both fingers. Also used for the one-finger
+// handle, with both "a" points at the box centre.
+core.textPinch = (box, a0, b0, a1, b1) => {
+  const ux = b0.x - a0.x, uy = b0.y - a0.y, vx = b1.x - a1.x, vy = b1.y - a1.y;
+  const k = Math.hypot(vx, vy) / (Math.hypot(ux, uy) || 1);
+  const turn = Math.atan2(vy, vx) - Math.atan2(uy, ux);
+  const c = Math.cos(turn), s = Math.sin(turn);
+  const rx = box.x - a0.x, ry = box.y - a0.y;
+  return { ...box, x: a1.x + k * (c * rx - s * ry), y: a1.y + k * (s * rx + c * ry),
+    size: box.size * k, rotation: core.textAngle(box.rotation + turn) };
+};
+
+// Draw one box on a context whose transform maps image pixels to the target
+// (identity for an export, the zoom and pan for the screen). The shadow is set
+// in target pixels, so it is scaled here by the same zoom, and always falls
+// down and to the right in the image whichever way the box is turned.
+core.drawText = (ctx, box) => {
+  const t0 = ctx.getTransform();
+  const zoom = Math.sqrt(Math.abs(t0.a * t0.d - t0.b * t0.c));
+  ctx.save();
+  const m = core.textMeasure(box, ctx);
+  ctx.translate(box.x, box.y);
+  ctx.rotate(box.rotation);
+  ctx.textAlign = box.align;
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  const ax = box.align === 'left' ? -m.w / 2 : box.align === 'right' ? m.w / 2 : 0;
+  const ys = m.lines.map((l, i) => -m.h / 2 + m.lh * (i + 0.5));
+  const outline = box.outline * box.size * 2;                           // the stroke is centred on the edge
+  const paint = () => {
+    if (outline > 0) {
+      ctx.lineWidth = outline;
+      ctx.strokeStyle = box.outlineColour;
+      m.lines.forEach((l, i) => ctx.strokeText(l, ax, ys[i]));
+    }
+    ctx.fillStyle = box.colour;
+    m.lines.forEach((l, i) => ctx.fillText(l, ax, ys[i]));
+  };
+  const sh = core.TEXT_SHADOWS[box.shadow];
+  if (sh) {
+    // First pass casts the shadow; the second paints the letters cleanly on top of it.
+    const d = sh.offset * box.size;
+    ctx.shadowColor = sh.colour;
+    ctx.shadowBlur = sh.blur * box.size * zoom;
+    ctx.shadowOffsetX = (t0.a + t0.c) * d;
+    ctx.shadowOffsetY = (t0.b + t0.d) * d;
+    paint();
+    ctx.shadowColor = 'rgba(0,0,0,0)';
+  }
+  paint();
+  ctx.restore();
+};
+
+core.drawTexts = (ctx, texts) => { for (const b of texts) core.drawText(ctx, b); };
+
+// The image with its text drawn in, at full size: what an export encodes.
+core.renderTexts = (src, texts) => {
+  const out = core.makeCanvas(src.width, src.height);
+  const ctx = out.getContext('2d');
+  ctx.drawImage(src, 0, 0);
+  core.drawTexts(ctx, texts);
+  return out;
+};
+
+/* Text through a pixel step. Each box is carried by the same geometry as the
+   pixels under its centre, so it stays on the same spot of the photo at the
+   same relative size. Flips move a box but never mirror its letters. */
+
+core.textsAfterCrop = (texts, SW, SH, p) => {
+  const f = core.cropFrame(SW, SH, p);
+  const q = core.QUARTER[((p.quarter % 4) + 4) % 4];
+  const fx = p.flipH ? -1 : 1, fy = p.flipV ? -1 : 1;
+  const c = Math.cos(p.theta), s = Math.sin(p.theta);
+  const quarterTurn = (((p.quarter % 4) + 4) % 4) * Math.PI / 2;
+  const mirror = fx !== fy;
+  return texts.map((b) => {
+    const x0 = b.x - SW / 2, y0 = b.y - SH / 2;
+    const x1 = fx * (q[0] * x0 + q[2] * y0), y1 = fy * (q[1] * x0 + q[3] * y0);
+    const turn = mirror ? p.theta - quarterTurn - b.rotation
+      : p.theta + quarterTurn + b.rotation + (p.flipH && p.flipV ? Math.PI : 0);
+    return { ...b, x: c * x1 - s * y1 + f.W / 2 - f.cx, y: s * x1 + c * y1 + f.H / 2 - f.cy, rotation: core.textAngle(turn) };
+  });
+};
+
+core.textsAfterResize = (texts, w, h, W, H) => texts.map((b) => ({
+  ...b, x: b.x * W / w, y: b.y * H / h, size: b.size * (W / w + H / h) / 2,
+}));
+
+// o and k as for renderPad.
+core.textsAfterPad = (texts, o, k = 1) => texts.map((b) => ({
+  ...b, x: (b.x + o.x) * k, y: (b.y + o.y) * k, size: b.size * k,
+}));
+
+// Boxes whose centre is still on the image. The rest were cut away.
+core.textsInside = (texts, W, H) => texts.filter((b) => b.x >= 0 && b.x <= W && b.y >= 0 && b.y <= H);
 
 /* Metadata. Encoders in Chrome do not normally write EXIF, but exports are
    still parsed byte by byte, anything that is not image data is removed, and
@@ -751,25 +992,26 @@ core.meta.exifHasGps = (t) => {
 };
 
 /* Edit history. stack[0] is the original and is never released. Each pixel
-   operation pushes a new bitmap. Past HISTORY_DEPTH steps the oldest edit
-   (never the original) is dropped. */
+   operation pushes a new bitmap. Each step also carries the text boxes as they
+   stood after it; a text-only step reuses the bitmap of the step before it, so
+   it costs no image memory. Past HISTORY_DEPTH steps the oldest edit (never the
+   original) is dropped. A bitmap is released only when no step still uses it. */
 class EditHistory {
   constructor(original, depth) {
     this.depth = depth;
-    this.stack = [{ bmp: original, label: 'Original', time: Date.now() }];
+    this.stack = [{ bmp: original, texts: [], label: 'Original', time: Date.now() }];
     this.index = 0;
   }
   get current() { return this.stack[this.index].bmp; }
+  get texts() { return this.stack[this.index].texts; }
   get original() { return this.stack[0].bmp; }
   get canUndo() { return this.index > 0; }
   get canRedo() { return this.index < this.stack.length - 1; }
-  push(bmp, label) {
-    for (const e of this.stack.splice(this.index + 1)) core.release(e.bmp);
-    this.stack.push({ bmp, label, time: Date.now() });
-    while (this.stack.length > this.depth + 1) {
-      const [old] = this.stack.splice(1, 1);
-      core.release(old.bmp);
-    }
+  push(bmp, label, texts = this.texts) {
+    const gone = this.stack.splice(this.index + 1);
+    this.stack.push({ bmp, texts, label, time: Date.now() });
+    while (this.stack.length > this.depth + 1) gone.push(...this.stack.splice(1, 1));
+    for (const e of gone) if (!this.stack.some((k) => k.bmp === e.bmp)) core.release(e.bmp);
     this.index = this.stack.length - 1;
   }
   undo() { if (this.canUndo) this.index--; return this.current; }
@@ -790,7 +1032,7 @@ const app = {
   edits: null,         // EditHistory once a photo is open
   fileName: '',
   tool: null,          // the open tool, or null
-  preview: null,       // { src, w, h } a tool's live preview, drawn instead of the current image
+  preview: null,       // { src, w, h, texts } a tool's live preview, drawn instead of the current image
   holding: false,      // the before / after button is held down
   busyCount: 0,
 };
@@ -887,16 +1129,21 @@ function fitView() {
   view.fitMode = true;
 }
 
-// What the stage shows right now: { src, w, h, which }.
+// What the stage shows right now: { src, w, h, texts, which }.
+// Holding "before" inside a tool shows the image as it was when the tool
+// opened; on the main view (and in Export, "Hold: original") it shows the original.
 function displayed() {
-  if (!app.edits) return null;
+  const e = app.edits;
+  if (!e) return null;
   if (app.holding) {
-    const src = app.tool ? app.edits.current : app.edits.original;
-    return { src, w: src.width, h: src.height, which: 'before' };
+    const orig = !app.tool || app.tool.holdOriginal;
+    const src = orig ? e.original : e.current;
+    return { src, w: src.width, h: src.height, texts: orig ? e.stack[0].texts : e.texts, which: 'before' };
   }
   if (app.preview) return { ...app.preview, which: 'after' };
-  const src = app.edits.current;
-  return { src, w: src.width, h: src.height, which: 'after' };
+  const src = e.current;
+  const texts = app.tool && app.tool.liveTexts ? app.tool.liveTexts() : e.texts;
+  return { src, w: src.width, h: src.height, texts, which: 'after' };
 }
 
 function requestDraw() {
@@ -939,6 +1186,17 @@ function draw() {
   ctx.imageSmoothingEnabled = s * view.dpr < 2;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(d.src, tx, ty, d.w * s, d.h * s);
+  if (d.texts && d.texts.length) {
+    // Text is drawn live from its boxes, clipped to the photo just as the export is.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(tx, ty, d.w * s, d.h * s);
+    ctx.clip();
+    ctx.setTransform(view.dpr * s, 0, 0, view.dpr * s, view.dpr * tx, view.dpr * ty);
+    core.drawTexts(ctx, d.texts);
+    ctx.restore();
+  }
+  if (app.tool && app.tool.overlay && !app.holding) app.tool.overlay(ctx, s, tx, ty);
 }
 
 /* ---------- Gestures on the stage: pinch to zoom, drag to pan, double tap ---------- */
@@ -977,6 +1235,7 @@ view.canvas.addEventListener('pointerdown', (e) => {
   try { view.canvas.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
   const p = stagePoint(e);
   gesture.pointers.set(e.pointerId, p);
+  if (app.tool && app.tool.touch) { if (!app.holding) app.tool.touch('down', gesture.pointers); return; }
   if (gesture.pointers.size === 1 && app.tool && app.tool.pointerDown && !app.holding) {
     gesture.toolDrag = app.tool.pointerDown(p) === true;
     if (gesture.toolDrag) return;
@@ -993,6 +1252,7 @@ view.canvas.addEventListener('pointermove', (e) => {
   if (!gesture.pointers.has(e.pointerId)) return;
   const p = stagePoint(e);
   gesture.pointers.set(e.pointerId, p);
+  if (app.tool && app.tool.touch) { if (!app.holding) app.tool.touch('move', gesture.pointers); return; }
   if (gesture.toolDrag) { app.tool.pointerMove(p); return; }
   if (app.tool && app.tool.fixedView) return;
   const st = gesture.start;
@@ -1020,6 +1280,7 @@ function endPointer(e) {
   if (!gesture.pointers.has(e.pointerId)) return;
   const p = stagePoint(e);
   gesture.pointers.delete(e.pointerId);
+  if (app.tool && app.tool.touch) { app.tool.touch('up', gesture.pointers); return; }
   if (gesture.toolDrag) {
     if (gesture.pointers.size === 0) { gesture.toolDrag = false; if (app.tool && app.tool.pointerUp) app.tool.pointerUp(); }
     return;
@@ -1063,14 +1324,20 @@ for (const b of $$('[data-hold]')) {
 /* ---------- History: apply an operation, undo, redo ---------- */
 
 // Run an operation on the current image and push the result as a new step.
-async function commit(label, produce) {
+// moveTexts carries the text boxes through the same geometry (see core.textsAfterCrop);
+// boxes whose centre falls off the new image are dropped from this step.
+async function commit(label, produce, moveTexts = null) {
   busy(true);
   try {
     await nextFrame();
     const out = await produce(app.edits.current);
     const bmp = (typeof ImageBitmap !== 'undefined' && out instanceof ImageBitmap) ? out : await createImageBitmap(out);
     if (bmp !== out) core.release(out);
-    app.edits.push(bmp, label);
+    const moved = moveTexts ? moveTexts(app.edits.texts) : app.edits.texts;
+    const kept = core.textsInside(moved, bmp.width, bmp.height);
+    app.edits.push(bmp, label, kept);
+    const lost = moved.length - kept.length;
+    if (lost) notify(lost + (lost > 1 ? ' text boxes were' : ' text box was') + ' outside the new frame and removed. Undo brings ' + (lost > 1 ? 'them' : 'it') + ' back.', 'watch', { id: 'text-lost' });
     afterHistoryChange();
   } catch (err) {
     notify('That step failed: ' + (err && err.message ? err.message : err), 'fail', { sticky: true });
@@ -1095,12 +1362,19 @@ function afterHistoryChange() {
   requestDraw();
 }
 
+// A text-only step: same pixels, new text boxes.
+function commitTexts(label, texts) {
+  app.edits.push(app.edits.current, label, texts);
+  afterHistoryChange();
+}
+
 function undo() { if (app.tool || !app.edits || !app.edits.canUndo) return; app.edits.undo(); afterHistoryChange(); }
 function redo() { if (app.tool || !app.edits || !app.edits.canRedo) return; app.edits.redo(); afterHistoryChange(); }
 $('#btn-undo').addEventListener('click', undo);
 $('#btn-redo').addEventListener('click', redo);
 document.addEventListener('keydown', (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
+  if (e.target && e.target.closest && e.target.closest('textarea, input')) return;   // the text field's own undo
   e.preventDefault();
   if (e.shiftKey) redo(); else undo();
 });
@@ -1309,8 +1583,18 @@ tools.crop = {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(src, -src.width / 2, -src.height / 2);
     ctx.restore();
-    // Shade the photo outside the crop.
     const r = this.rect();
+    // Text boxes, already carried into the cropped frame so their letters read the right way.
+    const texts = app.edits.texts;
+    if (texts.length) {
+      const p = this.params(), f = core.cropFrame(src.width, src.height, p);
+      const o = this.toScreen({ x: f.cx - f.W / 2, y: f.cy - f.H / 2 }, L);
+      ctx.save();
+      ctx.setTransform(view.dpr * L.k, 0, 0, view.dpr * L.k, view.dpr * o.x, view.dpr * o.y);
+      core.drawTexts(ctx, core.textsAfterCrop(texts, src.width, src.height, p));
+      ctx.restore();
+    }
+    // Shade the photo outside the crop.
     const tl = this.toScreen({ x: r.cx - r.w / 2, y: r.cy - r.h / 2 }, L);
     const rw = r.w * L.k, rh = r.h * L.k;
     const c = Math.cos(s.theta), sn = Math.sin(s.theta);
@@ -1422,7 +1706,8 @@ tools.crop = {
   async apply() {
     if (!this.changed()) return;
     const p = this.params();
-    await commit('Crop', (src) => core.renderCrop(src, p));
+    const src = this.src();
+    await commit('Crop', (img) => core.renderCrop(img, p), (texts) => core.textsAfterCrop(texts, src.width, src.height, p));
   },
 };
 
@@ -1477,7 +1762,7 @@ tools.resize = {
   async apply() {
     const c = app.edits.current, d = this.dims();
     if (d.w === c.width && d.h === c.height) return;
-    await commit('Resize', (src) => core.renderResize(src, d.w, d.h));
+    await commit('Resize', (src) => core.renderResize(src, d.w, d.h), (texts) => core.textsAfterResize(texts, c.width, c.height, d.w, d.h));
   },
 };
 $('#resize-slider').addEventListener('input', (e) => tools.resize.setLong(+e.target.value));
@@ -1530,7 +1815,7 @@ tools.pad = {
     const maxSide = Math.max(view.cssW, view.cssH) * view.dpr;
     const k = Math.min(1, Math.max(256, maxSide) / Math.max(o.W, o.H));
     const old = app.preview;
-    app.preview = { src: core.renderPad(app.edits.current, o, k), w: o.W, h: o.H };
+    app.preview = { src: core.renderPad(app.edits.current, o, k), w: o.W, h: o.H, texts: core.textsAfterPad(app.edits.texts, o, 1) };
     if (old && old.src) core.release(old.src);
     if (old && (old.w !== o.W || old.h !== o.H)) view.fitMode = true;
     if (view.fitMode) fitView();
@@ -1554,7 +1839,7 @@ tools.pad = {
   async apply() {
     const o = this.options(), c = app.edits.current;
     if (o.W === c.width && o.H === c.height) return;
-    await commit('Add canvas', (src) => core.renderPad(src, o, o.k));
+    await commit('Add canvas', (src) => core.renderPad(src, o, o.k), (texts) => core.textsAfterPad(texts, o, o.k));
   },
 };
 $('#pad-margin').addEventListener('input', (e) => { tools.pad.s.marginPct = +e.target.value; tools.pad.sync(); });
@@ -1564,15 +1849,196 @@ for (const b of $$('[data-fill]')) b.addEventListener('click', () => { tools.pad
 for (const b of $$('[data-colour]')) b.addEventListener('click', () => { tools.pad.s.colour = b.dataset.colour; tools.pad.sync(); });
 $('#pad-centre').addEventListener('click', () => { tools.pad.s.px = 0.5; tools.pad.s.py = 0.5; tools.pad.sync(); });
 
+/* ---------- Tool: text ---------- */
+
+// The text fonts load from vendor/ (or the offline cache). Canvas text needs
+// them loaded before it draws, or it falls back to another font.
+let fontsLoading = null;
+function fontsReady() {
+  if (!fontsLoading) {
+    fontsLoading = Promise.all(TEXT_FONTS.map((f) => document.fonts.load(f.weight + ' 40px "' + f.family + '"')))
+      .catch(() => {}).then(() => requestDraw());
+  }
+  return fontsLoading;
+}
+
+tools.text = {
+  fixedView: true,
+  s: null,
+  open() {
+    const texts = app.edits.texts.map((b) => ({ ...b }));
+    this.s = { texts, sel: null, g: null, target: 'fill' };
+    if (texts.length) this.s.sel = texts[texts.length - 1].id;
+    else this.add();
+    view.fitMode = true;
+    fontsReady();
+    this.sync();
+    if (!this.hinted) {
+      this.hinted = true;
+      notify('Drag a box to move it. Pinch, or drag its round handle, to resize and turn it. Tap a box to edit it.', 'info', { id: 'text-hint' });
+    }
+  },
+  close() { this.s.g = null; this.typing(false); },
+  liveTexts() { return this.s.texts; },
+  box() { return this.s.texts.find((b) => b.id === this.s.sel) || null; },
+  replace(nb) { this.s.texts = this.s.texts.map((b) => (b.id === nb.id ? nb : b)); },
+  update(patch) {
+    const b = this.box(); if (!b) return;
+    this.replace({ ...b, ...patch });
+    this.sync();
+  },
+  add() {
+    const c = app.edits.current, prev = this.box();
+    const id = this.s.texts.reduce((m, b) => Math.max(m, b.id), 0) + 1;
+    const size = Math.max(12, Math.round(Math.min(c.width, c.height) * 0.08));
+    // A new box copies the style of the selected one, and sits a little below it.
+    const style = prev ? { font: prev.font, colour: prev.colour, align: prev.align, outline: prev.outline, outlineColour: prev.outlineColour, shadow: prev.shadow }
+      : { font: 'sans', colour: '#FFFFFF', align: 'center', outline: 0, outlineColour: '#000000', shadow: 'soft' };
+    const y = prev ? Math.min(c.height * 0.9, prev.y + prev.size * 1.6) : c.height / 2;
+    this.s.texts = [...this.s.texts, { id, text: 'Text', ...style, size, x: c.width / 2, y, rotation: 0 }];
+    this.s.sel = id;
+    this.sync();
+  },
+  remove() {
+    const b = this.box(); if (!b) return;
+    this.s.texts = this.s.texts.filter((x) => x.id !== b.id);
+    this.s.sel = this.s.texts.length ? this.s.texts[this.s.texts.length - 1].id : null;
+    this.sync();
+  },
+  maxSize() { const c = app.edits.current; return Math.max(64, Math.round(Math.min(c.width, c.height) / 2)); },
+  sync() {
+    const b = this.box();
+    $('#text-style').disabled = !b;
+    $('#text-delete').disabled = !b;
+    $('#text-input').disabled = !b;
+    if (b) {
+      if (document.activeElement !== $('#text-input')) $('#text-input').value = b.text;
+      $('#text-size').max = String(this.maxSize());
+      $('#text-size').value = String(Math.round(b.size));
+      $('#text-size-out').textContent = Math.round(b.size) + ' px';
+      $('#text-outline').value = String(Math.round(b.outline * 100));
+      $('#text-outline-out').textContent = b.outline ? Math.round(b.outline * 100) + ' %' : 'Off';
+      const col = this.s.target === 'outline' ? b.outlineColour : b.colour;
+      setPressed($$('#text-fonts .chip'), (x) => x.dataset.font === b.font);
+      setPressed($$('[data-target]'), (x) => x.dataset.target === this.s.target);
+      setPressed($$('[data-tcolour]'), (x) => x.dataset.tcolour.toLowerCase() === col.toLowerCase());
+      $('#text-colour').value = col.toLowerCase();
+      setPressed($$('[data-align]'), (x) => x.dataset.align === b.align);
+      setPressed($$('[data-shadow]'), (x) => x.dataset.shadow === b.shadow);
+    } else $('#text-input').value = '';
+    requestDraw();
+  },
+  setColour(hex) { this.update(this.s.target === 'outline' ? { outlineColour: hex, outline: this.box().outline || 0.06 } : { colour: hex }); },
+  // While the keyboard is up, hide the style rows so the photo stays in view.
+  typing(on) { $('.sheet-panel[data-tool="text"]').classList.toggle('typing', on); },
+  toImage(p) { return { x: (p.x - view.tx) / view.scale, y: (p.y - view.ty) / view.scale }; },
+  handlePoint(b) {
+    const m = core.textMeasure(b), pad = 10 / view.scale;
+    return core.textToImage(b, m.w / 2 + pad, m.h / 2 + pad);
+  },
+  // Selection frame and the round resize-and-turn handle, in screen pixels.
+  overlay(ctx, s, tx, ty) {
+    const b = this.box(); if (!b) return;
+    const m = core.textMeasure(b), pad = 10 / s;
+    ctx.save();
+    ctx.setTransform(view.dpr * s, 0, 0, view.dpr * s, view.dpr * tx, view.dpr * ty);
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.rotation);
+    const w = m.w + 2 * pad, h = m.h + 2 * pad;
+    for (const [colour, width] of [['rgba(0,0,0,0.6)', 3], ['#FFFFFF', 1.5]]) {
+      ctx.strokeStyle = colour; ctx.lineWidth = width / s;
+      ctx.setLineDash(colour === '#FFFFFF' ? [6 / s, 4 / s] : []);
+      ctx.strokeRect(-w / 2, -h / 2, w, h);
+    }
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(w / 2, h / 2, 9 / s, 0, 2 * Math.PI);
+    ctx.fillStyle = '#FFFFFF'; ctx.fill();
+    ctx.lineWidth = 2 / s; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.stroke();
+    ctx.restore();
+  },
+  // All fingers on the stage come here. One finger on a box drags it, on the
+  // handle resizes and turns it; two fingers pinch and turn the selected box.
+  // A tap on empty photo clears the selection.
+  touch(kind, pointers) {
+    const pts = Array.from(pointers.values()).map((p) => this.toImage(p));
+    const b = this.box(), g = this.s.g;
+    if (kind === 'down' && pts.length === 1) {
+      if (document.activeElement === $('#text-input')) $('#text-input').blur();
+      const h = b && this.handlePoint(b);
+      if (h && Math.hypot(pts[0].x - h.x, pts[0].y - h.y) * view.scale < 28) {
+        this.s.g = { kind: 'handle', box0: b, h0: pts[0] };
+      } else {
+        const id = core.textPick(this.s.texts, pts[0].x, pts[0].y, 12 / view.scale);
+        if (id !== null) { this.s.sel = id; this.s.g = { kind: 'move', box0: this.box(), p0: pts[0] }; this.sync(); }
+        else this.s.g = { kind: 'tap', p0: pts[0] };
+      }
+      return;
+    }
+    if (kind !== 'move') {                       // a finger went down or lifted: carry on from here
+      if (pts.length >= 2 && b) this.s.g = { kind: 'pinch', box0: b, a0: pts[0], b0: pts[1] };
+      else if (pts.length === 1 && b && g && g.kind !== 'tap') this.s.g = { kind: 'move', box0: b, p0: pts[0] };
+      else if (!pts.length) {
+        if (g && g.kind === 'tap') { this.s.sel = null; this.sync(); }
+        this.s.g = null;
+      }
+      return;
+    }
+    if (!g || !b) return;
+    let nb = null;
+    if (g.kind === 'move') nb = { ...b, x: g.box0.x + pts[0].x - g.p0.x, y: g.box0.y + pts[0].y - g.p0.y };
+    else if (g.kind === 'handle') nb = core.textPinch(g.box0, g.box0, g.h0, g.box0, pts[0]);
+    else if (g.kind === 'pinch' && pts.length >= 2) nb = core.textPinch(g.box0, g.a0, g.b0, pts[0], pts[1]);
+    else if (g.kind === 'tap' && Math.hypot(pts[0].x - g.p0.x, pts[0].y - g.p0.y) * view.scale > 8) this.s.g = { kind: 'none' };
+    if (!nb) return;
+    const c = app.edits.current;
+    nb.size = Math.min(Math.max(nb.size, 4), 4 * Math.max(c.width, c.height));
+    this.replace(nb);
+    this.sync();
+  },
+  async apply() {
+    const texts = this.s.texts.filter((b) => b.text.trim());
+    if (JSON.stringify(texts) === JSON.stringify(app.edits.texts)) return;
+    commitTexts('Text', texts);
+  },
+};
+
+(function textControls() {
+  const t = tools.text;
+  const fonts = $('#text-fonts');
+  for (const f of TEXT_FONTS) {
+    const b = document.createElement('button');
+    b.className = 'chip font-' + f.id;
+    b.textContent = f.label;
+    b.dataset.font = f.id;
+    b.setAttribute('aria-pressed', 'false');
+    b.addEventListener('click', () => t.update({ font: f.id }));
+    fonts.append(b);
+  }
+  const input = $('#text-input');
+  input.addEventListener('input', () => t.update({ text: input.value }));
+  input.addEventListener('focus', () => t.typing(true));
+  input.addEventListener('blur', () => { t.typing(false); viewResize(); });
+  $('#text-add').addEventListener('click', () => t.add());
+  $('#text-delete').addEventListener('click', () => t.remove());
+  $('#text-size').addEventListener('input', (e) => t.update({ size: +e.target.value }));
+  $('#text-outline').addEventListener('input', (e) => t.update({ outline: +e.target.value / 100 }));
+  $('#text-colour').addEventListener('input', (e) => t.setColour(e.target.value.toUpperCase()));
+  for (const b of $$('[data-target]')) b.addEventListener('click', () => { t.s.target = b.dataset.target; t.sync(); });
+  for (const b of $$('[data-tcolour]')) b.addEventListener('click', () => t.setColour(b.dataset.tcolour));
+  for (const b of $$('[data-align]')) b.addEventListener('click', () => t.update({ align: b.dataset.align }));
+  for (const b of $$('[data-shadow]')) b.addEventListener('click', () => t.update({ shadow: b.dataset.shadow }));
+})();
+
 /* ---------- Export ---------- */
 
 const FORMATS = { jpeg: { mime: 'image/jpeg', ext: 'jpg', label: 'JPEG' }, png: { mime: 'image/png', ext: 'png', label: 'PNG' }, webp: { mime: 'image/webp', ext: 'webp', label: 'WebP' } };
 
-// Encode, strip metadata, then check the bytes again. Returns { file, bytes, found }.
-async function encodeImage(src, format, quality, name) {
+// Draw the text in, encode, strip metadata, then check the bytes again. Returns { file, bytes, found }.
+async function encodeImage(src, format, quality, name, texts = []) {
   const f = FORMATS[format];
-  const c = core.makeCanvas(src.width, src.height);
-  c.getContext('2d').drawImage(src, 0, 0);
+  if (texts.length) await fontsReady();
+  const c = core.renderTexts(src, texts);
   const blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Encoding failed'))), f.mime, quality));
   core.release(c);
   if (blob.type !== f.mime) throw new Error(f.label + ' encoding is not available in this browser');
@@ -1589,6 +2055,7 @@ function exportName() {
 }
 
 tools.export = {
+  holdOriginal: true,
   s: { format: 'jpeg', quality: 92 },
   open() {
     this.s.result = null;
@@ -1620,7 +2087,7 @@ tools.export = {
       await nextFrame();
       if (ticket !== this.ticket || app.tool !== this) return null;
       try {
-        const r = await encodeImage(app.edits.current, this.s.format, this.s.quality / 100, exportName());
+        const r = await encodeImage(app.edits.current, this.s.format, this.s.quality / 100, exportName(), app.edits.texts);
         if (ticket !== this.ticket) return null;
         this.s.result = r;
         $('#export-size').textContent = fmtBytes(r.file.size);
@@ -1733,8 +2200,8 @@ receiveShared().catch((err) => notify('The shared photo could not be opened: ' +
 
 // Handles for the test suites. Read-only use; the app does not depend on it.
 window.retouch = {
-  APP_VERSION, MAX_WORKING_PIXELS, HISTORY_DEPTH, CROP_ROTATE_MARGIN, RATIOS,
-  core, app, view, tools, openFile, openTool, closeTool, commit, encodeImage, undo, redo,
+  APP_VERSION, MAX_WORKING_PIXELS, HISTORY_DEPTH, CROP_ROTATE_MARGIN, RATIOS, TEXT_FONTS,
+  core, app, view, tools, openFile, openTool, closeTool, commit, commitTexts, encodeImage, fontsReady, undo, redo, draw,
   readPixels(src, x = 0, y = 0, w = src.width, h = src.height) {
     const c = core.makeCanvas(src.width, src.height);
     const ctx = c.getContext('2d', { willReadFrequently: true });
