@@ -9,7 +9,7 @@
 # Each line below is: name ||| exact text in CORE ||| replacement.
 # The text must appear exactly once between "// CORE:BEGIN" and "// CORE:END".
 #
-# Run: bash retouch_mutate.sh          (about 10 to 15 minutes)
+# Run: bash retouch_mutate.sh          (about 40 minutes)
 #      JOBS=4 bash retouch_mutate.sh   (run four mutants at a time)
 
 set -u
@@ -155,6 +155,30 @@ cutout: mask not applied ||| fctx.globalCompositeOperation = 'source-in'; ||| fc
 cutout: backdrop skipped ||| core.drawBackdrop(ctx, src, W, H, o); ||| /* removed */
 cutout: blur backdrop is black ||| case 'blur': core.drawBlurCover(ctx, src, W, H, o.blur); break; ||| case 'blur': ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H); break;
 cutout: colour backdrop left out ||| case 'colour': ctx.fillStyle = o.colour; ctx.fillRect(0, 0, W, H); break; ||| case 'colour': break;
+skin: face size ignores the face ||| const share = faceShare >= core.SKIN_MIN_FACE ? faceShare : skinShare; ||| const share = skinShare;
+skin: face size floor off ||| return Math.max(Math.sqrt(share * W * H), 0.1 * Math.min(W, H)); ||| return Math.sqrt(share * W * H);
+skin: radius not scaled ||| r: Math.max(1, Math.round(core.SKIN_RADIUS * faceSize * k)), ||| r: Math.max(1, Math.round(core.SKIN_RADIUS * faceSize)),
+skin: grain radius from the window ||| g: Math.max(1, Math.round(core.SKIN_GRAIN * faceSize * k)), ||| g: Math.max(1, Math.round(core.SKIN_RADIUS * faceSize * k)),
+skin: window too small ||| core.SKIN_RADIUS = 0.024; ||| core.SKIN_RADIUS = 0.008;
+skin: eps too small ||| core.SKIN_EPS = 0.004; ||| core.SKIN_EPS = 0.0004;
+skin: eps too big ||| core.SKIN_EPS = 0.004; ||| core.SKIN_EPS = 0.04;
+skin: body skin left out ||| p[i] = Math.min(1, Math.max(0, body[i] + face[i])); ||| p[i] = Math.min(1, Math.max(0, face[i]));
+skin: filter keeps nothing ||| const v = m2[i] - mI[i] * mI[i], a = v / (v + eps); ||| const v = m2[i] - mI[i] * mI[i], a = 0;
+skin: filter variance wrong ||| const v = m2[i] - mI[i] * mI[i], a = v / (v + eps); ||| const v = m2[i], a = v / (v + eps);
+skin: filter b ignores a ||| m2[i] = a; mI[i] = mI[i] - a * mI[i]; ||| m2[i] = a;
+skin: filter a and b not smoothed ||| core.boxMean(m2, w, h, r); core.boxMean(mI, w, h, r); ||| /* removed */
+skin: filter output uses the mean ||| for (let i = 0; i < n; i++) out[i] = m2[i] * I[i] + mI[i]; ||| for (let i = 0; i < n; i++) out[i] = mI[i];
+skin: grain is the whole difference ||| for (let i = 0; i < n; i++) E[i] -= low[i]; ||| /* removed */
+skin: grain from the original, not the difference ||| for (let i = 0; i < n; i++) E[i] = I[i] - Sc[i]; ||| for (let i = 0; i < n; i++) E[i] = I[i];
+skin: green channel read as red ||| for (let i = 0; i < n; i++) I[i] = d[4 * i + c] / 255; ||| for (let i = 0; i < n; i++) I[i] = d[4 * i] / 255;
+skin: mix ignores alpha ||| const i = y * w + x, m = o.strength * (a ? a[(y + ay) * aW + x + ax] : 1); ||| const i = y * w + x, m = o.strength;
+skin: mix alpha offset dropped ||| const i = y * w + x, m = o.strength * (a ? a[(y + ay) * aW + x + ax] : 1); ||| const i = y * w + x, m = o.strength * (a ? a[y * aW + x] : 1);
+skin: texture ignored ||| d[4 * i + c] = (I + m * (f.S[c][i] + o.texture * f.D[c][i] - I)) * 255; ||| d[4 * i + c] = (I + m * (f.S[c][i] - I)) * 255;
+skin: strength ignored ||| d[4 * i + c] = (I + m * (f.S[c][i] + o.texture * f.D[c][i] - I)) * 255; ||| d[4 * i + c] = (f.S[c][i] + o.texture * f.D[c][i]) * 255;
+bounds: x end exclusive missed ||| return { x0: Math.max(0, x0 - m), y0: Math.max(0, y0 - m), x1: Math.min(W, x1 + 1 + m), ||| return { x0: Math.max(0, x0 - m), y0: Math.max(0, y0 - m), x1: Math.min(W, x1 + m),
+bounds: margin ignored ||| return { x0: Math.max(0, x0 - m), y0: ||| return { x0: Math.max(0, x0), y0:
+smooth: tile margin too small ||| const m = 2 * o.r + o.g, T = core.SKIN_TILE; ||| const m = o.r, T = core.SKIN_TILE;
+smooth: tiles written as they go ||| for (const { img, t, r } of done) ctx.putImageData(img, r.x0, r.y0, t.x0 - r.x0, t.y0 - r.y0, t.x1 - t.x0, t.y1 - t.y0); ||| for (const { img, t, r } of done) ctx.putImageData(img, r.x0, r.y0);
 EOF
 )
 

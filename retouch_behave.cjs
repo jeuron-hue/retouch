@@ -2065,6 +2065,11 @@ test('skin core: edge-preserving filter, grain, mix and tiles (independent check
     out.rampD = Math.max(...fr.D.map((p) => Math.max(...Array.from(p).map(Math.abs))));
     // Away from the frame (where the window is cut off), a straight ramp comes back unchanged.
     out.rampS = Math.max(...Array.from(fr.S[0]).map((v, i) => (i % w >= 4 && i % w < w - 4 ? Math.abs(v - ramp[4 * i] / 255) : 0)));
+    // At a hard edge the filter keeps (a tiny eps), the grain put back must be near zero,
+    // or the edge would be sharpened a second time.
+    const step = new Uint8ClampedArray(4 * n).map((_, i) => (i % 4 === 3 ? 255 : (Math.floor(i / 4) % w) < 8 ? 50 : 200));
+    const fs = core.skinFilter(step, w, h, { r: 2, g: 1, eps: 0.0004 });
+    out.stepD = Math.max(...fs.D.map((p) => Math.max(...Array.from(p).map(Math.abs))));
     // Mix: original + strength x alpha x (S + texture x D - original), per channel.
     const d = new Uint8ClampedArray([100, 150, 200, 255, 100, 150, 200, 255]);
     const f = { S: [new Float32Array([0.5, 0.5]), new Float32Array([0.5, 0.5]), new Float32Array([0.5, 0.5])], D: [new Float32Array([0.2, 0.2]), new Float32Array([0, 0]), new Float32Array([-0.2, -0.2])] };
@@ -2079,7 +2084,8 @@ test('skin core: edge-preserving filter, grain, mix and tiles (independent check
     // Full size in tiles equals one pass over the whole box; pixels outside the mask, and
     // everything at strength 0, are left exactly as they were.
     const { c } = window.__skinPatch(300, 220);
-    const a = new Float32Array(300 * 220).map((_, i) => ((i % 300) < 240 ? 1 : 0));
+    // Mask: kept up to x = 240, at full or 30 % strength in bands, so each tile reads its own part of it.
+    const a = new Float32Array(300 * 220).map((_, i) => ((i % 300) < 240 ? (Math.floor(i / 300) % 40 < 30 ? 1 : 0.3) : 0));
     const o = { strength: 1, texture: 0.35, r: 6, g: 2, eps: core.SKIN_EPS };
     const read = (cv) => cv.getContext('2d').getImageData(0, 0, 300, 220).data;
     core.SKIN_TILE = 4096; const whole = read(core.renderSmooth(c, a, 300, 220, o));
@@ -2092,6 +2098,10 @@ test('skin core: edge-preserving filter, grain, mix and tiles (independent check
     out.outside = outside; out.inside = inside;
     out.off = read(core.renderSmooth(c, a, 300, 220, { ...o, strength: 0 })).every((v, i) => v === orig[i]);
     out.empty = read(core.renderSmooth(c, new Float32Array(300 * 220), 300, 220, o)).every((v, i) => v === orig[i]);
+    // Smoothing moves pixels towards their neighbours, not to another colour: the mean of
+    // each channel over a flat patch of skin stays put.
+    const mean = (dd, k) => { let t = 0, m = 0; for (let y = 20; y < 80; y++) for (let x = 150; x < 230; x++) { t += dd[(y * 300 + x) * 4 + k]; m++; } return t / m; };
+    out.means = [0, 1, 2].map((k) => +(mean(tiled, k) - mean(orig, k)).toFixed(2));
     return out;
   });
   assert(r.sgErr < 1e-4, 'self-guided filter differs from the direct reading by ' + r.sgErr);
@@ -2107,6 +2117,8 @@ test('skin core: edge-preserving filter, grain, mix and tiles (independent check
   assert(r.tileDiff <= 1, 'tiles must join without a seam: differs by ' + r.tileDiff);
   assert(r.outside === 0 && r.inside > 5, 'only masked pixels change: outside ' + r.outside + ', inside ' + r.inside);
   assert(r.off && r.empty, 'strength 0 or an empty mask must change nothing');
+  assert(r.stepD < 0.02, 'grain put back at a kept edge: ' + r.stepD);
+  assert(r.means.every((v) => Math.abs(v) < 1.5), 'channel means moved: ' + r.means);
   await ctx.close();
 }, { core: true });
 
