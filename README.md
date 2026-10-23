@@ -9,7 +9,7 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 - Every edit runs in the browser on the phone. There is no server, no upload, no analytics.
 - The page carries a Content-Security-Policy that only lets it talk to its own site, so the browser itself blocks any attempt to send data elsewhere.
 - Fonts are stored in this repository (all under the SIL Open Font License; licence files sit beside them in vendor/fonts/). After the first visit the app works with no network at all.
-- Background removal runs Google's MediaPipe (version 0.10.35) and its selfie multiclass model on the phone, in WebAssembly. Both are stored in this repository (Apache License 2.0; the licence text is in vendor/mediapipe/). Newer MediaPipe releases (1.0 onwards) carry code that sends usage logs to Google, so retouch stays on 0.10.35, and a test fails if logging code ever appears in the vendored files.
+- Background removal and skin smoothing run Google's MediaPipe (version 0.10.35) and its selfie multiclass model on the phone, in WebAssembly. Both are stored in this repository (Apache License 2.0; the licence text is in vendor/mediapipe/). Newer MediaPipe releases (1.0 onwards) carry code that sends usage logs to Google, so retouch stays on 0.10.35, and a test fails if logging code ever appears in the vendored files.
 - The first visit downloads about 28 MB extra for the model and its runtime. App updates do not download it again; only a new MediaPipe version would.
 - Exports are re-encoded and stripped of EXIF, XMP, IPTC, GPS and text chunks, then checked again before they are saved or shared.
 
@@ -23,6 +23,7 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 - Text: as many text boxes as you like. Drag to move, pinch (or drag the round handle) to resize and turn. Four fonts (Source Sans 3, Playfair Display, Bebas Neue, Caveat), size, colour, alignment, outline and shadow. Text stays editable until export, including after undo and redo.
 - Text follows the photo through later crops, resizes and added canvas. A box that ends up outside a crop is removed, and undo brings it back.
 - Remove background (people): finds the person, snaps the cut to the photo's own edges, and puts them on transparency, a colour, or a blurred copy of the photo. Feather softens the edge. A Keep and Erase brush fixes what the model missed (hair, mostly); red shows what will be cut away. Two fingers zoom and move while brushing. Transparent results export as PNG.
+- Smooth skin: the same model finds face and body skin, and an edge-preserving filter evens out tone and small spots there while eyebrows, lashes and lip lines stay sharp. Strength sets how much; Texture puts the skin's fine grain back so it does not look plastic. An Add and Remove brush changes where it applies; blue shows the area. The filter is sized from the face, so a full-length photo is treated like a close-up.
 - Undo and redo (the last 10 steps; the original is always kept). Hold "before" to compare.
 - Export as JPEG, PNG or WebP. Share straight to another app (Instagram) or download. Anything with transparent areas exports as PNG.
 
@@ -31,7 +32,8 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 - Pixel photos are Ultra HDR JPEGs. Re-encoding drops the HDR gain map, so exports look slightly flatter on HDR screens than the original does.
 - Editing happens in the sRGB colour space.
 - Background removal is trained on people. Other subjects may not be found at all; the Keep brush can still paint them in. Fine hair against a busy background usually needs some brushing.
-- Finding the person takes a few seconds on the phone, longest the first time after opening the app, while the model loads.
+- Finding the person or the skin takes a few seconds on the phone, longest the first time after opening the app, while the model loads.
+- Skin smoothing evens out tone and small marks. Larger spots fade but do not vanish; the skin mask can include the eyes and lips, which the filter mostly leaves alone, and the Remove brush can take them out entirely.
 
 ## Tests
 
