@@ -1588,12 +1588,41 @@ core.EditHistory = EditHistory;
    through it (T is each pixel's distance from the edge along the way). Each new
    pixel is a weighted average of the known pixels within SPOT_EPS, each carried
    to the new pixel along its own colour slope: closer ones count more, as do ones
-   in line with the direction the front is moving, and ones at the same distance
-   from the edge. Then grain measured in a ring just outside the spot is added, so
-   the fill is not a smooth patch on textured skin. */
+   in line with the direction the front is moving. (Telea also favours pixels at
+   the same distance from the edge; on the test scenes that made fills slightly
+   worse, so it is left out.) Then grain measured in a ring just outside the spot
+   is added, so the fill is not a smooth patch on textured skin. */
 
 core.SPOT_EPS = 5;              // neighbourhood each filled pixel is averaged from, px
 core.SPOT_RING = 4;             // width of the ring outside the spot where grain is measured, px
+
+// A binary min-heap of pixel indices, keyed on a number when pushed.
+core.minHeap = () => {
+  const hi = [], hk = [];
+  return {
+    get size() { return hi.length; },
+    push(i, k) {
+      let c = hi.length; hi.push(i); hk.push(k);
+      while (c > 0) { const p = (c - 1) >> 1; if (hk[p] <= hk[c]) break; [hi[p], hi[c]] = [hi[c], hi[p]]; [hk[p], hk[c]] = [hk[c], hk[p]]; c = p; }
+    },
+    pop() {
+      const top = hi[0], li = hi.pop(), lk = hk.pop();
+      if (hi.length) {
+        hi[0] = li; hk[0] = lk;
+        let c = 0;
+        for (;;) {
+          const l = 2 * c + 1, r = l + 1;
+          let m = c;
+          if (l < hi.length && hk[l] < hk[m]) m = l;
+          if (r < hi.length && hk[r] < hk[m]) m = r;
+          if (m === c) break;
+          [hi[m], hi[c]] = [hi[c], hi[m]]; [hk[m], hk[c]] = [hk[c], hk[m]]; c = m;
+        }
+      }
+      return top;
+    },
+  };
+};
 
 // Fill the masked pixels (mask[i] = 1) of the RGBA block d (w x h) in place.
 // Returns T, each pixel's arrival distance (0 outside the spot).
@@ -1601,28 +1630,7 @@ core.inpaint = (d, w, h, mask, eps = core.SPOT_EPS) => {
   const n = w * h, KNOWN = 0, BAND = 1, INSIDE = 2, FAR = 1e6;
   const flag = new Uint8Array(n), T = new Float32Array(n);
   for (let i = 0; i < n; i++) if (mask[i]) { flag[i] = INSIDE; T[i] = FAR; }
-  // A binary min-heap of pixel indices, keyed on T when pushed.
-  const hi = [], hk = [];
-  const push = (i, k) => {
-    let c = hi.length; hi.push(i); hk.push(k);
-    while (c > 0) { const p = (c - 1) >> 1; if (hk[p] <= hk[c]) break; [hi[p], hi[c]] = [hi[c], hi[p]]; [hk[p], hk[c]] = [hk[c], hk[p]]; c = p; }
-  };
-  const pop = () => {
-    const top = hi[0], li = hi.pop(), lk = hk.pop();
-    if (hi.length) {
-      hi[0] = li; hk[0] = lk;
-      let c = 0;
-      for (;;) {
-        const l = 2 * c + 1, r = l + 1;
-        let m = c;
-        if (l < hi.length && hk[l] < hk[m]) m = l;
-        if (r < hi.length && hk[r] < hk[m]) m = r;
-        if (m === c) break;
-        [hi[m], hi[c]] = [hi[c], hi[m]]; [hk[m], hk[c]] = [hk[c], hk[m]]; c = m;
-      }
-    }
-    return top;
-  };
+  const heap = core.minHeap(), push = (i, k) => heap.push(i, k);
   const nb = (i) => {
     const x = i % w, y = (i - x) / w, out = [];
     if (x > 0) out.push(i - 1); if (x < w - 1) out.push(i + 1); if (y > 0) out.push(i - w); if (y < h - 1) out.push(i + w);
@@ -1647,28 +1655,12 @@ core.inpaint = (d, w, h, mask, eps = core.SPOT_EPS) => {
     if (l < FAR) return T[i] - l;
     return 0;
   };
-  // Slopes are read from a 3 x 3 mean of the known pixels, so single-pixel grain is not
-  // mistaken for a slope and carried into the spot. A straight gradient keeps its slope.
-  const sm = new Float32Array(3 * n);
-  for (let i = 0; i < n; i++) {
-    if (flag[i] === INSIDE) continue;
-    const x = i % w, y = (i - x) / w;
-    let k = 0, r = 0, g = 0, b = 0;
-    for (let v = Math.max(0, y - 1); v <= Math.min(h - 1, y + 1); v++) {
-      for (let u = Math.max(0, x - 1); u <= Math.min(w - 1, x + 1); u++) {
-        const q = v * w + u;
-        if (flag[q] === INSIDE) continue;
-        r += d[4 * q]; g += d[4 * q + 1]; b += d[4 * q + 2]; k++;
-      }
-    }
-    sm[3 * i] = r / k; sm[3 * i + 1] = g / k; sm[3 * i + 2] = b / k;
-  }
   // Colour slope of channel c at a known pixel q along one axis, from known neighbours only.
   const slope = (q, c, lo, hiN, step) => {
     const l = lo && flag[q - step] !== INSIDE, r = hiN && flag[q + step] !== INSIDE;
-    if (l && r) return (sm[3 * (q + step) + c] - sm[3 * (q - step) + c]) / 2;
-    if (r) return sm[3 * (q + step) + c] - sm[3 * q + c];
-    if (l) return sm[3 * q + c] - sm[3 * (q - step) + c];
+    if (l && r) return (d[4 * (q + step) + c] - d[4 * (q - step) + c]) / 2;
+    if (r) return d[4 * (q + step) + c] - d[4 * q + c];
+    if (l) return d[4 * q + c] - d[4 * (q - step) + c];
     return 0;
   };
   const fill = (i) => {
@@ -1683,17 +1675,16 @@ core.inpaint = (d, w, h, mask, eps = core.SPOT_EPS) => {
         if (r2 === 0 || r2 > eps * eps) continue;
         const len = Math.sqrt(r2);
         const dir = Math.max(1e-6, Math.abs(dx * gx + dy * gy) / len);
-        const wt = dir / r2 / (1 + Math.abs(T[i] - T[q]));
+        const wt = dir / r2;
         // The known value, carried along its slope (first order) to this pixel.
         const at = (c) => d[4 * q + c] + slope(q, c, u > 0, u < w - 1, 1) * dx + slope(q, c, v > 0, v < h - 1, w) * dy;
         ws += wt; r += wt * at(0); g += wt * at(1); b += wt * at(2);
       }
     }
     if (ws > 0) { d[4 * i] = r / ws; d[4 * i + 1] = g / ws; d[4 * i + 2] = b / ws; }
-    sm[3 * i] = d[4 * i]; sm[3 * i + 1] = d[4 * i + 1]; sm[3 * i + 2] = d[4 * i + 2];   // filled pixels are already smooth
   };
-  while (hi.length) {
-    const i = pop();
+  while (heap.size) {
+    const i = heap.pop();
     if (flag[i] === KNOWN) continue;                      // an older, larger key for a pixel already done
     flag[i] = KNOWN;
     for (const j of nb(i)) {

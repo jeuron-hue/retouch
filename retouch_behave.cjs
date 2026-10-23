@@ -2317,6 +2317,37 @@ test('spot core: the fill rebuilds flat colour, gradients and edges; grain match
     const onLine = (x, y) => Math.abs(y + 0.5 - 30) < 3 && x >= 20 && x < 100;
     f = fix((x, y) => (onLine(x, y) ? [10, 10, 10] : [180, 170, 160]), { r: 4, pts: [{ x: 18, y: 30 }, { x: 102, y: 30 }] });
     out.line = f.d.reduce((m, v, i) => Math.max(m, i % 4 === 3 ? 0 : Math.abs(v - [180, 170, 160][i % 4])), 0);
+    // Weighting: errors against the true picture inside the spot, for a vertical edge, a
+    // slanted edge and a thin slanted line crossing it. Limits sit just above what the
+    // fill does now; leaving out the direction or distance weights goes well past them.
+    const mae = (truth, st = { r: 10, pts: [{ x: 60, y: 50 }] }) => {
+      const x = build(truth); core.fixSpot(x, st, W, H);
+      const d = x.getImageData(0, 0, W, H).data;
+      let e = 0, k = 0;
+      for (let y = 0; y < H; y++) for (let X = 0; X < W; X++) if (inSpot(X, y)) { e += Math.abs(d[(y * W + X) * 4] - truth(X, y)[0]); k++; }
+      return +(e / k).toFixed(2);
+    };
+    out.mae = [mae((x) => (x < 60 ? [40, 40, 40] : [220, 220, 220])), mae((x, y) => (x - 60 + (y - 50) * 0.5 < 0 ? [40, 40, 40] : [220, 220, 220])),
+      mae((x, y) => (Math.abs((x - 60) * 0.6 - (y - 50) * 0.8) < 1.5 ? [30, 30, 30] : [200, 200, 200]))];
+    // Arrival distance over every pixel of an awkward spot (an L and a disc), against the
+    // true distance to the nearest known pixel.
+    const M = 80, dm = new Uint8ClampedArray(M * M * 4).fill(128), mk = new Uint8Array(M * M);
+    for (let i = 0; i < M * M; i++) { const x = i % M, y = Math.floor(i / M); if ((x > 10 && x < 30 && y > 10 && y < 70) || (x > 10 && x < 70 && y > 50 && y < 70) || Math.hypot(x - 55, y - 25) < 14) mk[i] = 1; }
+    const T2 = core.inpaint(dm, M, M, mk);
+    const known = []; for (let j = 0; j < M * M; j++) if (!mk[j]) known.push([j % M, Math.floor(j / M)]);
+    let tmax = 0, tsum = 0, tn = 0;
+    for (let i = 0; i < M * M; i++) {
+      if (!mk[i]) continue;
+      const x = i % M, y = Math.floor(i / M);
+      let best = 1e9; for (const [u, v] of known) { const dd = (u - x) * (u - x) + (v - y) * (v - y); if (dd < best) best = dd; }
+      const e = Math.abs(T2[i] - Math.sqrt(best)); tmax = Math.max(tmax, e); tsum += e; tn++;
+    }
+    out.Tall = [+tmax.toFixed(2), +(tsum / tn).toFixed(3)];
+    // The heap gives keys back smallest first, whatever order they went in.
+    const hp = core.minHeap(), keys = Array.from({ length: 500 }, (_, i) => Math.sin(i * 7.3) * 100);
+    keys.forEach((k, i) => hp.push(i, k));
+    const order = []; while (hp.size) order.push(keys[hp.pop()]);
+    out.heap = order.length === 500 && order.every((k, i) => !i || k >= order[i - 1]);
     // Arrival distance: in a disc of radius 10, T at a pixel is about its distance from the edge.
     const d = new Uint8ClampedArray(41 * 41 * 4).fill(128), mask = new Uint8Array(41 * 41);
     for (let i = 0; i < 41 * 41; i++) if (Math.hypot(i % 41 - 20, Math.floor(i / 41) - 20) < 10) mask[i] = 1;
@@ -2327,6 +2358,10 @@ test('spot core: the fill rebuilds flat colour, gradients and edges; grain match
     const e = new Uint8ClampedArray(30 * 30 * 4), em = new Uint8Array(900);
     for (let i = 0; i < 900; i++) { const v = i % 30 < 15 ? 30 : 220; e.set([v, v, v, 255], 4 * i); if (Math.hypot(i % 30 - 15, Math.floor(i / 30) - 15) < 5) em[i] = 1; }
     out.edgeGrain = core.spotGrain(e, 30, 30, em, core.spotRing(em, 30, 30));
+    // On noise of known spread (10 levels), the estimate comes back close to 10.
+    const nz = new Uint8ClampedArray(60 * 60 * 4), nm = new Uint8Array(3600);
+    for (let i = 0; i < 3600; i++) { const v = 128 + 10 * core.spotNoise(i % 60 + 500, Math.floor(i / 60) + 900); nz.set([v, v, v, 255], 4 * i); if (Math.hypot(i % 60 - 30, Math.floor(i / 60) - 30) < 6) nm[i] = 1; }
+    out.knownGrain = core.spotGrain(nz, 60, 60, nm, core.spotRing(nm, 60, 60, 20)).map((v) => +v.toFixed(2));
     // The noise: repeatable, mean about 0, spread about 1.
     let s1 = 0, s2 = 0; for (let i = 0; i < 20000; i++) { const z = core.spotNoise(i % 200, Math.floor(i / 200)); s1 += z; s2 += z * z; }
     out.noise = [+(s1 / 20000).toFixed(3), +Math.sqrt(s2 / 20000).toFixed(3), core.spotNoise(5, 7) === core.spotNoise(5, 7), core.spotNoise(5, 7) !== core.spotNoise(7, 5)];
@@ -2342,7 +2377,11 @@ test('spot core: the fill rebuilds flat colour, gradients and edges; grain match
   assert(r.grainSpot[0] > 0.7 * r.grainAround[0] && r.grainSpot[0] < 1.3 * r.grainAround[0], 'fill grain matches: ' + r.grainSpot[0].toFixed(2) + ' vs ' + r.grainAround[0].toFixed(2));
   assert(r.atEdge <= 1 && r.line <= 1, 'spot at the frame edge ' + r.atEdge + ', stroke ' + r.line);
   assert(r.T.every((v) => Math.abs(v) <= 1.5) && r.Tout, 'arrival distance vs distance from the edge: ' + r.T);
+  assert(r.Tall[0] <= 1 && r.Tall[1] <= 0.1, 'arrival distance over an L-shaped spot, worst and mean error: ' + r.Tall);
+  assert(r.mae[0] <= 11.5 && r.mae[1] <= 14.5 && r.mae[2] <= 19, 'fill error at a vertical edge, slanted edge, thin line: ' + r.mae);
+  assert(r.heap, 'heap must give keys back smallest first');
   assert(r.edgeGrain.every((v) => v < 0.5), 'an edge is not grain: ' + r.edgeGrain);
+  assert(r.knownGrain.every((v) => Math.abs(v - 10) < 1.5), 'grain of noise with spread 10: ' + r.knownGrain);
   assert(Math.abs(r.noise[0]) < 0.03 && Math.abs(r.noise[1] - 1) < 0.05 && r.noise[2] && r.noise[3], 'noise ' + r.noise);
   await ctx.close();
 }, { core: true });
