@@ -814,8 +814,8 @@ test('before / after hold on the main view and on every tool', async () => {
   };
   await hold('#hold-main');
   await page.evaluate(BG_INIT);
-  await page.evaluate(() => window.__fakeSeg([0, 0, 77], 300));
-  for (const t of ['crop', 'resize', 'pad', 'text', 'bg']) {
+  await page.evaluate(() => { window.__fakeSeg([0, 0, 77], 300); window.__fakeSkin([0, 0, 77], 300); });
+  for (const t of ['crop', 'resize', 'pad', 'text', 'bg', 'skin']) {
     await page.click('[data-open-tool="' + t + '"]');
     await hold('.sheet-panel[data-tool="' + t + '"] [data-hold]');
     await idle(page);
@@ -868,11 +868,12 @@ test('phone layout: tap targets at least 44 px, no sideways scroll', async () =>
   await load(page, gradient());
   await checkVisible('editing');
   await page.evaluate(BG_INIT);
-  await page.evaluate(() => window.__fakeSeg([0, 0, 77], 300));
-  for (const t of ['crop', 'resize', 'pad', 'text', 'bg', 'bg-brush']) {
+  await page.evaluate(() => { window.__fakeSeg([0, 0, 77], 300); window.__fakeSkin([0, 0, 77], 300); });
+  for (const t of ['crop', 'resize', 'pad', 'text', 'bg', 'bg-brush', 'skin', 'skin-brush']) {
     if (t === 'bg-brush') { await page.click('[data-open-tool="bg"]'); await idle(page); await page.click('[data-bgmode="erase"]'); }
+    else if (t === 'skin-brush') { await page.click('[data-open-tool="skin"]'); await idle(page); await page.click('[data-skinmode="erase"]'); }
     else await page.click('[data-open-tool="' + t + '"]');
-    if (t === 'bg') await idle(page);
+    if (t === 'bg' || t === 'skin') await idle(page);
     await checkVisible(t + ' sheet');
     const stage = await page.locator('#stage').boundingBox();
     assert(stage.height > 400, t + ': photo area only ' + stage.height + ' px tall');
@@ -1541,6 +1542,17 @@ const BG_INIT = () => {
       return { w: cw, h: ch, data: b };
     };
   };
+  // Skin stand-in: the same blocky answer, given as skin, all of it counted as face.
+  window.__fakeSkin = (rgb, tol = 60, cell = 4) => {
+    window.__fakeSeg(rgb, tol, cell);
+    const person = window.retouch.segmenter.override;
+    window.retouch.segmenter.override = null;
+    window.retouch.segmenter.skinOverride = (canvas) => {
+      const m = person(canvas);
+      let sum = 0; for (const v of m.data) sum += v;
+      return { ...m, face: sum / m.data.length };
+    };
+  };
   window.__px = (c, x, y) => Array.from(c.getContext('2d', { willReadFrequently: true }).getImageData(x, y, 1, 1).data);
 };
 const SKIN = [210, 160, 130], SKY = [40, 90, 200];
@@ -1982,6 +1994,260 @@ test('background: a failed model load says so plainly and leaves the photo alone
   await ctx.close();
 });
 
+/* ---------- Phase 4: smooth skin ---------- */
+
+// A synthetic skin patch, built in the page: skin tone with fine grain, four soft
+// reddish spots, and a hard dark "eyebrow" bar. Returns a canvas and a measure() that
+// reads spot depth, eyebrow contrast, the eyebrow's edge step and the grain.
+const SKIN_PATCH = () => {
+  window.__skinPatch = (W = 400, H = 400) => {
+    const c = retouch.core.makeCanvas(W, H), x = c.getContext('2d', { willReadFrequently: true });
+    const img = x.createImageData(W, H), d = img.data;
+    let seed = 1; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const spots = [[80, 80], [200, 120], [300, 260], [120, 300]];
+    for (let y = 0; y < H; y++) for (let X = 0; X < W; X++) {
+      const g = (rnd() - 0.5) * 14;
+      let r = 200 + g, gg = 150 + g, bb = 130 + g;
+      for (const [sx, sy] of spots) { const dd = Math.hypot(X - sx, y - sy), k = Math.exp(-(dd * dd) / 24.5); r -= 8 * k; gg -= 35 * k; bb -= 30 * k; }
+      if (y >= 200 && y < 210 && X >= 60 && X < 340) { r = 70 + g; gg = 50 + g; bb = 40 + g; }
+      const o = (y * W + X) * 4; d[o] = r; d[o + 1] = gg; d[o + 2] = bb; d[o + 3] = 255;
+    }
+    x.putImageData(img, 0, 0);
+    const G = (dd, i) => dd[4 * i + 1];
+    const measure = (dd) => {
+      let depth = 0;
+      for (const [sx, sy] of spots) {
+        let ring = 0, rn = 0, cen = 0, cn = 0;
+        for (let y = sy - 15; y <= sy + 15; y++) for (let X = sx - 15; X <= sx + 15; X++) {
+          const dist = Math.hypot(X - sx, y - sy), i = y * W + X;
+          if (dist >= 10 && dist <= 14) { ring += G(dd, i); rn++; }
+          if (dist <= 1.5) { cen += G(dd, i); cn++; }
+        }
+        depth += (ring / rn - cen / cn) / spots.length;
+      }
+      let inb = 0, nb = 0, outb = 0, no = 0, e1 = 0, e2 = 0;
+      for (let X = 100; X < 300; X++) {
+        for (let y = 202; y < 208; y++) { inb += G(dd, y * W + X); nb++; }
+        for (let y = 214; y < 219; y++) { outb += G(dd, y * W + X); no++; }
+        e1 += G(dd, 209 * W + X); e2 += G(dd, 210 * W + X);
+      }
+      let s2 = 0, n2 = 0;
+      for (let y = 21; y < 99; y++) for (let X = 301; X < 379; X++) {
+        let m = 0; for (let v = -1; v <= 1; v++) for (let u = -1; u <= 1; u++) m += G(dd, (y + v) * W + X + u);
+        const e = G(dd, y * W + X) - m / 9; s2 += e * e; n2++;
+      }
+      return { depth, brow: outb / no - inb / nb, step: (e2 - e1) / 200, grain: Math.sqrt(s2 / n2) };
+    };
+    return { c, measure };
+  };
+};
+
+test('skin core: edge-preserving filter, grain, mix and tiles (independent check)', async () => {
+  const { ctx, page } = await newApp({ init: SKIN_PATCH });
+  const r = await page.evaluate(() => {
+    const core = retouch.core, out = {};
+    // The self-guided filter against a direct reading on a small random channel.
+    const w = 17, h = 11, rad = 2, eps = 0.01, n = w * h;
+    let seed = 3; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const I = new Float32Array(n).map(rnd);
+    const win = (cx, cy, f) => { let s = 0, k = 0; for (let y = Math.max(0, cy - rad); y <= Math.min(h - 1, cy + rad); y++) for (let x = Math.max(0, cx - rad); x <= Math.min(w - 1, cx + rad); x++) { s += f(y * w + x); k++; } return s / k; };
+    const A = [], B = [];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const m = win(x, y, (i) => I[i]), v = win(x, y, (i) => I[i] * I[i]) - m * m;
+      A.push(v / (v + eps)); B.push(m - (v / (v + eps)) * m);
+    }
+    const got = core.selfGuided(I, w, h, rad, eps);
+    out.sgErr = Math.max(...Array.from(got).map((g, i) => Math.abs(g - (win(i % w, Math.floor(i / w), (j) => A[j]) * I[i] + win(i % w, Math.floor(i / w), (j) => B[j])))));
+    out.sgFlat = Array.from(core.selfGuided(new Float32Array(n).fill(0.4), w, h, rad, eps)).every((v) => Math.abs(v - 0.4) < 1e-6);
+    // Grain D: zero for a smooth ramp (nothing taken away), and for an exact edge kept by a tiny eps.
+    const ramp = new Uint8ClampedArray(4 * n).map((_, i) => (i % 4 === 3 ? 255 : 100 + (Math.floor(i / 4) % w) * 3));
+    const fr = core.skinFilter(ramp, w, h, { r: 2, g: 1, eps: 0.004 });
+    out.rampD = Math.max(...fr.D.map((p) => Math.max(...Array.from(p).map(Math.abs))));
+    // Away from the frame (where the window is cut off), a straight ramp comes back unchanged.
+    out.rampS = Math.max(...Array.from(fr.S[0]).map((v, i) => (i % w >= 4 && i % w < w - 4 ? Math.abs(v - ramp[4 * i] / 255) : 0)));
+    // Mix: original + strength x alpha x (S + texture x D - original), per channel.
+    const d = new Uint8ClampedArray([100, 150, 200, 255, 100, 150, 200, 255]);
+    const f = { S: [new Float32Array([0.5, 0.5]), new Float32Array([0.5, 0.5]), new Float32Array([0.5, 0.5])], D: [new Float32Array([0.2, 0.2]), new Float32Array([0, 0]), new Float32Array([-0.2, -0.2])] };
+    core.skinMix(d, 2, 1, f, { strength: 0.5, texture: 0.5 }, new Float32Array([1, 0.5]), 2, 0, 0);
+    out.mix = Array.from(d);
+    // Sizes and bounds.
+    out.face = [core.skinFaceSize(0.25, 0.4, 400, 400), core.skinFaceSize(0.001, 0.36, 400, 400), core.skinFaceSize(0, 0, 400, 300)].map((v) => +v.toFixed(2));
+    out.radii = [core.skinRadii(1000), core.skinRadii(1000, 0.5), core.skinRadii(10)];
+    out.prob = Array.from(core.skinProb(new Float32Array([0.2, 0.7, 0]), new Float32Array([0.3, 0.6, 0]))).map((v) => +v.toFixed(3));
+    const am = new Float32Array(20 * 10); am[3 * 20 + 5] = 0.2; am[6 * 20 + 12] = 1;
+    out.bounds = [core.alphaBounds(am, 20, 10), core.alphaBounds(am, 20, 10, 4), core.alphaBounds(new Float32Array(200), 20, 10)];
+    // Full size in tiles equals one pass over the whole box; pixels outside the mask, and
+    // everything at strength 0, are left exactly as they were.
+    const { c } = window.__skinPatch(300, 220);
+    const a = new Float32Array(300 * 220).map((_, i) => ((i % 300) < 240 ? 1 : 0));
+    const o = { strength: 1, texture: 0.35, r: 6, g: 2, eps: core.SKIN_EPS };
+    const read = (cv) => cv.getContext('2d').getImageData(0, 0, 300, 220).data;
+    core.SKIN_TILE = 4096; const whole = read(core.renderSmooth(c, a, 300, 220, o));
+    core.SKIN_TILE = 37; const tiled = read(core.renderSmooth(c, a, 300, 220, o));
+    core.SKIN_TILE = 512;
+    const orig = read(c);
+    out.tileDiff = whole.reduce((m, v, i) => Math.max(m, Math.abs(v - tiled[i])), 0);
+    let outside = 0, inside = 0;
+    for (let y = 0; y < 220; y++) for (let x = 0; x < 300; x++) for (let k = 0; k < 4; k++) { const i = (y * 300 + x) * 4 + k; if (x >= 240) outside = Math.max(outside, Math.abs(tiled[i] - orig[i])); else inside = Math.max(inside, Math.abs(tiled[i] - orig[i])); }
+    out.outside = outside; out.inside = inside;
+    out.off = read(core.renderSmooth(c, a, 300, 220, { ...o, strength: 0 })).every((v, i) => v === orig[i]);
+    out.empty = read(core.renderSmooth(c, new Float32Array(300 * 220), 300, 220, o)).every((v, i) => v === orig[i]);
+    return out;
+  });
+  assert(r.sgErr < 1e-4, 'self-guided filter differs from the direct reading by ' + r.sgErr);
+  assert(r.sgFlat, 'a flat channel must stay flat');
+  assert(r.rampD < 0.01 && r.rampS < 0.01, 'a smooth ramp is left alone (no grain, no change): ' + r.rampD + ' / ' + r.rampS);
+  // Pixel 1, alpha 1: 100/255 + 0.5 (0.5 + 0.1 - 0.392) = 0.496 -> 126.6; green 0.588 + 0.5 (0.5 - 0.588) = 0.544 -> 138.8;
+  // blue 0.784 + 0.5 (0.4 - 0.784) = 0.592 -> 151. Pixel 2, alpha 0.5: a quarter of the way (blue 175.5, stored as 175).
+  assert(r.mix.join() === '127,139,151,255,113,144,175,255', 'mix ' + r.mix);
+  assert(r.face.join() === '200,240,30', 'face size ' + r.face);
+  assert(JSON.stringify(r.radii) === '[{"r":24,"g":5},{"r":12,"g":3},{"r":1,"g":1}]', 'radii ' + JSON.stringify(r.radii));
+  assert(r.prob.join() === '0.5,1,0', 'skin = body + face skin, clamped: ' + r.prob);
+  assert(JSON.stringify(r.bounds) === '[{"x0":5,"y0":3,"x1":13,"y1":7},{"x0":1,"y0":0,"x1":17,"y1":10},null]', 'alpha bounds ' + JSON.stringify(r.bounds));
+  assert(r.tileDiff <= 1, 'tiles must join without a seam: differs by ' + r.tileDiff);
+  assert(r.outside === 0 && r.inside > 5, 'only masked pixels change: outside ' + r.outside + ', inside ' + r.inside);
+  assert(r.off && r.empty, 'strength 0 or an empty mask must change nothing');
+  await ctx.close();
+}, { core: true });
+
+test('skin core: spots fade, the eyebrow edge stays, texture brings the grain back', async () => {
+  const { ctx, page } = await newApp({ init: SKIN_PATCH });
+  const r = await page.evaluate(() => {
+    const core = retouch.core, { c, measure } = window.__skinPatch();
+    const a = new Float32Array(400 * 400).fill(1), rr = core.skinRadii(400);
+    const run = (strength, texture) => measure(core.renderSmooth(c, a, 400, 400, { strength, texture, ...rr, eps: core.SKIN_EPS }).getContext('2d').getImageData(0, 0, 400, 400).data);
+    return { rr, orig: measure(c.getContext('2d').getImageData(0, 0, 400, 400).data), full: run(1, 0.35), half: run(0.5, 0.35), plain: run(1, 0), grainy: run(1, 1) };
+  });
+  const o = r.orig, f = r.full;
+  assert(o.depth > 30 && o.brow > 95 && o.grain > 3.5, 'fixture ' + JSON.stringify(o));
+  assert(f.depth <= 0.4 * o.depth, 'spots fade by at least 60 %: ' + o.depth.toFixed(1) + ' to ' + f.depth.toFixed(1));
+  assert(f.brow >= 0.88 * o.brow && f.step >= 0.85 * o.step, 'eyebrow kept: contrast ' + f.brow.toFixed(1) + ' of ' + o.brow.toFixed(1) + ', edge ' + f.step.toFixed(1) + ' of ' + o.step.toFixed(1));
+  assert(r.half.depth > f.depth + 5 && r.half.depth < o.depth - 5, 'half strength lands between: ' + r.half.depth.toFixed(1));
+  assert(r.plain.grain <= 0.15 * o.grain, 'texture 0 is smooth: grain ' + r.plain.grain.toFixed(2) + ' of ' + o.grain.toFixed(2));
+  assert(r.grainy.grain >= 0.9 * o.grain && r.grainy.depth <= 0.5 * o.depth, 'texture 100 keeps the grain but not the spots: ' + JSON.stringify(r.grainy));
+  assert(f.grain > r.plain.grain * 2 && f.grain < r.grainy.grain, 'texture 35 is in between: ' + f.grain.toFixed(2));
+  await ctx.close();
+}, { core: true });
+
+// 300 x 200: grainy blue sky, and a grainy skin block (x 100 to 199, y 50 to 199) with one spot at
+// (150, 110), about 5 px across: 4 % of the block's size, like a blemish on a face.
+const skinPng = () => {
+  let seed = 5; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  return makePng(300, 200, (x, y) => {
+    const g = (rnd() - 0.5) * 14;
+    if (x >= 100 && x < 200 && y >= 50) {
+      const k = Math.exp(-((x - 150) ** 2 + (y - 110) ** 2) / 8);
+      return [200 + g - 8 * k, 150 + g - 35 * k, 130 + g - 30 * k, 255].map((v) => Math.round(Math.min(255, Math.max(0, v))));
+    }
+    return [40 + g, 90 + g, 200 + g, 255].map((v) => Math.round(Math.min(255, Math.max(0, v))));
+  });
+};
+async function skinReady(page) {
+  await page.click('[data-open-tool="skin"]');
+  await page.waitForFunction(() => window.retouch.tools.skin.pv && window.retouch.app.busyCount === 0, null, { timeout: 30000 });
+}
+// Spot depth in the green channel at (150, 110), and grain in a patch of sky and of skin.
+const skinStats = (page, which = 'current') => page.evaluate((which) => {
+  const src = which === 'preview' ? retouch.app.preview.src : retouch.app.edits.current;
+  const d = retouch.readPixels(src), W = 300, G = (x, y) => d[(y * W + x) * 4 + 1];
+  let ring = 0, rn = 0, cen = 0, cn = 0;
+  for (let y = 95; y <= 125; y++) for (let x = 135; x <= 165; x++) { const r = Math.hypot(x - 150, y - 110); if (r >= 10 && r <= 14) { ring += G(x, y); rn++; } if (r <= 1.5) { cen += G(x, y); cn++; } }
+  const grain = (x0, y0) => { let s = 0, n = 0; for (let y = y0; y < y0 + 30; y++) for (let x = x0; x < x0 + 30; x++) { let m = 0; for (let v = -1; v <= 1; v++) for (let u = -1; u <= 1; u++) m += G(x + u, y + v); s += (G(x, y) - m / 9) ** 2; n++; } return Math.sqrt(s / n); };
+  return { depth: ring / rn - cen / cn, sky: grain(20, 20), skin: grain(120, 150), bytes: d };
+}, which);
+
+test('skin: the sheet smooths only the skin; strength and texture work; undo restores', async () => {
+  const { ctx, page } = await newApp({ init: [TEXT_INIT, BG_INIT] });
+  await load(page, skinPng());
+  await textBox(page, { text: 'HI', size: 30 });
+  const before = await texts(page);
+  const orig = await skinStats(page);
+  await page.evaluate(() => window.__fakeSkin([200, 150, 130], 80));
+  await skinReady(page);
+  assert(/Skin found in \d+ % of the photo/.test(await page.textContent('#skin-out')), 'status ' + await page.textContent('#skin-out'));
+  assert(await page.isVisible('#skin-view-rows') && await page.isHidden('#skin-brush-rows'), 'view rows shown');
+  await page.fill('#skin-strength', '100'); await page.dispatchEvent('#skin-strength', 'input');
+  const pv = await skinStats(page, 'preview');
+  await applyTool(page, 'skin');
+  const got = await skinStats(page);
+  // How much a spot fades is pinned down by the core patch test; here the "face" is small
+  // (r = 3 px), so only check that the spot clearly fades.
+  assert(got.depth <= 0.65 * orig.depth, 'spot faded: ' + orig.depth.toFixed(1) + ' to ' + got.depth.toFixed(1));
+  assert(Math.abs(pv.depth - got.depth) <= 3, 'preview matches the result: ' + pv.depth.toFixed(1) + ' vs ' + got.depth.toFixed(1));
+  assert(got.skin < orig.skin && got.skin > 0.2 * orig.skin, 'skin grain reduced, not wiped (texture 35 %): ' + orig.skin.toFixed(2) + ' to ' + got.skin.toFixed(2));
+  let sky = 0;
+  for (let y = 0; y < 200; y++) for (let x = 0; x < 300; x++) if (x < 90 || x >= 210 || y < 40) for (let k = 0; k < 4; k++) sky = Math.max(sky, Math.abs(got.bytes[(y * 300 + x) * 4 + k] - orig.bytes[(y * 300 + x) * 4 + k]));
+  assert(sky === 0, 'sky away from the skin must not change: ' + sky);
+  assert(JSON.stringify(await texts(page)) === JSON.stringify(before), 'text boxes carried through');
+  assert((await page.evaluate(() => retouch.app.edits.stack[retouch.app.edits.index].label)) === 'Smooth skin', 'history label');
+  await page.click('#btn-undo');
+  assert((await skinStats(page)).depth === orig.depth, 'undo restores the photo');
+  // Lower strength and full texture: less smoothing, grain kept.
+  await skinReady(page);
+  assert((await page.inputValue('#skin-strength')) === '100', 'strength remembered');
+  await page.fill('#skin-strength', '50'); await page.dispatchEvent('#skin-strength', 'input');
+  await page.fill('#skin-texture', '100'); await page.dispatchEvent('#skin-texture', 'input');
+  await applyTool(page, 'skin');
+  const soft = await skinStats(page);
+  assert(soft.depth > got.depth + 3 && soft.depth < orig.depth - 3, 'half strength: ' + soft.depth.toFixed(1));
+  assert(soft.skin >= 0.85 * orig.skin, 'texture 100 keeps the grain: ' + soft.skin.toFixed(2) + ' of ' + orig.skin.toFixed(2));
+  // Strength 0 adds no step.
+  await page.click('#btn-undo');
+  await skinReady(page);
+  await page.fill('#skin-strength', '0'); await page.dispatchEvent('#skin-strength', 'input');
+  await applyTool(page, 'skin');
+  assert((await page.evaluate(() => retouch.app.edits.stack.length)) === 3, 'strength 0 makes no step');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('skin: the brush adds and removes areas; the brush view shows them in blue', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  await load(page, skinPng());
+  const orig = await skinStats(page);
+  await page.evaluate(() => window.__fakeSkin([200, 150, 130], 80));
+  await skinReady(page);
+  await page.fill('#skin-strength', '100'); await page.dispatchEvent('#skin-strength', 'input');
+  await page.click('[data-skinmode="erase"]');
+  assert(await page.isVisible('#skin-brush-rows') && await page.isHidden('#skin-view-rows'), 'brush rows shown');
+  const tint = await page.evaluate(() => [window.__px(retouch.app.preview.src, 150, 170), window.__px(retouch.app.preview.src, 20, 20)]);
+  assert(tint[0][2] > 150 && tint[0][0] < 170, 'skin tinted blue in the brush view: ' + tint[0]);
+  assert(Math.abs(tint[1][2] - orig.bytes[(20 * 300 + 20) * 4 + 2]) <= 1, 'sky not tinted: ' + tint[1]);
+  // Remove the spot from the mask, add a patch of sky.
+  await brush(page, [[140, 110], [160, 110]]);
+  await page.click('[data-skinmode="keep"]');
+  await page.fill('#skin-brush', '120'); await page.dispatchEvent('#skin-brush', 'input');
+  await brush(page, [[25, 25], [45, 25], [45, 40], [25, 40]]);
+  assert((await page.evaluate(() => retouch.tools.skin.strokes.map((s) => s.mode).join())) === 'erase,keep', 'two strokes');
+  await page.click('#skin-undo-stroke');
+  await brush(page, [[25, 25], [45, 25], [45, 40], [25, 40]]);
+  await page.click('[data-skinmode="view"]');
+  await applyTool(page, 'skin');
+  const got = await skinStats(page);
+  assert(Math.abs(got.depth - orig.depth) < 4, 'removed area keeps its spot: ' + orig.depth.toFixed(1) + ' / ' + got.depth.toFixed(1));
+  assert(got.sky < 0.6 * orig.sky, 'added sky patch is smoothed: ' + orig.sky.toFixed(2) + ' to ' + got.sky.toFixed(2));
+  assert(got.skin < orig.skin, 'the rest of the skin is smoothed');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('skin: the real model gives skin from its own classes, and a failure is said plainly', async () => {
+  const { ctx, page } = await newApp();
+  await load(page, skinPng());
+  await skinReady(page);
+  const m = await page.evaluate(() => ({ w: retouch.tools.skin.model.w, cov: retouch.tools.skin.model.coverage, face: retouch.tools.skin.faceSize, o: retouch.segmenter.skinOverride }));
+  assert(m.w === 300 && m.cov >= 0 && m.cov <= 1 && m.face >= 20 && m.o === null, 'real skin model ' + JSON.stringify(m));
+  await page.click('.sheet-panel[data-tool="skin"] [data-cancel]');
+  await page.evaluate(() => { retouch.segmenter.skinOverride = () => { throw new Error('model file missing'); }; });
+  await page.click('[data-open-tool="skin"]');
+  await page.waitForSelector('.notice.fail[data-id="skin"]');
+  assert(/Skin smoothing could not start: model file missing/.test(await page.textContent('.notice.fail[data-id="skin"]')), 'failure message');
+  await idle(page);
+  assert(await page.evaluate(() => retouch.app.tool === null && retouch.app.edits.stack.length === 1), 'tool closed, nothing changed');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
 test('real-photo tests (reference/test-images)', async () => {
   if (!fs.existsSync(REFERENCE)) skip('reference/test-images/ not present');
   const imgs = fs.readdirSync(REFERENCE).filter((f) => /\.(jpe?g|png|webp|avif)$/i.test(f));
@@ -2011,7 +2277,13 @@ test('real-photo tests (reference/test-images)', async () => {
     const left2 = findImageMetadata(bytes);
     assert(!left2.length, f + ' cut-out export carries ' + left2);
     await page.click('.sheet-panel[data-tool="export"] [data-cancel]');
-    console.log('      ' + f + ': person ' + (cov * 100).toFixed(1) + ' %');
+    await page.click('#btn-undo');
+    await skinReady(page);
+    const skin = await page.evaluate(() => retouch.tools.skin.model.coverage);
+    assert(skin > 0.005, f + ': skin found in ' + (skin * 100).toFixed(1) + ' % of the photo');
+    await applyTool(page, 'skin');
+    await page.click('#btn-undo');
+    console.log('      ' + f + ': person ' + (cov * 100).toFixed(1) + ' %, skin ' + (skin * 100).toFixed(1) + ' %');
   }
   assert(page.errors.length === 0, page.errors.join('; '));
   await ctx.close();

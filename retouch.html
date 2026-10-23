@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.3.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.4.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -407,6 +407,42 @@ fieldset:disabled{opacity:.4}
     <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
   </div>
 
+  <div class="sheet-panel" data-tool="skin" hidden>
+    <div class="sheet-head">
+      <div class="grow"><div class="entry-code" data-entry></div><h2>Smooth skin</h2></div>
+      <button class="btn hold" data-hold>Hold: before</button>
+    </div>
+    <div class="row scroller" role="group" aria-label="Brush">
+      <button class="chip word" data-skinmode="view" aria-pressed="true">View</button>
+      <button class="chip word" data-skinmode="keep" aria-pressed="false">Add</button>
+      <button class="chip word" data-skinmode="erase" aria-pressed="false">Remove</button>
+      <span class="divider"></span>
+      <button class="btn" id="skin-undo-stroke" disabled>Undo stroke</button>
+    </div>
+    <div id="skin-view-rows">
+      <div class="row">
+        <label for="skin-strength">Strength</label>
+        <input type="range" id="skin-strength" min="0" max="100" step="1" value="60">
+        <span class="readout" id="skin-strength-out">60 %</span>
+      </div>
+      <div class="row">
+        <label for="skin-texture">Texture</label>
+        <input type="range" id="skin-texture" min="0" max="100" step="1" value="35">
+        <span class="readout" id="skin-texture-out">35 %</span>
+      </div>
+    </div>
+    <div id="skin-brush-rows" hidden>
+      <div class="row">
+        <label for="skin-brush">Brush</label>
+        <input type="range" id="skin-brush" min="10" max="120" step="1" value="40">
+        <span class="readout" id="skin-brush-out">40 px</span>
+      </div>
+      <div class="small">Blue shows where skin will be smoothed. One finger paints; two fingers zoom and move.</div>
+    </div>
+    <div class="small" id="skin-out"></div>
+    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
+  </div>
+
   <div class="sheet-panel" data-tool="export" hidden>
     <div class="sheet-head">
       <div class="grow"><div class="entry-code" data-entry></div><h2>Export</h2></div>
@@ -452,6 +488,9 @@ fieldset:disabled{opacity:.4}
   <button class="tool" data-open-tool="bg" disabled>
     <svg viewBox="0 0 24 24"><circle cx="12" cy="9.5" r="3.5"/><path d="M5.5 20.5c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M3.5 7.5v-4h4M16.5 3.5h4v4M20.5 16.5v4M3.5 16.5v4"/></svg>Background
   </button>
+  <button class="tool" data-open-tool="skin" disabled>
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="13" r="7"/><path d="M8.5 15.5c1.4 1.1 3.6 1.1 5 0"/><path d="M19 2.5v5M16.5 5h5"/></svg>Skin
+  </button>
 </nav>
 
 <input type="file" id="file" accept="image/*,.avif,.heic,.heif,.webp" hidden>
@@ -463,7 +502,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.4.0';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -2802,6 +2841,159 @@ $('#bg-blur').addEventListener('input', (e) => tools.bg.setFill({ blur: +e.targe
 $('#bg-feather').addEventListener('input', (e) => tools.bg.setFeather(+e.target.value));
 $('#bg-brush').addEventListener('input', (e) => { tools.bg.s.brush = +e.target.value; tools.bg.sync(); });
 $('#bg-undo-stroke').addEventListener('click', () => tools.bg.undoStroke());
+
+/* ---------- Tool: smooth skin ---------- */
+
+tools.skin = {
+  ...maskBrush,
+  s: null,
+  open() {
+    if (!this.s) this.s = { strength: 60, texture: 35, brush: 40 };
+    this.s.mode = 'view';
+    this.strokes = []; this.stroke = null; this.cursor = null;
+    this.model = null; this.pv = null;
+    this.sync();
+    const ticket = (this.ticket = (this.ticket || 0) + 1);
+    this.ready = this.prepare(ticket);
+    this.ready.catch(() => {});
+  },
+  close() {
+    this.ticket++;
+    const pv = this.pv;
+    if (pv) for (const c of [pv.photo, pv.layer, pv.mask, pv.fg]) core.release(c);   // pv.out is app.preview.src
+    this.pv = null; this.model = null; this.strokes = []; this.stroke = null; this.cursor = null;
+  },
+  // Find the skin, fit its edges, size the filter from the face, build the preview.
+  async prepare(ticket) {
+    busy(true, segmenter.promise || segmenter.skinOverride ? 'Finding the skin' : 'Loading model');
+    try {
+      await nextFrame();
+      const src = app.edits.current;
+      const guide = core.bgGuide(src);
+      try {
+        const skin = await segmenter.skin(guide);
+        if (ticket !== this.ticket) return;
+        $('#busy').textContent = 'Finding the edges';
+        await nextFrame();
+        this.model = core.bgModel(guide, skin);
+        this.faceSize = core.skinFaceSize(skin.face, this.model.coverage, src.width, src.height);
+      } finally { core.release(guide); }
+      $('#busy').textContent = 'Smoothing';
+      await nextFrame();
+      if (ticket !== this.ticket) return;
+      this.buildPreview();
+      if (this.model.coverage < BG_MIN_PERSON) {
+        notify('No skin found in this photo. Use Add to paint where to smooth.', 'watch', { id: 'skin-none' });
+      }
+      this.sync();
+    } catch (err) {
+      if (ticket === this.ticket) {
+        notify('Skin smoothing could not start: ' + (err && err.message ? err.message : err), 'fail', { sticky: true, id: 'skin' });
+        closeTool();
+      }
+      throw err;
+    } finally { busy(false); }
+  },
+  filter(k) { return { ...core.skinRadii(this.faceSize, k), eps: core.SKIN_EPS }; },
+  // The preview smooths the whole (screen-size) photo once and keeps the smoothed
+  // values and the grain, so the Texture slider only re-mixes and Strength only
+  // changes how strongly the smoothed layer is laid over the photo.
+  buildPreview() {
+    const src = app.edits.current;
+    const maxSide = Math.max(view.cssW, view.cssH) * view.dpr;
+    const k = Math.min(1, Math.max(BG_PREVIEW_LONG, maxSide) / Math.max(src.width, src.height));
+    const W = Math.max(1, Math.round(src.width * k)), H = Math.max(1, Math.round(src.height * k));
+    const photo = core.makeCanvas(W, H), pctx = photo.getContext('2d', { willReadFrequently: true });
+    pctx.imageSmoothingQuality = 'high';
+    pctx.drawImage(src, 0, 0, W, H);
+    const pixels = pctx.getImageData(0, 0, W, H);
+    const pv = { k, W, H, photo, pixels, f: core.skinFilter(pixels.data, W, H, this.filter(k)),
+      q: core.bgGuided(photo, W, H, this.model),
+      layer: core.makeCanvas(W, H), mask: core.makeCanvas(W, H), fg: core.makeCanvas(W, H), out: core.makeCanvas(W, H) };
+    this.pv = pv;
+    app.preview = { src: pv.out, w: src.width, h: src.height, texts: app.edits.texts };
+    this.refreshLayer(false);
+    this.refreshAlpha();
+  },
+  prepAlpha(a) { return core.bgFeather(a, this.pv.W, this.pv.H, core.SKIN_FEATHER); },
+  // The smoothed layer at full strength, with the chosen texture.
+  refreshLayer(redraw = true) {
+    const pv = this.pv; if (!pv) return;
+    const img = new ImageData(new Uint8ClampedArray(pv.pixels.data), pv.W, pv.H);
+    core.skinMix(img.data, pv.W, pv.H, pv.f, { strength: 1, texture: this.s.texture / 100 });
+    pv.layer.getContext('2d').putImageData(img, 0, 0);
+    if (redraw) this.composite();
+  },
+  composite() {
+    const pv = this.pv;
+    const f = pv.fg.getContext('2d');
+    f.clearRect(0, 0, pv.W, pv.H);
+    f.drawImage(pv.mask, 0, 0);
+    f.globalCompositeOperation = 'source-in';
+    f.drawImage(pv.layer, 0, 0);
+    f.globalCompositeOperation = 'source-over';
+    const o = pv.out.getContext('2d');
+    o.clearRect(0, 0, pv.W, pv.H);
+    o.drawImage(pv.photo, 0, 0);
+    o.globalAlpha = this.s.strength / 100;
+    o.drawImage(pv.fg, 0, 0);
+    o.globalAlpha = 1;
+    if (this.s.mode !== 'view') {
+      // Brush view: tint where the smoothing goes.
+      f.clearRect(0, 0, pv.W, pv.H);
+      f.drawImage(pv.mask, 0, 0);
+      f.globalCompositeOperation = 'source-in';
+      f.fillStyle = core.SKIN_VEIL;
+      f.fillRect(0, 0, pv.W, pv.H);
+      f.globalCompositeOperation = 'source-over';
+      o.drawImage(pv.fg, 0, 0);
+    }
+    requestDraw();
+  },
+  setMode(mode) { this.s.mode = mode; if (this.pv) this.composite(); this.sync(); },
+  setStrength(v) { this.s.strength = v; if (this.pv) this.composite(); this.sync(); },
+  // The slider sends many steps a second; re-mix at most once a frame.
+  setTexture(v) {
+    this.s.texture = v;
+    this.sync();
+    if (this.textureQueued) return;
+    this.textureQueued = true;
+    requestAnimationFrame(() => { this.textureQueued = false; this.refreshLayer(); });
+  },
+  sync() {
+    const s = this.s, brush = s.mode !== 'view', ready = !!this.pv;
+    setPressed($$('[data-skinmode]'), (b) => b.dataset.skinmode === s.mode);
+    $('#skin-view-rows').hidden = brush;
+    $('#skin-brush-rows').hidden = !brush;
+    $('#skin-strength').value = String(s.strength);
+    $('#skin-strength-out').textContent = s.strength + ' %';
+    $('#skin-texture').value = String(s.texture);
+    $('#skin-texture-out').textContent = s.texture + ' %';
+    $('#skin-brush').value = String(s.brush);
+    $('#skin-brush-out').textContent = s.brush + ' px';
+    $('#skin-undo-stroke').disabled = !this.strokes.length;
+    const n = this.strokes.length;
+    $('#skin-out').textContent = !ready ? 'Finding the skin.' :
+      'Skin found in ' + Math.round(this.model.coverage * 100) + ' % of the photo' + (n ? ', ' + n + (n > 1 ? ' strokes.' : ' stroke.') : '.');
+  },
+  async apply() {
+    await this.ready;
+    if (!this.s.strength) return;
+    const src = app.edits.current, W = src.width, H = src.height;
+    const model = this.model, strokes = this.strokes.slice();
+    const o = { ...this.filter(1), strength: this.s.strength / 100, texture: this.s.texture / 100 };
+    await commit('Smooth skin', (img) => {
+      const a = core.bgStrokes(core.bgFeather(core.bgGuided(img, W, H, model), W, H, core.SKIN_FEATHER), W, H, strokes, 1);
+      return core.renderSmooth(img, a, W, H, o);
+    });
+  },
+};
+
+for (const b of $$('[data-skinmode]')) b.addEventListener('click', () => tools.skin.setMode(b.dataset.skinmode));
+$('#skin-strength').addEventListener('input', (e) => tools.skin.setStrength(+e.target.value));
+$('#skin-texture').addEventListener('input', (e) => tools.skin.setTexture(+e.target.value));
+$('#skin-brush').addEventListener('input', (e) => { tools.skin.s.brush = +e.target.value; tools.skin.sync(); });
+$('#skin-undo-stroke').addEventListener('click', () => tools.skin.undoStroke());
 
 /* ---------- Export ---------- */
 
