@@ -5,7 +5,9 @@
 //   - the Content-Security-Policy is present and only allows this origin
 //   - no other origin, CDN or network call appears anywhere in the app source
 //   - every required file is present, and nothing outside the allowed set
-//   - every vendored file has a pinned version in the retouch.html build notes
+//   - every vendored file has a pinned version in the retouch.html build notes,
+//     and every sha256 recorded there matches the file
+//   - the vendored MediaPipe code holds no telemetry and no other site to call
 //   - the service worker cache version matches APP_VERSION
 //   - the manifest has the share target and icons
 //   - every image in the repo carries no EXIF, XMP, IPTC, GPS or text chunks
@@ -33,6 +35,35 @@ const ALLOWED_TOP = new Set([
   'retouch_checks.cjs', 'retouch_behave.cjs', 'retouch_mutate.sh',
   'reference', 'node_modules', // both gitignored
 ]);
+
+// MediaPipe, vendored. Its scripts are the only .js files allowed besides sw.js.
+const MEDIAPIPE_DIR = 'vendor/mediapipe/';
+const MEDIAPIPE_SCRIPTS = ['vendor/mediapipe/vision_bundle.js', 'vendor/mediapipe/vision_wasm_internal.js'];
+// Web addresses in the Emscripten loader, reviewed for 0.10.35: every one sits in a
+// comment or error text (docs, bug reports, a sample stack trace). None is fetched.
+// An upgrade that adds an address fails here until someone has looked at it.
+const MEDIAPIPE_LOADER_URLS = [
+  'http://en.wikipedia.org/wiki/UTF-8#Description',
+  'http://kripken.github.io/emscripten-site/docs/api_reference/preamble.js.html',
+  'http://pubs.opengroup.org/onlinepubs/009695399/functions/tzset.html',
+  'http://server.com:4324:12',
+  'http://unicode.org/faq/utf_bom.html#utf16-3',
+  'http://www.w3.org/TR/2013/WD-cssom-view-20131217/',
+  'https://bugzil.la/1328882',
+  'https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/getTimezoneOffset',
+  'https://github.com/emscripten-core/emscripten/issues/13295.',
+  'https://github.com/emscripten-core/emscripten/issues/23697',
+  'https://github.com/emscripten-core/emscripten/pull/8236',
+  'https://github.com/github/fetch/pull/92#issuecomment-140665932',
+  'https://github.com/google/closure-compiler/issues/3193,',
+  'https://github.com/google/closure-compiler/pull/3913',
+  'https://github.com/libsdl-org/SDL/pull/6304',
+  'https://github.com/nodejs/help/issues/2136#issuecomment-523649904',
+  'https://tools.ietf.org/html/rfc3629',
+  'https://webkit.org/b/222758',
+  'https://www.ietf.org/rfc/rfc2279.txt',
+  'https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.15',
+];
 
 const CDN_HOSTS = [
   'cdnjs', 'jsdelivr', 'unpkg', 'googleapis', 'gstatic', 'cloudflare', 'bootstrapcdn',
@@ -138,7 +169,7 @@ function runChecks() {
   check('only allowed files at top level (app logic stays in retouch.html)', () => {
     const extra = fs.readdirSync(ROOT).filter((f) => !ALLOWED_TOP.has(f));
     assert(!extra.length, 'unexpected: ' + extra.join(', '));
-    const js = walk('').filter((f) => /\.(m?js|cjs)$/.test(f) && !['sw.js', 'retouch_checks.cjs', 'retouch_behave.cjs'].includes(f));
+    const js = walk('').filter((f) => /\.(m?js|cjs)$/.test(f) && !['sw.js', 'retouch_checks.cjs', 'retouch_behave.cjs', ...MEDIAPIPE_SCRIPTS].includes(f));
     assert(!js.length, 'extra script files: ' + js.join(', '));
   });
 
@@ -183,7 +214,7 @@ function runChecks() {
   check('no CDN references in any source file', () => {
     const bad = [];
     for (const f of walk('').filter((x) => /\.(html|js|cjs|json|webmanifest|css|md|sh)$/.test(x))) {
-      if (f === 'CLAUDE.md' || f === 'retouch_checks.cjs') continue;
+      if (f === 'CLAUDE.md' || f === 'retouch_checks.cjs' || f.startsWith(MEDIAPIPE_DIR)) continue;   // MediaPipe: own check below
       const src = read(f).toLowerCase();
       for (const h of CDN_HOSTS) if (src.includes(h)) bad.push(f + ': ' + h);
     }
@@ -195,6 +226,10 @@ function runChecks() {
     const banned = [/\bfetch\s*\(/, /XMLHttpRequest/, /\bWebSocket\b/, /sendBeacon/, /\bEventSource\b/, /importScripts/, /RTCPeerConnection/, /\bnew\s+Worker\s*\(\s*['"`][a-z]+:/i];
     const hits = banned.filter((re) => re.test(page)).map(String);
     assert(!hits.length, 'retouch.html uses: ' + hits.join(', '));
+    // Code may only be imported from vendor/, by a fixed relative path.
+    const imports = Array.from(page.matchAll(/\bimport\s*\(([^)]*)\)/g)).map((m) => m[1].trim());
+    const badImports = imports.filter((a) => !/^'\.\/vendor\/[\w./-]+\.js'$/.test(a));
+    assert(!badImports.length, 'retouch.html imports: ' + badImports.join(', '));
     const sw = stripComments(read('sw.js'));
     const swBanned = [/XMLHttpRequest/, /\bWebSocket\b/, /sendBeacon/, /\bEventSource\b/, /importScripts/];
     const swHits = swBanned.filter((re) => re.test(sw)).map(String);
@@ -212,21 +247,52 @@ function runChecks() {
     assert(notes, 'no "Build notes:" block in the retouch.html header');
     const vendored = walk('vendor');
     assert(vendored.length, 'vendor/ is empty');
-    const missing = [];
+    const missing = [], drifted = [];
     for (const f of vendored) {
-      const line = notes.split('\n').find((l) => l.includes(f));
-      if (!line || !/\b\d+\.\d+\.\d+\b/.test(line)) missing.push(f);
+      const line = notes.split('\n').find((l) => l.includes(f + ' '));
+      const sha = line && (line.match(/sha256 ([0-9a-f]{64})\b/) || [])[1];
+      if (!line || !(/\b\d+\.\d+\.\d+\b/.test(line) || sha)) missing.push(f);
+      if (sha && require('crypto').createHash('sha256').update(fs.readFileSync(path.join(ROOT, f))).digest('hex') !== sha) drifted.push(f);
     }
     assert(!missing.length, 'no pinned version recorded for: ' + missing.join(', '));
+    assert(!drifted.length, 'file differs from the sha256 in the build notes: ' + drifted.join(', '));
+    const mp = walk('vendor').filter((f) => f.startsWith(MEDIAPIPE_DIR) && !/\.txt$/.test(f));
+    const unhashed = mp.filter((f) => !/sha256 [0-9a-f]{64}/.test(notes.split('\n').find((l) => l.includes(f + ' ')) || ''));
+    assert(!unhashed.length, 'MediaPipe files need a sha256 in the build notes: ' + unhashed.join(', '));
     const listed = Array.from(notes.matchAll(/vendor\/\S+/g)).map((m) => m[0]);
     const ghost = listed.filter((f) => !exists(f));
     assert(!ghost.length, 'build notes list files that do not exist: ' + ghost.join(', '));
   });
 
+  check('vendored MediaPipe: no telemetry, no other site it could call', () => {
+    const bundle = read('vendor/mediapipe/vision_bundle.js');
+    const loader = read('vendor/mediapipe/vision_wasm_internal.js');
+    const urlRe = /(?:https?|wss?|ftp):\/\/[^\s"'<>)`]*/g;
+    const inBundle = bundle.match(urlRe) || [];
+    assert(!inBundle.length, 'web addresses in the bundle: ' + inBundle.join(', '));
+    // Protobuf type names look like addresses but are never fetched.
+    const google = (bundle.match(/[\w.-]*googleapis[\w./-]*/g) || []).filter((h) => !/^type\.googleapis\.com\/mediapipe\./.test(h));
+    assert(!google.length, 'googleapis in the bundle: ' + google.join(', '));
+    for (const [name, src] of [['bundle', bundle], ['loader', loader]]) {
+      for (const sig of ['odml', 'v1/log', 'x-goog-api-key', 'sendBeacon', 'google-analytics', 'firebase', 'clearcut']) {
+        assert(!src.includes(sig), name + ' contains "' + sig + '" (telemetry?)');
+      }
+    }
+    const extra = [...new Set(loader.match(urlRe) || [])].filter((u) => !MEDIAPIPE_LOADER_URLS.includes(u));
+    assert(!extra.length, 'new web addresses in the loader, review them: ' + extra.join(', '));
+    return MEDIAPIPE_LOADER_URLS.length + ' reviewed comment links in the loader';
+  });
+
   check('service worker caches the shell and every vendored runtime file', () => {
     const sw = read('sw.js');
-    const shell = Array.from((sw.match(/const SHELL = \[([\s\S]*?)\];/) || ['', ''])[1].matchAll(/'([^']+)'/g)).map((m) => m[1]);
-    assert(shell.length, 'no SHELL list in sw.js');
+    const list = (name) => Array.from((sw.match(new RegExp('const ' + name + ' = \\[([\\s\\S]*?)\\];')) || ['', ''])[1].matchAll(/'([^']+)'/g)).map((m) => m[1]);
+    const shell = [...list('SHELL'), ...list('VENDOR')];
+    assert(list('SHELL').length, 'no SHELL list in sw.js');
+    // The MediaPipe cache is named by its pin, so a new pin always downloads fresh files.
+    const pin = (read('retouch.html').match(/@mediapipe\/tasks-vision (\d+\.\d+\.\d+)/) || [])[1];
+    const vc = (sw.match(/const VENDOR_CACHE = '([^']+)'/) || [])[1];
+    assert(pin && vc === 'retouch-mediapipe-' + pin, 'VENDOR_CACHE ' + vc + ' does not match the pinned @mediapipe/tasks-vision ' + pin);
+    assert(list('VENDOR').every((f) => f.startsWith(MEDIAPIPE_DIR)), 'VENDOR lists files outside ' + MEDIAPIPE_DIR);
     const missing = shell.filter((f) => f !== './' && !exists(f));
     assert(!missing.length, 'SHELL lists missing files: ' + missing.join(', '));
     const runtime = walk('vendor').filter((f) => !/\.txt$/.test(f)).concat(walk('icons'));

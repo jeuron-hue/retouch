@@ -9,7 +9,7 @@
 # Each line below is: name ||| exact text in CORE ||| replacement.
 # The text must appear exactly once between "// CORE:BEGIN" and "// CORE:END".
 #
-# Run: bash retouch_mutate.sh          (about 5 to 10 minutes)
+# Run: bash retouch_mutate.sh          (about 10 to 15 minutes)
 #      JOBS=4 bash retouch_mutate.sh   (run four mutants at a time)
 
 set -u
@@ -108,6 +108,53 @@ pad text: size not scaled ||| y: (b.y + o.y) * k, size: b.size * k, ||| y: (b.y 
 inside: height checked against the width ||| b.y >= 0 && b.y <= H); ||| b.y >= 0 && b.y <= W);
 inside: keeps boxes off the left ||| texts.filter((b) => b.x >= 0 && ||| texts.filter((b) => b.x >= -1e9 &&
 history: undo walks forward ||| undo() { if (this.canUndo) this.index--; return this.current; } ||| undo() { if (this.canUndo) this.index -= 2; if (this.index < 0) this.index = 0; return this.current; }
+bg: person is the background ||| p[i] = Math.min(1, Math.max(0, 1 - bg[i])); ||| p[i] = Math.min(1, Math.max(0, bg[i]));
+bg: person not clamped ||| p[i] = Math.min(1, Math.max(0, 1 - bg[i])); ||| p[i] = 1 - bg[i];
+resample: pixel centres not lined up ||| const fx = Math.min(w - 1, Math.max(0, (x + 0.5) * sx - 0.5)); ||| const fx = Math.min(w - 1, Math.max(0, x * sx));
+resample: ignores the row below ||| out[y * W + x] = top + (bot - top) * ty; ||| out[y * W + x] = top;
+resample: x uses the y scale ||| const sx = w / W, sy = h / H; ||| const sx = h / H, sy = h / H;
+box: border divided by the full window ||| a[o + x] = s / (Math.min(w - 1, x + r) - Math.max(0, x - r) + 1); ||| a[o + x] = s / (2 * r + 1);
+box: row sum starts one short ||| for (let x = 0; x < Math.min(r, w); x++) s += line[x]; ||| for (let x = 0; x < Math.min(r, w) - 1; x++) s += line[x];
+box: column pass subtracts a blurred row ||| sum[x] -= ring[slot + x];   // row y - r - 1 ||| sum[x] -= a[(y - r - 1) * w + x];   // row y - r - 1
+box: column count one short ||| const n = Math.min(h - 1, y + r) - Math.max(0, y - r) + 1; ||| const n = Math.min(h - 1, y + r) - Math.max(0, y - r);
+box: column pass skipped ||| for (let x = 0; x < w; x++) { ring[slot + x] = a[o + x]; a[o + x] = sum[x] / n; } ||| for (let x = 0; x < w; x++) { ring[slot + x] = a[o + x]; }
+guided: no eps on red ||| const rr = mRR[i] - mR[i] * mR[i] + eps, ||| const rr = mRR[i] - mR[i] * mR[i],
+guided: covariance forgets the means ||| const cR = mRp[i] - mR[i] * mP[i], ||| const cR = mRp[i],
+guided: cofactor sign ||| i12 = rg * rb - rr * gb, ||| i12 = rr * gb - rg * rb,
+guided: offset ignores the colour ||| b[i] = mP[i] - ar[i] * mR[i] - ag[i] * mG[i] - ab[i] * mB[i]; ||| b[i] = mP[i] - ar[i] * mR[i];
+guided: coefficients not smoothed ||| return { ar: core.boxMean(ar, w, h, r), ag: core.boxMean(ag, w, h, r), ab: core.boxMean(ab, w, h, r), b: core.boxMean(b, w, h, r) }; ||| return { ar, ag, ab, b };
+guided: product of the wrong channels ||| mRG = mean(R, G), ||| mRG = mean(R, B),
+ramp: linear, not smooth ||| return t * t * (3 - 2 * t); ||| return t;
+ramp: haze kept ||| core.BG_EDGE_LO = 0.2; ||| core.BG_EDGE_LO = 0.05;
+guide: half the size ||| core.BG_GUIDE_LONG = 1024; ||| core.BG_GUIDE_LONG = 512;
+guide: small photos enlarged ||| const k = Math.min(1, core.BG_GUIDE_LONG / Math.max(w, h)); ||| const k = core.BG_GUIDE_LONG / Math.max(w, h);
+guide: one pass only ||| core.BG_GUIDE_PASSES = 2; ||| core.BG_GUIDE_PASSES = 1;
+guide: window too small ||| core.BG_GUIDE_RADIUS = 0.024; ||| core.BG_GUIDE_RADIUS = 0.008;
+guide: second pass ignores the first ||| if (m) { p = new Float32Array(n); core.guidedApply(d, w, h, 0, h, m, p); } ||| if (m) { core.guidedApply(d, w, h, 0, h, m, new Float32Array(n)); }
+guide: coverage is a sum ||| return { ...m, coverage: sum / n }; ||| return { ...m, coverage: sum / 1000 };
+apply: half-pixel shift ||| const f = Math.min(m.w - 1, Math.max(0, (x + 0.5) * sx - 0.5)); ||| const f = Math.min(m.w - 1, Math.max(0, x * sx));
+apply: strips overwrite the top ||| out[(y0 + j) * W + x] = core.bgCurve(q); ||| out[j * W + x] = core.bgCurve(q);
+apply: green read as red ||| (ag[i00] * w00 + ag[i01] * w01 + ag[i10] * w10 + ag[i11] * w11) * data[o + 1] + ||| (ag[i00] * w00 + ag[i01] * w01 + ag[i10] * w10 + ag[i11] * w11) * data[o] +
+apply: ramp skipped ||| out[(y0 + j) * W + x] = core.bgCurve(q); ||| out[(y0 + j) * W + x] = q;
+feather: radius from the short side ||| const r = Math.round(f * Math.max(W, H) / 2); ||| const r = Math.round(f * Math.min(W, H) / 2);
+feather: one pass ||| if (r > 0) { core.boxMean(a, W, H, r); core.boxMean(a, W, H, r); } ||| if (r > 0) { core.boxMean(a, W, H, r); }
+brush: bounds miss the radius ||| x1: Math.min(W, Math.ceil(x1 * k + r)), ||| x1: Math.min(W, Math.ceil(x1 * k)),
+brush: bounds ignore the scale ||| return { x0: Math.max(0, Math.floor(x0 * k - r)), ||| return { x0: Math.max(0, Math.floor(x0 - r)),
+brush: hard edge ||| const r = st.r * k, inner = r * (1 - core.BRUSH_SOFT); ||| const r = st.r * k, inner = r;
+brush: radius not scaled ||| const r = st.r * k, inner = r * (1 - core.BRUSH_SOFT); ||| const r = st.r, inner = r * (1 - core.BRUSH_SOFT);
+brush: segments run past their ends ||| const t = L2 ? Math.min(1, Math.max(0, (px * dx + py * dy) / L2)) : 0; ||| const t = L2 ? (px * dx + py * dy) / L2 : 0;
+brush: overlaps add up ||| if (c > cov[i]) cov[i] = c; ||| cov[i] = Math.min(1, cov[i] + c);
+brush: keep replaces instead of blending ||| a[i] = keep ? a[i] + (1 - a[i]) * c : a[i] * (1 - c); ||| a[i] = keep ? c : a[i] * (1 - c);
+brush: erase the wrong way ||| a[i] = keep ? a[i] + (1 - a[i]) * c : a[i] * (1 - c); ||| a[i] = keep ? a[i] + (1 - a[i]) * c : a[i] * c;
+brush: a tap paints nothing ||| for (let s = 0; s < Math.max(1, pts.length - 1); s++) { ||| for (let s = 0; s < pts.length - 1; s++) {
+brush: only the first stroke ||| for (const st of strokes) core.paintStroke(a, W, H, st, k); return a; ||| if (strokes[0]) core.paintStroke(a, W, H, strokes[0], k); return a;
+putAlpha: box offset dropped ||| d[o + 3] = a[(y + j) * W + bx.x0 + x] * 255; ||| d[o + 3] = a[(y + j) * W + x] * 255;
+putAlpha: strips stack at the top ||| ctx.putImageData(img, bx.x0, y); ||| ctx.putImageData(img, bx.x0, bx.y0);
+cutout: veil left off ||| ctx.drawImage(src, 0, 0, W, H); ctx.fillStyle = core.BG_VEIL; ||| ctx.drawImage(src, 0, 0, W, H); ctx.fillStyle = 'rgba(0,0,0,0)';
+cutout: mask not applied ||| fctx.globalCompositeOperation = 'source-in'; ||| fctx.globalCompositeOperation = 'source-over';
+cutout: backdrop skipped ||| core.drawBackdrop(ctx, src, W, H, o); ||| /* removed */
+cutout: blur backdrop is black ||| case 'blur': core.drawBlurCover(ctx, src, W, H, o.blur); break; ||| case 'blur': ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H); break;
+cutout: colour backdrop left out ||| case 'colour': ctx.fillStyle = o.colour; ctx.fillRect(0, 0, W, H); break; ||| case 'colour': break;
 EOF
 )
 
