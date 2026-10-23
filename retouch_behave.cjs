@@ -810,7 +810,7 @@ test('before / after hold on the main view and on every tool', async () => {
     await page.waitForFunction(() => window.retouch.app.showing === 'after');
   };
   await hold('#hold-main');
-  for (const t of ['crop', 'resize', 'pad']) {
+  for (const t of ['crop', 'resize', 'pad', 'text']) {
     await page.click('[data-open-tool="' + t + '"]');
     await hold('.sheet-panel[data-tool="' + t + '"] [data-hold]');
     await page.click('.sheet-panel[data-tool="' + t + '"] [data-cancel]');
@@ -861,7 +861,7 @@ test('phone layout: tap targets at least 44 px, no sideways scroll', async () =>
   await checkVisible('empty state');
   await load(page, gradient());
   await checkVisible('editing');
-  for (const t of ['crop', 'resize', 'pad']) {
+  for (const t of ['crop', 'resize', 'pad', 'text']) {
     await page.click('[data-open-tool="' + t + '"]');
     await checkVisible(t + ' sheet');
     const stage = await page.locator('#stage').boundingBox();
@@ -946,6 +946,544 @@ test('service worker: new version shows "Update available" and reloads into it',
     const keys = await page.evaluate(async () => caches.keys());
     assert(keys.includes('retouch-v' + v + '-next') && !keys.includes('retouch-v' + v), 'caches after update: ' + keys);
   } finally { server.swVariant = null; }
+  await ctx.close();
+});
+
+/* ---------- Phase 2: text ---------- */
+
+// In-page helpers: find the pixels of one colour and summarise where they are.
+const TEXT_INIT = () => {
+  window.__stats = (data, w, rgb, tol, box = null) => {
+    let n = 0, sx = 0, sy = 0, minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const h = data.length / 4 / w;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (box && (x < box[0] || x >= box[2] || y < box[1] || y >= box[3])) continue;
+      const i = (y * w + x) * 4;
+      if (Math.abs(data[i] - rgb[0]) > tol || Math.abs(data[i + 1] - rgb[1]) > tol || Math.abs(data[i + 2] - rgb[2]) > tol) continue;
+      n++; sx += x; sy += y;
+      if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    return { n, cx: sx / n, cy: sy / n, minX, minY, maxX, maxY, bw: maxX - minX + 1, bh: maxY - minY + 1 };
+  };
+  window.__pixels = async (bytes) => {
+    const bmp = await createImageBitmap(new Blob([new Uint8Array(bytes)]));
+    const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+    const x = c.getContext('2d'); x.drawImage(bmp, 0, 0);
+    return { w: c.width, h: c.height, data: x.getImageData(0, 0, c.width, c.height).data };
+  };
+  // Export the current step as PNG through the app's own export function.
+  window.__exportStats = async (rgb, tol = 40, box = null) => {
+    const r = await retouch.encodeImage(retouch.app.edits.current, 'png', 1, 'x', retouch.app.edits.texts);
+    const p = await window.__pixels(r.bytes);
+    return window.__stats(p.data, p.w, rgb, tol, box);
+  };
+};
+const MAGENTA = [255, 0, 255];
+
+// Open the Text sheet and set up the selected box (adding one with add: true).
+async function textBox(page, o = {}) {
+  if (!(await page.evaluate(() => retouch.app.tool === retouch.tools.text))) await page.click('[data-open-tool="text"]');
+  if (o.add) await page.click('#text-add');
+  await page.fill('#text-input', o.text || 'HHHH');
+  await page.evaluate(() => document.activeElement.blur());
+  await page.click('#text-fonts [data-font="' + (o.font || 'sans') + '"]');
+  await page.fill('#text-size', String(o.size || 40));
+  await page.dispatchEvent('#text-size', 'input');
+  await page.click('[data-target="fill"]');
+  await page.fill('#text-colour', o.colour || '#ff00ff');
+  await page.fill('#text-outline', String(o.outline || 0));
+  await page.dispatchEvent('#text-outline', 'input');
+  if (o.outlineColour) { await page.click('[data-target="outline"]'); await page.fill('#text-colour', o.outlineColour); await page.click('[data-target="fill"]'); }
+  await page.click('[data-shadow="' + (o.shadow || 'none') + '"]');
+  await page.click('[data-align="' + (o.align || 'center') + '"]');
+  if (o.apply !== false) await applyTool(page, 'text');
+}
+const texts = (page) => page.evaluate(() => retouch.app.edits.texts);
+// Where an image point is on the screen, in page coordinates.
+const onScreen = (page, x, y) => page.evaluate(([x, y]) => {
+  const r = document.querySelector('#view').getBoundingClientRect(), v = retouch.view;
+  return { x: r.left + v.tx + x * v.scale, y: r.top + v.ty + y * v.scale, s: v.scale };
+}, [x, y]);
+// Two-finger gesture on the stage, in page coordinates: [a0, b0] to [a1, b1].
+const pinch = (page, a0, b0, a1, b1, steps = 8) => page.evaluate(([a0, b0, a1, b1, steps]) => {
+  const c = document.querySelector('#view');
+  const ev = (type, id, p) => c.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: p.x, clientY: p.y, bubbles: true, pointerType: 'touch', isPrimary: id === 11 }));
+  const lerp = (p, q, t) => ({ x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t });
+  ev('pointerdown', 11, a0); ev('pointerdown', 12, b0);
+  for (let i = 1; i <= steps; i++) { ev('pointermove', 11, lerp(a0, a1, i / steps)); ev('pointermove', 12, lerp(b0, b1, i / steps)); }
+  ev('pointerup', 11, a1); ev('pointerup', 12, b1);
+}, [a0, b0, a1, b1, steps]);
+
+test('text: a box in a known colour lands where it was placed in the export', async () => {
+  const { ctx, page } = await newApp({ init: TEXT_INIT });
+  await load(page, makePng(400, 300, null, [], { flat: [40, 40, 40] }));
+  await textBox(page, { text: 'HHHH', size: 40 });
+  const t = await texts(page);
+  assert(t.length === 1, 'one box expected, got ' + t.length);
+  const b = t[0];
+  assert(b.text === 'HHHH' && b.colour === '#FF00FF' && b.size === 40 && b.font === 'sans' && b.shadow === 'none', 'box ' + JSON.stringify(b));
+  assert(b.x === 200 && b.y === 150 && b.rotation === 0, 'new box should sit at the centre: ' + JSON.stringify(b));
+  // The pixels are still the photo's own: text is not baked into the step.
+  samePx(await px(page, 200, 150), [40, 40, 40, 255], 0, 'step bitmap must not contain the text');
+  const m = await page.evaluate(() => retouch.core.textMeasure(retouch.app.edits.texts[0]));
+  // Export through the sheet as PNG and look at the real file.
+  await page.click('#btn-export');
+  await page.click('[data-format="png"]');
+  await page.waitForFunction(() => !document.querySelector('#export-download').disabled);
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#export-download')]);
+  const bytes = fs.readFileSync(await dl.path());
+  const s = await page.evaluate(async (arr) => { const p = await window.__pixels(arr); return window.__stats(p.data, p.w, [255, 0, 255], 40); }, Array.from(bytes));
+  assert(s.n > 300, 'too few text pixels in the export: ' + s.n);
+  near(s.cx, 200, 1.5, 'text centre x'); near(s.cy, 150, 6, 'text centre y');
+  assert(s.bw <= m.w && s.bw > m.w - 12, 'text width ' + s.bw + ' should be just inside its measured width ' + m.w);
+  assert(s.bh < m.h && s.bh > 40 * 0.5, 'text height ' + s.bh + ' for a 40 px font');
+  const bg = await page.evaluate(async (arr) => { const p = await window.__pixels(arr); return Array.from(p.data.slice(0, 4)); }, Array.from(bytes));
+  samePx(bg, [40, 40, 40, 255], 0, 'background away from the text');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+}, { core: true });
+
+test('text: drag, pinch and the handle change the stored transform and the exported pixels', async () => {
+  const { ctx, page } = await newApp({ init: TEXT_INIT });
+  await load(page, makePng(400, 300, null, [], { flat: [40, 40, 40] }));
+  await textBox(page, { text: 'HHHHHH', size: 30 });
+  const s0 = await page.evaluate(() => window.__exportStats([255, 0, 255]));
+
+  // Drag with one finger (mouse): the box and its pixels move by the same amount.
+  await page.click('[data-open-tool="text"]');
+  const c0 = await onScreen(page, 200, 150);
+  await page.mouse.move(c0.x, c0.y);
+  await page.mouse.down();
+  await page.mouse.move(c0.x + 60, c0.y - 30, { steps: 6 });
+  await page.mouse.up();
+  await applyTool(page, 'text');
+  let b = (await texts(page))[0];
+  near(b.x, 200 + 60 / c0.s, 0.01, 'dragged x'); near(b.y, 150 - 30 / c0.s, 0.01, 'dragged y');
+  assert(b.size === 30 && b.rotation === 0, 'a drag must not scale or turn: ' + JSON.stringify(b));
+  const s1 = await page.evaluate(() => window.__exportStats([255, 0, 255]));
+  near(s1.cx - s0.cx, b.x - 200, 1, 'exported text moved in x'); near(s1.cy - s0.cy, b.y - 150, 1, 'exported text moved in y');
+  near(s1.bw, s0.bw, 1, 'width unchanged by a drag');
+
+  // Pinch: fingers 80 px apart across the box, turned a quarter and spread to 120 px.
+  await page.click('[data-open-tool="text"]');
+  const c1 = await onScreen(page, b.x, b.y);
+  await pinch(page, { x: c1.x - 40, y: c1.y }, { x: c1.x + 40, y: c1.y }, { x: c1.x, y: c1.y - 60 }, { x: c1.x, y: c1.y + 60 });
+  await applyTool(page, 'text');
+  const b2 = (await texts(page))[0];
+  near(b2.size, 45, 0.01, 'pinch scale'); near(b2.rotation, Math.PI / 2, 1e-6, 'pinch turn');
+  near(b2.x, b.x, 0.01, 'pinch about the centre keeps x'); near(b2.y, b.y, 0.01, 'pinch about the centre keeps y');
+  const s2 = await page.evaluate(() => window.__exportStats([255, 0, 255]));
+  near(s2.bw, s1.bh * 1.5, 4, 'turned text: new width is 1.5 x the old height');
+  near(s2.bh, s1.bw * 1.5, 4, 'turned text: new height is 1.5 x the old width');
+  near(s2.cx, b.x - 1.5 * (s1.cy - b.y), 4, 'turned text centre x'); near(s2.cy, b.y, 4, 'turned text centre y');
+
+  // Pinch off-centre: the box follows the fingers (a translation of 50 px with them).
+  await page.click('[data-open-tool="text"]');
+  const c2 = await onScreen(page, b2.x, b2.y);
+  await pinch(page, { x: c2.x - 30, y: c2.y - 10 }, { x: c2.x + 30, y: c2.y - 10 }, { x: c2.x + 20, y: c2.y - 10 }, { x: c2.x + 80, y: c2.y - 10 });
+  await applyTool(page, 'text');
+  const b3 = (await texts(page))[0];
+  near(b3.x - b2.x, 50 / c2.s, 0.01, 'two-finger drag moves x'); near(b3.y, b2.y, 0.01, 'two-finger drag keeps y');
+  near(b3.size, b2.size, 1e-6, 'two-finger drag keeps size'); near(b3.rotation, b2.rotation, 1e-9, 'two-finger drag keeps the turn');
+
+  // The round handle: drag it halfway towards the centre and a quarter turn back.
+  await page.click('[data-open-tool="text"]');
+  const h = await page.evaluate(() => { const t = retouch.tools.text; return t.handlePoint(t.box()); });
+  const hs = await onScreen(page, h.x, h.y), cs = await onScreen(page, b3.x, b3.y);
+  const vx = hs.x - cs.x, vy = hs.y - cs.y;
+  await page.mouse.move(hs.x, hs.y);
+  await page.mouse.down();
+  await page.mouse.move(cs.x + vy * 0.5, cs.y - vx * 0.5, { steps: 6 });     // the handle vector turned -90 degrees and halved
+  await page.mouse.up();
+  await applyTool(page, 'text');
+  const b4 = (await texts(page))[0];
+  near(b4.size, b3.size * 0.5, 0.05, 'handle halves the size'); near(b4.rotation, 0, 1e-3, 'handle turns it back level');
+  near(b4.x, b3.x, 0.01, 'handle keeps the centre');
+  const s4 = await page.evaluate(() => window.__exportStats([255, 0, 255]));
+  near(s4.bw, s0.bw * 0.75, 3, 'exported width after the handle (30 px x 1.5 x 0.5)');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+}, { core: true });
+
+test('text: still editable after undo, redo and reopening the tool', async () => {
+  const { ctx, page } = await newApp({ init: TEXT_INIT });
+  await load(page, gradient());
+  await page.evaluate(() => { window.__bmp0 = retouch.app.edits.current; });
+  await textBox(page, { text: 'One' });
+  await textBox(page, { text: 'Two', add: true });
+  let t = await texts(page);
+  assert(t.length === 2 && t[0].text === 'One' && t[1].text === 'Two', 'two boxes: ' + JSON.stringify(t.map((b) => b.text)));
+  assert(t[1].id !== t[0].id, 'boxes need their own ids');
+  // Text steps reuse the bitmap: no new pixels.
+  const same = await page.evaluate(() => retouch.app.edits.stack.every((e) => e.bmp === retouch.app.edits.stack[0].bmp));
+  assert(same, 'a text step must not copy the image');
+  await page.click('#btn-undo');
+  t = await texts(page);
+  assert(t.length === 1 && t[0].text === 'One', 'undo removes the second box: ' + JSON.stringify(t));
+  await page.click('[data-open-tool="text"]');
+  assert((await page.inputValue('#text-input')) === 'One', 'reopened tool shows the box text');
+  await page.fill('#text-input', 'Uno');
+  await applyTool(page, 'text');
+  assert(await page.isDisabled('#btn-redo'), 'editing after undo drops the redo tail');
+  assert((await texts(page))[0].text === 'Uno', 'edited after undo');
+  await page.click('#btn-undo');
+  assert((await texts(page))[0].text === 'One', 'undo the edit');
+  await page.click('#btn-redo');
+  assert((await texts(page))[0].text === 'Uno', 'redo the edit');
+  // Cancel throws away changes made in the sheet.
+  await page.click('[data-open-tool="text"]');
+  await page.fill('#text-input', 'Discard me');
+  await page.click('.sheet-panel[data-tool="text"] [data-cancel]');
+  assert((await texts(page))[0].text === 'Uno', 'cancel keeps the old text');
+  // Delete, apply, then undo brings it back, still editable.
+  await page.click('[data-open-tool="text"]');
+  await page.click('#text-delete');
+  await applyTool(page, 'text');
+  assert((await texts(page)).length === 0, 'deleted');
+  await page.click('#btn-undo');
+  await page.click('[data-open-tool="text"]');
+  assert((await page.inputValue('#text-input')) === 'Uno', 'deleted box restored by undo and editable');
+  await page.click('.sheet-panel[data-tool="text"] [data-cancel]');
+  // Undo all the way: the original has no text, and its bitmap is untouched.
+  for (let i = 0; i < 6; i++) if (!(await page.isDisabled('#btn-undo'))) await page.click('#btn-undo');
+  assert((await texts(page)).length === 0, 'the original carries no text');
+  assert(await page.evaluate(() => retouch.app.edits.current === window.__bmp0 && window.__bmp0.width === 241), 'back on the original bitmap');
+  samePx(await px(page, 120, 90), [120, 90, 77, 255], 0, 'original pixels intact');
+  await ctx.close();
+}, { core: true });
+
+test('text: history keeps a bitmap alive while any step still uses it', async () => {
+  const { ctx, page } = await newApp();
+  await load(page, gradient());
+  const r = await page.evaluate(async () => {
+    const R = retouch, e = () => R.app.edits;
+    await R.commit('Resize', (src) => R.core.renderResize(src, 100, 75));
+    const A = e().current;
+    R.commitTexts('Text', [{ id: 1, text: 'a', font: 'sans', size: 10, colour: '#FFFFFF', align: 'center', outline: 0, outlineColour: '#000000', shadow: 'none', x: 50, y: 30, rotation: 0 }]);
+    R.undo();
+    // A new pixel step drops the redo tail, whose text step shares bitmap A.
+    await R.commit('Resize', (src) => R.core.renderResize(src, 90, 60));
+    R.undo();
+    const aliveAfterBranch = e().current === A && A.width === 100;
+    // Text step on A, then enough pixel steps to push A's own step off the bottom.
+    R.commitTexts('Text', [{ id: 1, text: 'b', font: 'sans', size: 10, colour: '#FFFFFF', align: 'center', outline: 0, outlineColour: '#000000', shadow: 'none', x: 50, y: 30, rotation: 0 }]);
+    for (let i = 0; i < R.HISTORY_DEPTH - 1; i++) await R.commit('Resize', (src) => R.core.renderResize(src, 80 + i, 60));
+    const labels1 = e().stack.map((s) => s.label);
+    const sharedKept = e().stack[1].bmp === A && A.width === 100;
+    await R.commit('Resize', (src) => R.core.renderResize(src, 70, 50));
+    const released = A.width === 0 && !e().stack.some((s) => s.bmp === A);
+    return { aliveAfterBranch, labels1, sharedKept, released, len: e().stack.length };
+  });
+  assert(r.aliveAfterBranch, 'dropping a redo text step released a bitmap still in use');
+  assert(r.labels1[1] === 'Text', 'the text step should now be the oldest edit: ' + r.labels1);
+  assert(r.sharedKept, 'evicting a step released a bitmap a later text step still uses');
+  assert(r.released, 'a bitmap no step uses any more must be released');
+  assert(r.len === 11, 'stack length ' + r.len);
+  await ctx.close();
+}, { core: true });
+
+test('text: live preview matches the export', async () => {
+  const { ctx, page } = await newApp({ init: TEXT_INIT });
+  await load(page, gradient());
+  await textBox(page, { text: 'Hello\nretouch', font: 'serif', size: 28, colour: '#f2c94c', outline: 8, outlineColour: '#1f6f8b', shadow: 'soft', align: 'left' });
+  await page.evaluate(() => { const b = retouch.app.edits.texts[0]; retouch.commitTexts('Text', [{ ...b, rotation: 0.4, x: 110, y: 95 }]); });
+  // Show the photo at one device pixel per image pixel, on whole device pixels.
+  const compare = (liveFromTool) => page.evaluate(async (liveFromTool) => {
+    const R = retouch, v = R.view;
+    v.fitMode = false; v.scale = 1 / v.dpr; v.tx = 8 / v.dpr; v.ty = 8 / v.dpr;
+    R.draw();                                   // draw now, so nothing (a resize, a font) redraws in between
+    const src = R.app.edits.current, w = src.width, h = src.height;
+    const shown = v.canvas.getContext('2d').getImageData(8, 8, w, h).data;
+    const t = liveFromTool ? R.tools.text.liveTexts() : R.app.edits.texts;
+    const ex = await window.__pixels((await R.encodeImage(src, 'png', 1, 'x', t)).bytes);
+    let sum = 0, max = 0, textPx = 0;
+    for (let i = 0; i < shown.length; i++) {
+      const d = Math.abs(shown[i] - ex.data[i]); sum += d; if (d > max) max = d;
+    }
+    const plain = R.readPixels(src);
+    for (let i = 0; i < plain.length; i += 4) if (Math.abs(plain[i] - ex.data[i]) + Math.abs(plain[i + 2] - ex.data[i + 2]) > 30) textPx++;
+    return { mean: sum / shown.length, max, textPx };
+  }, liveFromTool);
+  let r = await compare(false);
+  assert(r.textPx > 800, 'the export should contain the text (' + r.textPx + ' changed pixels)');
+  assert(r.mean < 0.05 && r.max <= 3, 'main view differs from the export: mean ' + r.mean + ', max ' + r.max);
+  // Inside the tool, after moving the box and clearing the selection frame.
+  await page.click('[data-open-tool="text"]');
+  await page.evaluate(() => { const t = retouch.tools.text; t.replace({ ...t.box(), x: 150, rotation: -0.2 }); t.s.sel = null; t.sync(); });
+  r = await compare(true);
+  assert(r.mean < 0.05 && r.max <= 3, 'live preview in the tool differs from its export: mean ' + r.mean + ', max ' + r.max);
+  await ctx.close();
+}, { core: true });
+
+test('text: outline, shadow, alignment and line spacing change the right pixels', async () => {
+  const { ctx, page } = await newApp({ init: TEXT_INIT });
+  const r = await page.evaluate(async () => {
+    await retouch.fontsReady();
+    const C = retouch.core, W = 300, H = 160;
+    const base = { id: 1, text: 'HHHH', font: 'sans', size: 40, colour: '#FF00FF', align: 'center', outline: 0, outlineColour: '#00FF00', shadow: 'none', x: 150, y: 80, rotation: 0 };
+    const bg = C.makeCanvas(W, H); const g = bg.getContext('2d'); g.fillStyle = 'rgb(150,150,150)'; g.fillRect(0, 0, W, H);
+    const render = (boxes, zoom = 1) => {
+      const c = C.makeCanvas(W * zoom, H * zoom), x = c.getContext('2d');
+      x.drawImage(bg, 0, 0, W * zoom, H * zoom);
+      x.setTransform(zoom, 0, 0, zoom, 0, 0);
+      C.drawTexts(x, boxes);
+      return { data: x.getImageData(0, 0, W * zoom, H * zoom).data, w: W * zoom };
+    };
+    const S = (img, rgb, tol, box) => window.__stats(img.data, img.w, rgb, tol, box);
+    const out = {};
+    const plain = render([base]);
+    out.plainFill = S(plain, [255, 0, 255], 40); out.plainGreen = S(plain, [0, 255, 0], 60).n; out.plainDark = S(plain, [30, 30, 30], 40).n;
+    const outlined = render([{ ...base, outline: 0.2 }]);
+    const pair = render([base, { ...base, id: 2, y: 25, colour: '#00FFFF' }]);
+    out.twoBoxes = { magenta: S(pair, [255, 0, 255], 40).n, cyan: S(pair, [0, 255, 255], 40).n };
+    out.outFill = S(outlined, [255, 0, 255], 40); out.outGreen = S(outlined, [0, 255, 0], 60);
+    // render() draws onto a copy of bg each time, so the fixture is reusable.
+    out.renderTexts = (() => { const c = C.renderTexts(bg, [base]); const d = c.getContext('2d').getImageData(0, 0, W, H).data; return window.__stats(d, W, [255, 0, 255], 40).n; })();
+    out.hard = S(render([{ ...base, shadow: 'hard' }]), [38, 38, 38], 30);
+    out.hardFill = S(render([{ ...base, shadow: 'hard' }]), [255, 0, 255], 40);
+    out.hardZoom = S(render([{ ...base, shadow: 'hard' }], 2), [38, 38, 38], 30);
+    out.hardZoomFill = S(render([{ ...base, shadow: 'hard' }], 2), [255, 0, 255], 40);
+    out.hardTurned = S(render([{ ...base, shadow: 'hard', rotation: Math.PI / 2, text: 'HH' }]), [38, 38, 38], 30);
+    out.hardTurnedFill = S(render([{ ...base, shadow: 'hard', rotation: Math.PI / 2, text: 'HH' }]), [255, 0, 255], 40);
+    const dark = (img) => { let n = 0; for (let i = 0; i < img.data.length; i += 4) if (img.data[i] < 140 && img.data[i + 1] < 140) n++; return n; };
+    out.softDark = dark(render([{ ...base, shadow: 'soft' }]));
+    out.softDarkZoom = dark(render([{ ...base, shadow: 'soft' }], 2));
+    out.hardDark = dark(render([{ ...base, shadow: 'hard' }]));
+    const two = { ...base, text: 'HHHHHH\nH', size: 30 };
+    const m = C.textMeasure(two);
+    for (const a of ['left', 'center', 'right']) {
+      const img = render([{ ...two, align: a }]);
+      out[a + 'Top'] = S(img, [255, 0, 255], 40, [0, 0, W, 80]);
+      out[a + 'Low'] = S(img, [255, 0, 255], 40, [0, 81, W, H]);
+    }
+    out.m = { w: m.w, h: m.h, lh: m.lh, lines: m.lines.length };
+    return out;
+  });
+  // Outline: green ring around the letters, letters still magenta on top.
+  assert(r.plainGreen === 0, 'no outline colour without an outline');
+  assert(r.outGreen.n > r.plainFill.n * 0.5, 'outline too small: ' + r.outGreen.n + ' green pixels');
+  assert(r.outFill.n > r.plainFill.n * 0.8, 'the outline must sit under the letters, not over them: ' + r.outFill.n + ' vs ' + r.plainFill.n);
+  near(r.outGreen.bw, r.plainFill.bw + 2 * 0.2 * 40, 3, 'outline reaches 0.2 x size beyond the letters (width)');
+  near(r.outGreen.bh, r.plainFill.bh + 2 * 0.2 * 40, 3, 'outline reaches 0.2 x size beyond the letters (height)');
+  assert(r.twoBoxes.cyan > 200 && r.twoBoxes.magenta === r.plainFill.n, 'every box is drawn: ' + JSON.stringify(r.twoBoxes));
+  assert(r.renderTexts === r.plainFill.n, 'renderTexts draws the same text as drawTexts');
+  // Shadow: hard shadow is the letters again, 0.06 x size down and right.
+  assert(r.plainDark === 0, 'no shadow when shadow is off');
+  assert(r.hard.n > 100, 'hard shadow missing');
+  near(r.hard.maxX - r.hardFill.maxX, 0.06 * 40, 1, 'hard shadow offset x'); near(r.hard.maxY - r.hardFill.maxY, 0.06 * 40, 1, 'hard shadow offset y');
+  near(r.hardZoom.maxX - r.hardZoomFill.maxX, 2 * 0.06 * 40, 1.5, 'shadow offset scales with the zoom');
+  near(r.hardTurned.maxX - r.hardTurnedFill.maxX, 0.06 * 40, 1, 'turned box: shadow still falls right');
+  near(r.hardTurned.maxY - r.hardTurnedFill.maxY, 0.06 * 40, 1, 'turned box: shadow still falls down');
+  assert(r.softDark > r.hardDark * 1.1, 'soft shadow should spread wider than the hard one: ' + r.softDark + ' vs ' + r.hardDark);
+  near(r.softDarkZoom / r.softDark, 4, 0.6, 'soft shadow blur scales with the zoom');
+  // Alignment: the short second line sits at the left edge, centre, or right edge.
+  near(r.m.lines, 2, 0, 'two lines'); near(r.m.h, 2 * 30 * 1.2, 1e-9, 'box height is lines x 1.2 x size');
+  const left = 150 - r.m.w / 2, right = 150 + r.m.w / 2;
+  for (const a of ['left', 'center', 'right']) near(r[a + 'Top'].cx, 150, 1.5, a + ': the long line is centred in the box');
+  near(r.leftLow.minX, left, 5, 'left aligned short line'); near(r.rightLow.maxX, right, 5, 'right aligned short line');
+  near(r.centerLow.cx, 150, 1.5, 'centred short line');
+  near(r.leftLow.cy - r.leftTop.cy, 30 * 1.2, 2, 'line spacing');
+  await ctx.close();
+}, { core: true });
+
+test('text: core maths for hit testing, pinch and angles', async () => {
+  const { ctx, page } = await newApp();
+  const r = await page.evaluate(() => {
+    const C = retouch.core;
+    const b = { id: 7, x: 100, y: 50, rotation: Math.PI / 6, size: 20, text: 'x' };
+    const m = { w: 80, h: 24 };
+    const local = C.textToLocal(b, 100 + 30 * Math.cos(Math.PI / 6) - 5 * Math.sin(Math.PI / 6), 50 + 30 * Math.sin(Math.PI / 6) + 5 * Math.cos(Math.PI / 6));
+    const back = C.textToImage(b, 30, 5);
+    const hits = [[100, 50], [100 + 39 * Math.cos(Math.PI / 6), 50 + 39 * Math.sin(Math.PI / 6)], [100 + 41 * Math.cos(Math.PI / 6), 50 + 41 * Math.sin(Math.PI / 6)],
+      [100 - 11 * Math.sin(Math.PI / 6), 50 + 11 * Math.cos(Math.PI / 6)], [100 - 13 * Math.sin(Math.PI / 6), 50 + 13 * Math.cos(Math.PI / 6)], [100 + 30, 50 - 20]]
+      .map(([x, y]) => C.textHit(b, m, x, y));
+    const slack = C.textHit(b, m, 100 + 43 * Math.cos(Math.PI / 6), 50 + 43 * Math.sin(Math.PI / 6), 4);
+    const p = C.textPinch({ ...b, rotation: 0 }, { x: 90, y: 50 }, { x: 110, y: 50 }, { x: 200, y: 100 }, { x: 200, y: 140 });
+    const p2 = C.textPinch({ ...b, rotation: 0 }, { x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 30 });
+    const angles = [C.textAngle(3 * Math.PI / 2), C.textAngle(-3 * Math.PI / 2), C.textAngle(Math.PI / 4), C.textAngle(7 * Math.PI / 3), C.textAngle(-Math.PI / 3)];
+    const boxes = [{ ...b, id: 1, rotation: 0, text: 'WWWW' }, { ...b, id: 2, rotation: 0, text: 'WWWW' }, { ...b, id: 3, x: 400, rotation: 0 }];
+    const pick = [C.textPick(boxes, 100, 50, 0), C.textPick(boxes, 400, 50, 0), C.textPick(boxes, 250, 50, 0), C.textPick(boxes, 100, 50 + 12.5, 1), C.textPick(boxes, 100, 50 + 14, 1)];
+    const mm = C.textMeasure({ ...b, text: 'ab\ncdefgh\n', size: 50 });
+    const font = C.textFont({ font: 'bebas', size: 33 });
+    const one = { ...b, x: 10, y: 20, size: 10 };
+    const rs = C.textsAfterResize([one], 100, 50, 200, 150)[0];
+    const pd = C.textsAfterPad([one], { x: 5, y: 7 }, 0.5)[0];
+    const ins = C.textsInside([{ id: 1, x: 0, y: 0 }, { id: 2, x: 100, y: 60 }, { id: 3, x: -0.1, y: 5 }, { id: 4, x: 5, y: 60.1 }, { id: 5, x: 100.1, y: 5 }, { id: 6, x: 50, y: -1 }, { id: 7, x: 80, y: 70 }], 100, 60).map((x) => x.id);
+    return { local, back, hits, slack, p, p2, angles, pick, mm: { lines: mm.lines.length, lh: mm.lh, h: mm.h, w: mm.w }, font,
+      rs: [rs.x, rs.y, rs.size, rs.rotation], pd: [pd.x, pd.y, pd.size, pd.rotation], ins };
+  });
+  near(r.local.x, 30, 1e-9, 'to local x'); near(r.local.y, 5, 1e-9, 'to local y');
+  near(r.back.x, 100 + 30 * Math.cos(Math.PI / 6) - 5 * Math.sin(Math.PI / 6), 1e-9, 'to image x');
+  near(r.back.y, 50 + 30 * Math.sin(Math.PI / 6) + 5 * Math.cos(Math.PI / 6), 1e-9, 'to image y');
+  assert(JSON.stringify(r.hits) === JSON.stringify([true, true, false, true, false, false]), 'hit tests ' + JSON.stringify(r.hits));
+  assert(r.slack, 'slack widens the hit area');
+  near(r.p.x, 200, 1e-9, 'pinch x'); near(r.p.y, 120, 1e-9, 'pinch y'); near(r.p.size, 40, 1e-9, 'pinch size'); near(r.p.rotation, Math.PI / 2, 1e-9, 'pinch turn');
+  near(r.p2.x, -150, 1e-9, 'pinch about a far point x'); near(r.p2.y, 300, 1e-9, 'pinch about a far point y'); near(r.p2.size, 60, 1e-9, 'pinch size 3x');
+  [-Math.PI / 2, Math.PI / 2, Math.PI / 4, Math.PI / 3, -Math.PI / 3].forEach((want, i) => near(r.angles[i], want, 1e-9, 'angle ' + i));
+  assert(JSON.stringify(r.pick) === JSON.stringify([2, 3, null, 2, null]), 'pick ' + JSON.stringify(r.pick));
+  assert(r.mm.lines === 3 && r.mm.lh === 60 && r.mm.h === 180, 'measure ' + JSON.stringify(r.mm));
+  assert(r.font === '400 33px "Bebas Neue"', 'font ' + r.font);
+  assert(JSON.stringify(r.rs) === JSON.stringify([20, 60, 25, Math.PI / 6]), 'textsAfterResize ' + r.rs);
+  assert(JSON.stringify(r.pd) === JSON.stringify([7.5, 13.5, 5, Math.PI / 6]), 'textsAfterPad ' + r.pd);
+  assert(JSON.stringify(r.ins) === '[1,2]', 'textsInside ' + r.ins);
+  await ctx.close();
+}, { core: true });
+
+test('text: boxes follow crop, resize and add canvas, and leave with what is cut away', async () => {
+  const { ctx, page } = await newApp({ init: TEXT_INIT });
+  await load(page, gradient());
+  const box = { id: 1, text: 'Hi', font: 'sans', size: 20, colour: '#FF00FF', align: 'center', outline: 0, outlineColour: '#000000', shadow: 'none', x: 60, y: 50, rotation: 0.3 };
+  await page.evaluate((b) => retouch.commitTexts('Text', [b]), box);
+  // The photo pixel under the box centre must still be the same photo pixel (60, 50) afterwards.
+  const under = async (b) => page.evaluate(([x, y]) => retouch.readPixels(retouch.app.edits.current, Math.floor(x), Math.floor(y), 1, 1), [b.x, b.y]);
+  const check = async (what, want, tol = 1.5) => {
+    const t = await texts(page);
+    assert(t.length === 1, what + ': ' + t.length + ' boxes');
+    const b = t[0];
+    for (const k of Object.keys(want)) near(b[k], want[k], k === 'rotation' ? 1e-9 : 0.01, what + ' ' + k);
+    samePx(await under(b), [60, 50, 77], tol + 1, what + ': box no longer over the same photo pixel');
+    assert(b.text === 'Hi' && b.colour === '#FF00FF', what + ': box content changed');
+    return b;
+  };
+  const sheet = async (tool, clicks) => { await page.click('[data-open-tool="' + tool + '"]'); for (const c of clicks) await page.click(c); await applyTool(page, tool); };
+  const A = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+  await sheet('crop', ['#crop-rotate']);
+  await check('rotate 90', { x: GH - 50, y: 60, size: 20, rotation: 0.3 + Math.PI / 2 });
+  await page.click('#btn-undo');
+  await sheet('crop', ['#crop-rotate', '#crop-rotate', '#crop-rotate']);
+  await check('rotate 270', { x: 50, y: GW - 60, rotation: A(0.3 - Math.PI / 2) });
+  await page.click('#btn-undo');
+  await sheet('crop', ['#crop-flip-h']);
+  await check('flip H keeps letters readable', { x: GW - 60, y: 50, rotation: -0.3 });
+  await page.click('#btn-undo');
+  await sheet('crop', ['#crop-flip-v']);
+  await check('flip V keeps letters readable', { x: 60, y: GH - 50, rotation: -0.3 });
+  await page.click('#btn-undo');
+  await sheet('crop', ['#crop-rotate', '#crop-flip-h']);
+  await check('rotate then flip', { x: 50, y: 60, rotation: A(-0.3 - Math.PI / 2) });
+  await page.click('#btn-undo');
+  await sheet('crop', ['#crop-flip-h', '#crop-flip-v']);
+  await check('flip both ways is a half turn', { x: GW - 60, y: GH - 50, rotation: A(0.3 + Math.PI) });
+  await page.click('#btn-undo');
+  await sheet('crop', ['#crop-ratios [data-ratio="1:1"]']);
+  await check('1:1 crop', { x: 60 - 30, y: 50, size: 20, rotation: 0.3 });
+  await page.click('#btn-undo');
+  await page.click('[data-open-tool="crop"]');
+  await page.fill('#crop-straighten', '10');
+  await page.dispatchEvent('#crop-straighten', 'input');
+  await applyTool(page, 'crop');
+  await check('straighten 10 degrees', { size: 20, rotation: 0.3 + 10 * Math.PI / 180 }, 2.5);
+  await page.click('#btn-undo');
+
+  // Resize to 1080 wide: everything scales by the same factor.
+  await sheet('resize', ['#resize-ig']);
+  const k = 1080 / GW, kh = Math.round(GH * k) / GH;
+  await check('resize', { x: 60 * k, y: 50 * kh, size: 20 * (k + kh) / 2, rotation: 0.3 });
+  await page.click('#btn-undo');
+
+  // Add canvas 4:5 white: the photo moves down 60 px and so does the box.
+  await sheet('pad', ['#pad-ratios [data-ratio="4:5"]', '[data-fill="colour"]', '[data-colour="#FFFFFF"]']);
+  const bp = await check('add canvas', { x: 60, y: 110, size: 20, rotation: 0.3 }, 0);
+  // And the export draws it there.
+  const s = await page.evaluate(() => window.__exportStats([255, 0, 255]));
+  near(s.cx, bp.x, 2, 'exported text x after add canvas'); near(s.cy, bp.y, 4, 'exported text y after add canvas');
+  await page.click('#btn-undo');
+
+  // The add-canvas preview shows the box where it will land.
+  await page.click('[data-open-tool="pad"]');
+  await page.click('#pad-ratios [data-ratio="4:5"]');
+  const pv = await page.evaluate(() => retouch.app.preview.texts[0]);
+  near(pv.y, 110, 1e-9, 'add canvas preview carries the text');
+  await page.click('.sheet-panel[data-tool="pad"] [data-cancel]');
+
+  // An off-centre crop moves the box by the crop's top-left corner (21, 16).
+  await page.evaluate(() => {
+    const p = { quarter: 0, flipH: false, flipV: false, theta: 0, rect: { cx: -20, cy: -15, w: 160, h: 120 } };
+    return retouch.commit('Crop', (img) => retouch.core.renderCrop(img, p), (t) => retouch.core.textsAfterCrop(t, 241, 181, p));
+  });
+  await check('off-centre crop', { x: 60 - 21, y: 50 - 16, size: 20, rotation: 0.3 }, 0);
+  await page.click('#btn-undo');
+
+  // A crop that cuts the box away removes it, says so, and undo brings it back.
+  await page.evaluate(() => {
+    const p = { quarter: 0, flipH: false, flipV: false, theta: 0, rect: { cx: 30, cy: 20, w: 100, h: 60 } };
+    return retouch.commit('Crop', (img) => retouch.core.renderCrop(img, p), (t) => retouch.core.textsAfterCrop(t, 241, 181, p));
+  });
+  assert((await texts(page)).length === 0, 'box outside the crop should be removed');
+  const note = await page.textContent('.notice[data-id="text-lost"]');
+  assert(/1 text box was outside the new frame/.test(note), 'notice: ' + note);
+  await page.click('#btn-undo');
+  await check('undo restores the cut box', { x: 60, y: 50 });
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+}, { core: true });
+
+test('text: export in every format carries the text and no metadata', async () => {
+  const { ctx, page } = await newApp({ init: TEXT_INIT });
+  const jpeg = Buffer.from(await page.evaluate(async () => {
+    const c = document.createElement('canvas'); c.width = 320; c.height = 240;
+    const x = c.getContext('2d'); x.fillStyle = '#283c50'; x.fillRect(0, 0, 320, 240);
+    return Array.from(new Uint8Array(await (await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.95))).arrayBuffer()));
+  }));
+  await load(page, plantJpegMetadata(jpeg), 'PXL_text.jpg', 'image/jpeg');
+  await textBox(page, { text: 'HHHH', size: 48, font: 'bebas', outline: 5, outlineColour: '#ffffff', shadow: 'hard' });
+  await page.click('#btn-export');
+  for (const fmt of ['jpeg', 'png', 'webp']) {
+    await page.click('[data-format="' + fmt + '"]');
+    await page.waitForFunction(() => !document.querySelector('#export-download').disabled);
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#export-download')]);
+    const bytes = fs.readFileSync(await dl.path());
+    assert(imageFormat(bytes) === fmt, fmt + ': exported ' + imageFormat(bytes));
+    const left = findImageMetadata(bytes);
+    assert(!left.length, fmt + ': export with text carries ' + left.join(', '));
+    const s = await page.evaluate(async (arr) => { const p = await window.__pixels(arr); return window.__stats(p.data, p.w, [255, 0, 255], 60); }, Array.from(bytes));
+    assert(s.n > 200, fmt + ': text missing from the export (' + s.n + ' px)');
+    near(s.cx, 160, 2, fmt + ': text centre x');
+  }
+  // Hold: original in Export shows the original, without the text.
+  const b = await page.locator('.sheet-panel[data-tool="export"] [data-hold]').boundingBox();
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.waitForFunction(() => window.retouch.app.showing === 'before');
+  const shown = await page.evaluate(() => { const R = retouch; const d = R.app.edits; return R.app.holding && d.stack[0].texts.length === 0; });
+  await page.mouse.up();
+  assert(shown, 'export hold shows the original');
+  await ctx.close();
+}, { core: true });
+
+test('text: sheet controls, typing mode and the stage stays usable', async () => {
+  const { ctx, page } = await newApp();
+  await load(page, gradient());
+  await page.click('[data-open-tool="text"]');
+  assert((await page.evaluate(() => retouch.tools.text.s.texts.length)) === 1, 'opening Text with no boxes adds one');
+  await page.focus('#text-input');
+  assert(await page.isHidden('#text-style'), 'style rows hide while typing');
+  const stage = await page.locator('#stage').boundingBox();
+  assert(stage.height > 500, 'photo area while typing ' + stage.height);
+  // Tapping the photo ends typing.
+  const v = await page.locator('#view').boundingBox();
+  await page.mouse.click(v.x + 10, v.y + v.height - 10);   // below the hint notice
+  assert(await page.isVisible('#text-style'), 'style rows return after typing');
+  assert((await page.evaluate(() => retouch.tools.text.s.sel)) === null, 'a tap on empty photo clears the selection');
+  assert(await page.isDisabled('#text-delete'), 'nothing to delete with no selection');
+  // Tap the box to select it again.
+  const c = await onScreen(page, GW / 2, GH / 2);
+  await page.mouse.click(c.x, c.y);
+  assert((await page.evaluate(() => retouch.tools.text.s.sel)) === 1, 'tap selects the box');
+  await page.click('#text-fonts [data-font="hand"]');
+  await page.click('[data-align="right"]');
+  await page.click('[data-target="outline"]');
+  await page.click('[data-tcolour="#E2556B"]');
+  const b = await page.evaluate(() => retouch.tools.text.box());
+  assert(b.font === 'hand' && b.align === 'right' && b.outlineColour === '#E2556B' && b.outline > 0, 'controls: ' + JSON.stringify(b));
+  assert((await page.getAttribute('[data-tcolour="#E2556B"]', 'aria-pressed')) === 'true', 'outline swatch pressed');
+  // Empty boxes are dropped on apply.
+  await page.click('#text-add');
+  await page.fill('#text-input', '   ');
+  await applyTool(page, 'text');
+  assert((await page.evaluate(() => retouch.app.edits.texts.length)) === 1, 'blank box dropped');
+  assert(page.errors.length === 0, page.errors.join('; '));
   await ctx.close();
 });
 

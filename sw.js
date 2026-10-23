@@ -13,7 +13,7 @@
 // in retouch.html (retouch_checks.cjs fails if they differ). A new version makes
 // the browser install a fresh worker, and the app shows "Update available".
 
-const CACHE_VERSION = '0.1.0';
+const CACHE_VERSION = '0.2.0';
 const CACHE = 'retouch-v' + CACHE_VERSION;
 const SHARE_CACHE = 'retouch-share';
 const SHARE_KEY = 'shared-image';
@@ -31,6 +31,9 @@ const SHELL = [
   'vendor/fonts/source-sans-3-latin-600-normal.woff2',
   'vendor/fonts/jetbrains-mono-latin-400-normal.woff2',
   'vendor/fonts/jetbrains-mono-latin-500-normal.woff2',
+  'vendor/fonts/playfair-display-latin-700-normal.woff2',
+  'vendor/fonts/bebas-neue-latin-400-normal.woff2',
+  'vendor/fonts/caveat-latin-600-normal.woff2',
 ];
 
 self.addEventListener('install', (event) => {

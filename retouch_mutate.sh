@@ -58,9 +58,55 @@ meta: WebP keeps the XMP flag ||| if (type === 'VP8X') chunk[8] &= ~(0x08 | 0x04
 meta: WebP keeps XMP ||| core.meta.WEBP_KEEP = ['VP8 ', 'VP8L', 'VP8X', ||| core.meta.WEBP_KEEP = ['XMP ', 'VP8 ', 'VP8L', 'VP8X',
 meta: WebP RIFF size wrong ||| const size = body.length + 4; ||| const size = body.length;
 meta: GPS tag missed ||| if (u16(e) === 0x8825) return true; ||| if (u16(e) === 0x8824) return true;
-history: one step short ||| while (this.stack.length > this.depth + 1) { ||| while (this.stack.length > this.depth) {
-history: drops the original ||| const [old] = this.stack.splice(1, 1); ||| const [old] = this.stack.splice(0, 1);
-history: keeps part of the redo tail ||| for (const e of this.stack.splice(this.index + 1)) core.release(e.bmp); ||| for (const e of this.stack.splice(this.index + 2)) core.release(e.bmp);
+history: one step short ||| while (this.stack.length > this.depth + 1) gone.push ||| while (this.stack.length > this.depth) gone.push
+history: drops the original ||| gone.push(...this.stack.splice(1, 1)); ||| gone.push(...this.stack.splice(0, 1));
+history: keeps part of the redo tail ||| const gone = this.stack.splice(this.index + 1); ||| const gone = this.stack.splice(this.index + 2);
+history: releases a bitmap still in use ||| for (const e of gone) if (!this.stack.some((k) => k.bmp === e.bmp)) core.release(e.bmp); ||| for (const e of gone) core.release(e.bmp);
+history: never releases a dropped bitmap ||| for (const e of gone) if (!this.stack.some((k) => k.bmp === e.bmp)) core.release(e.bmp); ||| for (const e of gone) if (!e.bmp) core.release(e.bmp);
+history: a step forgets its text ||| this.stack.push({ bmp, texts, label, time: Date.now() }); ||| this.stack.push({ bmp, texts: [], label, time: Date.now() });
+history: text always from the original ||| get texts() { return this.stack[this.index].texts; } ||| get texts() { return this.stack[0].texts; }
+text: font weight dropped ||| return f.weight + ' ' + box.size + 'px "' + f.family + '"'; ||| return box.size + 'px "' + f.family + '"';
+text: box width ignores the letters ||| const w = Math.max(box.size * 0.5, ...lines ||| const w = Math.min(box.size * 0.5, ...lines
+text: box height is one line ||| return { lines, lh, w, h: lines.length * lh }; ||| return { lines, lh, w, h: lh };
+text: line height ignores the font size ||| const lh = box.size * core.TEXT_LINE; ||| const lh = 20 * core.TEXT_LINE;
+text: angle not wrapped ||| return a > Math.PI ? a - t : a; ||| return a;
+text: to local frame sign ||| return { x: c * dx + s * dy, y: -s * dx + c * dy }; ||| return { x: c * dx - s * dy, y: -s * dx + c * dy };
+text: to image frame sign ||| return { x: box.x + c * lx - s * ly, y: box.y + s * lx + c * ly }; ||| return { x: box.x + c * lx + s * ly, y: box.y + s * lx + c * ly };
+text: hit test uses the width twice ||| return Math.abs(p.x) <= m.w / 2 + slack && Math.abs(p.y) <= m.h / 2 + slack; ||| return Math.abs(p.x) <= m.w / 2 + slack && Math.abs(p.y) <= m.w / 2 + slack;
+text: hit test ignores the slack ||| return Math.abs(p.x) <= m.w / 2 + slack && ||| return Math.abs(p.x) <= m.w / 2 &&
+text: pick takes the bottom box ||| for (let i = texts.length - 1; i >= 0; i--) { ||| for (let i = 0; i < texts.length; i++) {
+text: pinch scale inverted ||| const k = Math.hypot(vx, vy) / (Math.hypot(ux, uy) || 1); ||| const k = Math.hypot(ux, uy) / (Math.hypot(vx, vy) || 1);
+text: pinch turns the wrong way ||| const turn = Math.atan2(vy, vx) - Math.atan2(uy, ux); ||| const turn = Math.atan2(uy, ux) - Math.atan2(vy, vx);
+text: pinch does not carry the centre round ||| return { ...box, x: a1.x + k * (c * rx - s * ry), ||| return { ...box, x: a1.x + k * rx,
+text: pinch keeps the size ||| size: box.size * k, rotation: core.textAngle(box.rotation + turn) }; ||| size: box.size, rotation: core.textAngle(box.rotation + turn) };
+text: right align drawn at the left ||| const ax = box.align === 'left' ? -m.w / 2 : box.align === 'right' ? m.w / 2 : 0; ||| const ax = box.align === 'left' ? -m.w / 2 : box.align === 'right' ? -m.w / 2 : 0;
+text: left align drawn in the middle ||| const ax = box.align === 'left' ? -m.w / 2 : ||| const ax = box.align === 'left' ? 0 :
+text: lines start half a line high ||| const ys = m.lines.map((l, i) => -m.h / 2 + m.lh * (i + 0.5)); ||| const ys = m.lines.map((l, i) => -m.h / 2 + m.lh * i);
+text: outline half as thick ||| const outline = box.outline * box.size * 2; ||| const outline = box.outline * box.size;
+text: outline painted over the letters ||| ctx.fillStyle = box.colour; ||| ctx.fillStyle = box.colour; ctx.globalCompositeOperation = 'destination-over';
+text: outline in the letter colour ||| ctx.strokeStyle = box.outlineColour; ||| ctx.strokeStyle = box.colour;
+text: shadow offset ignores the zoom ||| ctx.shadowOffsetX = (t0.a + t0.c) * d; ||| ctx.shadowOffsetX = d;
+text: shadow falls upward ||| ctx.shadowOffsetY = (t0.b + t0.d) * d; ||| ctx.shadowOffsetY = -(t0.b + t0.d) * d;
+text: shadow blur ignores the zoom ||| ctx.shadowBlur = sh.blur * box.size * zoom; ||| ctx.shadowBlur = sh.blur * box.size;
+text: hard shadow too close ||| hard: { offset: 0.06, ||| hard: { offset: 0.03,
+text: soft shadow not soft ||| soft: { offset: 0.04, blur: 0.12, ||| soft: { offset: 0.04, blur: 0,
+text: shadow left on for the clean pass ||| ctx.shadowColor = 'rgba(0,0,0,0)'; ||| ctx.shadowColor = sh.colour;
+text: export leaves the text out ||| core.drawTexts(ctx, texts); ||| /* removed */
+text: only the first box drawn ||| for (const b of texts) core.drawText(ctx, b); ||| if (texts[0]) core.drawText(ctx, texts[0]);
+crop frame: snapped centre off ||| return { W: s.W, H: s.H, cx: s.L + s.W / 2 - b.w / 2, ||| return { W: s.W, H: s.H, cx: s.L - b.w / 2,
+crop text: quarter turn transposed ||| const x1 = fx * (q[0] * x0 + q[2] * y0), y1 = fy * (q[1] * x0 + q[3] * y0); ||| const x1 = fx * (q[0] * x0 + q[1] * y0), y1 = fy * (q[2] * x0 + q[3] * y0);
+crop text: flips swapped ||| const fx = p.flipH ? -1 : 1, fy = p.flipV ? -1 : 1; ||| const fx = p.flipV ? -1 : 1, fy = p.flipH ? -1 : 1;
+crop text: flip turns letters upside down ||| const turn = mirror ? p.theta - quarterTurn - b.rotation ||| const turn = mirror ? Math.PI + p.theta - quarterTurn - b.rotation
+crop text: straighten not applied to the box ||| : p.theta + quarterTurn + b.rotation ||| : quarterTurn + b.rotation
+crop text: double flip not a half turn ||| (p.flipH && p.flipV ? Math.PI : 0) ||| 0
+crop text: straighten turns the position the wrong way ||| return { ...b, x: c * x1 - s * y1 + f.W / 2 - f.cx, ||| return { ...b, x: c * x1 + s * y1 + f.W / 2 - f.cx,
+crop text: crop offset sign ||| y: s * x1 + c * y1 + f.H / 2 - f.cy, ||| y: s * x1 + c * y1 + f.H / 2 + f.cy,
+resize text: y follows the width ||| ...b, x: b.x * W / w, y: b.y * H / h, ||| ...b, x: b.x * W / w, y: b.y * W / w,
+resize text: size only follows the width ||| size: b.size * (W / w + H / h) / 2, ||| size: b.size * W / w,
+pad text: offset not scaled ||| ...b, x: (b.x + o.x) * k, ||| ...b, x: b.x * k + o.x,
+pad text: size not scaled ||| y: (b.y + o.y) * k, size: b.size * k, ||| y: (b.y + o.y) * k, size: b.size,
+inside: height checked against the width ||| b.y >= 0 && b.y <= H); ||| b.y >= 0 && b.y <= W);
+inside: keeps boxes off the left ||| texts.filter((b) => b.x >= 0 && ||| texts.filter((b) => b.x >= -1e9 &&
 history: undo walks forward ||| undo() { if (this.canUndo) this.index--; return this.current; } ||| undo() { if (this.canUndo) this.index -= 2; if (this.index < 0) this.index = 0; return this.current; }
 EOF
 )
