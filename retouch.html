@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.4.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.5.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -41,7 +41,7 @@ How the file is laid out:
      a. Constants (working-size ceiling, history depth, ratios).
      b. CORE: pure image functions (geometry, crop, resize, add canvas,
         text layout and drawing, background mask refinement, brush and
-        cut-out, metadata strip, edit history). Tests and the mutation runner
+        cut-out, skin smoothing, spot inpainting, metadata strip, edit history). Tests and the mutation runner
         target this block. MediaPipe itself sits outside it, in the app.
      c. App: view (zoom, pan), tools, open, export, service worker.
 -->
@@ -443,6 +443,24 @@ fieldset:disabled{opacity:.4}
     <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
   </div>
 
+  <div class="sheet-panel" data-tool="spot" hidden>
+    <div class="sheet-head">
+      <div class="grow"><div class="entry-code" data-entry></div><h2>Spot eraser</h2></div>
+      <button class="btn hold" data-hold>Hold: before</button>
+    </div>
+    <div class="row">
+      <label for="spot-brush">Brush</label>
+      <input type="range" id="spot-brush" min="10" max="80" step="1" value="30">
+      <span class="readout" id="spot-brush-out">30 px</span>
+    </div>
+    <div class="row">
+      <span class="small" style="flex:1">Tap or brush over a spot; it fills from around it when you lift your finger. Two fingers zoom and move. Small spots only.</span>
+      <button class="btn" id="spot-undo-stroke" disabled>Undo stroke</button>
+    </div>
+    <div class="small" id="spot-out"></div>
+    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
+  </div>
+
   <div class="sheet-panel" data-tool="export" hidden>
     <div class="sheet-head">
       <div class="grow"><div class="entry-code" data-entry></div><h2>Export</h2></div>
@@ -486,10 +504,13 @@ fieldset:disabled{opacity:.4}
     <svg viewBox="0 0 24 24"><path d="M5 6.5V4.5h14v2"/><path d="M12 4.5v15"/><path d="M9 19.5h6"/></svg>Text
   </button>
   <button class="tool" data-open-tool="bg" disabled>
-    <svg viewBox="0 0 24 24"><circle cx="12" cy="9.5" r="3.5"/><path d="M5.5 20.5c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M3.5 7.5v-4h4M16.5 3.5h4v4M20.5 16.5v4M3.5 16.5v4"/></svg>Background
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="9.5" r="3.5"/><path d="M5.5 20.5c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M3.5 7.5v-4h4M16.5 3.5h4v4M20.5 16.5v4M3.5 16.5v4"/></svg>Cut out
   </button>
   <button class="tool" data-open-tool="skin" disabled>
     <svg viewBox="0 0 24 24"><circle cx="11" cy="13" r="7"/><path d="M8.5 15.5c1.4 1.1 3.6 1.1 5 0"/><path d="M19 2.5v5M16.5 5h5"/></svg>Skin
+  </button>
+  <button class="tool" data-open-tool="spot" disabled>
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/></svg>Spot
   </button>
 </nav>
 
@@ -502,7 +523,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.4.0';
+const APP_VERSION = '0.5.0';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -1562,6 +1583,210 @@ class EditHistory {
   dispose() { for (const e of this.stack) core.release(e.bmp); this.stack = []; this.index = -1; }
 }
 core.EditHistory = EditHistory;
+/* Spot eraser: Telea's fast marching inpainting (2004), written out here. The spot
+   is filled from its edge inwards, nearest pixels first, the way a front moves
+   through it (T is each pixel's distance from the edge along the way). Each new
+   pixel is a weighted average of the known pixels within SPOT_EPS, each carried
+   to the new pixel along its own colour slope: closer ones count more, as do ones
+   in line with the direction the front is moving, and ones at the same distance
+   from the edge. Then grain measured in a ring just outside the spot is added, so
+   the fill is not a smooth patch on textured skin. */
+
+core.SPOT_EPS = 5;              // neighbourhood each filled pixel is averaged from, px
+core.SPOT_RING = 4;             // width of the ring outside the spot where grain is measured, px
+
+// Fill the masked pixels (mask[i] = 1) of the RGBA block d (w x h) in place.
+// Returns T, each pixel's arrival distance (0 outside the spot).
+core.inpaint = (d, w, h, mask, eps = core.SPOT_EPS) => {
+  const n = w * h, KNOWN = 0, BAND = 1, INSIDE = 2, FAR = 1e6;
+  const flag = new Uint8Array(n), T = new Float32Array(n);
+  for (let i = 0; i < n; i++) if (mask[i]) { flag[i] = INSIDE; T[i] = FAR; }
+  // A binary min-heap of pixel indices, keyed on T when pushed.
+  const hi = [], hk = [];
+  const push = (i, k) => {
+    let c = hi.length; hi.push(i); hk.push(k);
+    while (c > 0) { const p = (c - 1) >> 1; if (hk[p] <= hk[c]) break; [hi[p], hi[c]] = [hi[c], hi[p]]; [hk[p], hk[c]] = [hk[c], hk[p]]; c = p; }
+  };
+  const pop = () => {
+    const top = hi[0], li = hi.pop(), lk = hk.pop();
+    if (hi.length) {
+      hi[0] = li; hk[0] = lk;
+      let c = 0;
+      for (;;) {
+        const l = 2 * c + 1, r = l + 1;
+        let m = c;
+        if (l < hi.length && hk[l] < hk[m]) m = l;
+        if (r < hi.length && hk[r] < hk[m]) m = r;
+        if (m === c) break;
+        [hi[m], hi[c]] = [hi[c], hi[m]]; [hk[m], hk[c]] = [hk[c], hk[m]]; c = m;
+      }
+    }
+    return top;
+  };
+  const nb = (i) => {
+    const x = i % w, y = (i - x) / w, out = [];
+    if (x > 0) out.push(i - 1); if (x < w - 1) out.push(i + 1); if (y > 0) out.push(i - w); if (y < h - 1) out.push(i + w);
+    return out;
+  };
+  // The front starts on the known pixels that touch the spot.
+  for (let i = 0; i < n; i++) if (flag[i] === KNOWN && nb(i).some((j) => flag[j] === INSIDE)) { flag[i] = BAND; push(i, 0); }
+  // Arrival distance from the two axes' smaller known neighbours (the eikonal equation, |grad T| = 1).
+  const tAt = (i) => (flag[i] === INSIDE ? FAR : T[i]);
+  const solve = (i) => {
+    const x = i % w, y = (i - x) / w;
+    const a = Math.min(x > 0 ? tAt(i - 1) : FAR, x < w - 1 ? tAt(i + 1) : FAR);
+    const b = Math.min(y > 0 ? tAt(i - w) : FAR, y < h - 1 ? tAt(i + w) : FAR);
+    if (Math.abs(a - b) >= 1) return Math.min(a, b) + 1;
+    return (a + b + Math.sqrt(2 - (a - b) * (a - b))) / 2;
+  };
+  // One axis of T's gradient at i, from whichever neighbours are already reached.
+  const grad = (i, lo, hiN, step) => {
+    const l = lo ? tAt(i - step) : FAR, r = hiN ? tAt(i + step) : FAR;
+    if (l < FAR && r < FAR) return (r - l) / 2;
+    if (r < FAR) return r - T[i];
+    if (l < FAR) return T[i] - l;
+    return 0;
+  };
+  // Slopes are read from a 3 x 3 mean of the known pixels, so single-pixel grain is not
+  // mistaken for a slope and carried into the spot. A straight gradient keeps its slope.
+  const sm = new Float32Array(3 * n);
+  for (let i = 0; i < n; i++) {
+    if (flag[i] === INSIDE) continue;
+    const x = i % w, y = (i - x) / w;
+    let k = 0, r = 0, g = 0, b = 0;
+    for (let v = Math.max(0, y - 1); v <= Math.min(h - 1, y + 1); v++) {
+      for (let u = Math.max(0, x - 1); u <= Math.min(w - 1, x + 1); u++) {
+        const q = v * w + u;
+        if (flag[q] === INSIDE) continue;
+        r += d[4 * q]; g += d[4 * q + 1]; b += d[4 * q + 2]; k++;
+      }
+    }
+    sm[3 * i] = r / k; sm[3 * i + 1] = g / k; sm[3 * i + 2] = b / k;
+  }
+  // Colour slope of channel c at a known pixel q along one axis, from known neighbours only.
+  const slope = (q, c, lo, hiN, step) => {
+    const l = lo && flag[q - step] !== INSIDE, r = hiN && flag[q + step] !== INSIDE;
+    if (l && r) return (sm[3 * (q + step) + c] - sm[3 * (q - step) + c]) / 2;
+    if (r) return sm[3 * (q + step) + c] - sm[3 * q + c];
+    if (l) return sm[3 * q + c] - sm[3 * (q - step) + c];
+    return 0;
+  };
+  const fill = (i) => {
+    const x = i % w, y = (i - x) / w;
+    const gx = grad(i, x > 0, x < w - 1, 1), gy = grad(i, y > 0, y < h - 1, w);
+    let ws = 0, r = 0, g = 0, b = 0;
+    for (let v = Math.max(0, y - eps); v <= Math.min(h - 1, y + eps); v++) {
+      for (let u = Math.max(0, x - eps); u <= Math.min(w - 1, x + eps); u++) {
+        const q = v * w + u;
+        if (flag[q] === INSIDE) continue;
+        const dx = x - u, dy = y - v, r2 = dx * dx + dy * dy;
+        if (r2 === 0 || r2 > eps * eps) continue;
+        const len = Math.sqrt(r2);
+        const dir = Math.max(1e-6, Math.abs(dx * gx + dy * gy) / len);
+        const wt = dir / r2 / (1 + Math.abs(T[i] - T[q]));
+        // The known value, carried along its slope (first order) to this pixel.
+        const at = (c) => d[4 * q + c] + slope(q, c, u > 0, u < w - 1, 1) * dx + slope(q, c, v > 0, v < h - 1, w) * dy;
+        ws += wt; r += wt * at(0); g += wt * at(1); b += wt * at(2);
+      }
+    }
+    if (ws > 0) { d[4 * i] = r / ws; d[4 * i + 1] = g / ws; d[4 * i + 2] = b / ws; }
+    sm[3 * i] = d[4 * i]; sm[3 * i + 1] = d[4 * i + 1]; sm[3 * i + 2] = d[4 * i + 2];   // filled pixels are already smooth
+  };
+  while (hi.length) {
+    const i = pop();
+    if (flag[i] === KNOWN) continue;                      // an older, larger key for a pixel already done
+    flag[i] = KNOWN;
+    for (const j of nb(i)) {
+      if (flag[j] === KNOWN) continue;
+      const t = solve(j);
+      if (flag[j] === INSIDE) { T[j] = t; fill(j); flag[j] = BAND; push(j, t); }   // filled before it counts as known
+      else if (t < T[j]) { T[j] = t; push(j, t); }
+    }
+  }
+  return T;
+};
+
+// The ring of known pixels within `ring` of the spot (square distance), as a mask.
+core.spotRing = (mask, w, h, ring = core.SPOT_RING) => {
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!mask[y * w + x]) continue;
+      for (let v = Math.max(0, y - ring); v <= Math.min(h - 1, y + ring); v++) {
+        for (let u = Math.max(0, x - ring); u <= Math.min(w - 1, x + ring); u++) if (!mask[v * w + u]) out[v * w + u] = 1;
+      }
+    }
+  }
+  return out;
+};
+
+// A repeatable noise value for a pixel, roughly normal with mean 0 and spread 1.
+core.spotNoise = (x, y) => {
+  let s = 0;
+  for (let k = 0; k < 3; k++) {
+    let hsh = (Math.imul(x + 1, 73856093) ^ Math.imul(y + 1, 19349663) ^ Math.imul(k + 1, 83492791)) >>> 0;
+    hsh = Math.imul(hsh ^ (hsh >>> 15), 2246822519) >>> 0;
+    hsh = Math.imul(hsh ^ (hsh >>> 13), 3266489917) >>> 0;
+    s += ((hsh ^ (hsh >>> 16)) >>> 0) / 4294967296;
+  }
+  return (s - 1.5) * 2;
+};
+
+// Grain per channel in the ring: how far each pixel sits from its 3 x 3 mean, over
+// ring pixels whose 3 x 3 has no spot in it. The median of that, not the mean, so
+// an edge running through the ring is not mistaken for grain; 1.4826 turns a
+// median deviation into a standard deviation, and sqrt(9 / 8) undoes the 3 x 3
+// mean taking a ninth of each pixel's own noise.
+core.spotGrain = (d, w, h, mask, ring) => {
+  const dev = [[], [], []];
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      if (!ring[i]) continue;
+      let clean = true;
+      for (let v = -1; v <= 1 && clean; v++) for (let u = -1; u <= 1; u++) if (mask[i + v * w + u]) { clean = false; break; }
+      if (!clean) continue;
+      for (let c = 0; c < 3; c++) {
+        let m = 0;
+        for (let v = -1; v <= 1; v++) for (let u = -1; u <= 1; u++) m += d[4 * (i + v * w + u) + c];
+        dev[c].push(Math.abs(d[4 * i + c] - m / 9));
+      }
+    }
+  }
+  return dev.map((a) => {
+    if (!a.length) return 0;
+    a.sort((p, q) => p - q);
+    return a[a.length >> 1] * 1.4826 * Math.sqrt(9 / 8);
+  });
+};
+
+// Fix one stroke on the canvas ctx (W x H): fill it, add the ring's grain. The
+// stroke is { r, pts } in image pixels. Returns the block as it was, for undo.
+core.fixSpot = (ctx, st, W, H) => {
+  const m = core.SPOT_EPS + core.SPOT_RING + 2;
+  const bx = core.strokeBounds(st, 1, W, H);
+  const x0 = Math.max(0, bx.x0 - m), y0 = Math.max(0, bx.y0 - m), x1 = Math.min(W, bx.x1 + m), y1 = Math.min(H, bx.y1 + m);
+  const w = x1 - x0, h = y1 - y0;
+  if (w <= 0 || h <= 0) return null;
+  const before = ctx.getImageData(x0, y0, w, h);
+  const img = new ImageData(new Uint8ClampedArray(before.data), w, h), d = img.data;
+  const cov = new Float32Array(w * h);
+  core.paintStroke(cov, w, h, { mode: 'keep', r: st.r, pts: st.pts.map((p) => ({ x: p.x - x0, y: p.y - y0 })) });
+  const mask = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) mask[i] = cov[i] > 0 ? 1 : 0;
+  const grain = core.spotGrain(d, w, h, mask, core.spotRing(mask, w, h));
+  core.inpaint(d, w, h, mask);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!mask[i]) continue;
+      const z = core.spotNoise(x + x0, y + y0);
+      for (let c = 0; c < 3; c++) d[4 * i + c] += z * grain[c];
+    }
+  }
+  ctx.putImageData(img, x0, y0);
+  return { x: x0, y: y0, img: before };
+};
 // CORE:END
 
 /* ============================================================
@@ -2995,6 +3220,95 @@ $('#skin-texture').addEventListener('input', (e) => tools.skin.setTexture(+e.tar
 $('#skin-brush').addEventListener('input', (e) => { tools.skin.s.brush = +e.target.value; tools.skin.sync(); });
 $('#skin-undo-stroke').addEventListener('click', () => tools.skin.undoStroke());
 
+/* ---------- Tool: spot eraser ---------- */
+
+// Each stroke is filled at full size on a working copy as soon as the finger
+// lifts, so the stage shows exactly what Apply keeps. Undo stroke puts back the
+// block of pixels the fill changed.
+const SPOT_LARGE = 0.02;   // a stroke covering more than this share of the photo gets a warning
+
+tools.spot = {
+  s: null,
+  open() {
+    if (!this.s) this.s = { brush: 30 };
+    const src = app.edits.current;
+    this.work = core.makeCanvas(src.width, src.height);
+    this.wctx = this.work.getContext('2d', { willReadFrequently: true });
+    this.wctx.drawImage(src, 0, 0);
+    this.patches = []; this.stroke = null; this.cursor = null;
+    app.preview = { src: this.work, w: src.width, h: src.height, texts: app.edits.texts };
+    this.sync();
+    requestDraw();
+  },
+  close() { this.patches = []; this.stroke = null; this.cursor = null; this.work = null; this.wctx = null; },   // the work canvas is app.preview.src
+  toImage(p) { return { x: (p.x - view.tx) / view.scale, y: (p.y - view.ty) / view.scale }; },
+  pointerDown(p) {
+    this.stroke = { r: this.s.brush / 2 / view.scale, pts: [this.toImage(p)] };
+    this.cursor = p;
+    requestDraw();
+    return true;
+  },
+  pointerMove(p) {
+    const st = this.stroke; if (!st) return;
+    const q = this.toImage(p), last = st.pts[st.pts.length - 1];
+    this.cursor = p;
+    if (Math.hypot(q.x - last.x, q.y - last.y) >= st.r / 4) st.pts.push(q);
+    requestDraw();
+  },
+  pointerUp() {
+    const st = this.stroke; if (!st) return;
+    this.stroke = null; this.cursor = null;
+    const W = this.work.width, H = this.work.height, bx = core.strokeBounds(st, 1, W, H);
+    if ((bx.x1 - bx.x0) * (bx.y1 - bx.y0) > SPOT_LARGE * W * H) {
+      notify('That is a large area: it fills with a blur. The spot eraser is for small spots; Undo stroke takes it back.', 'watch', { id: 'spot-large' });
+    }
+    const patch = core.fixSpot(this.wctx, st, W, H);
+    if (patch) this.patches.push(patch);
+    this.sync();
+    requestDraw();
+  },
+  // A second finger arrived (zoom instead), or the system took the touch: nothing is filled.
+  pointerCancel() { this.stroke = null; this.cursor = null; requestDraw(); },
+  undoStroke() {
+    const p = this.patches.pop(); if (!p) return;
+    this.wctx.putImageData(p.img, p.x, p.y);
+    this.sync();
+    requestDraw();
+  },
+  // The stroke being painted, in red, until the finger lifts.
+  overlay(ctx) {
+    const st = this.stroke; if (!st) return;
+    ctx.save();
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.lineWidth = Math.max(1, 2 * st.r * view.scale);
+    ctx.strokeStyle = core.BG_VEIL;
+    ctx.beginPath();
+    st.pts.forEach((p, i) => { const x = view.tx + p.x * view.scale, y = view.ty + p.y * view.scale; if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+    if (st.pts.length === 1) ctx.lineTo(view.tx + st.pts[0].x * view.scale + 0.01, view.ty + st.pts[0].y * view.scale);
+    ctx.stroke();
+    ctx.restore();
+  },
+  sync() {
+    $('#spot-brush').value = String(this.s.brush);
+    $('#spot-brush-out').textContent = this.s.brush + ' px';
+    $('#spot-undo-stroke').disabled = !this.patches.length;
+    const n = this.patches.length;
+    $('#spot-out').textContent = n ? n + (n > 1 ? ' spots fixed.' : ' spot fixed.') : 'No spots fixed yet.';
+  },
+  async apply() {
+    if (!this.patches.length) return;
+    const work = this.work;
+    await commit('Spot eraser', () => {
+      const c = core.makeCanvas(work.width, work.height);
+      c.getContext('2d').drawImage(work, 0, 0);
+      return c;
+    });
+  },
+};
+$('#spot-brush').addEventListener('input', (e) => { tools.spot.s.brush = +e.target.value; tools.spot.sync(); });
+$('#spot-undo-stroke').addEventListener('click', () => tools.spot.undoStroke());
+
 /* ---------- Export ---------- */
 
 const FORMATS = { jpeg: { mime: 'image/jpeg', ext: 'jpg', label: 'JPEG' }, png: { mime: 'image/png', ext: 'png', label: 'PNG' }, webp: { mime: 'image/webp', ext: 'webp', label: 'WebP' } };
@@ -3166,7 +3480,7 @@ receiveShared().catch((err) => notify('The shared photo could not be opened: ' +
 // Handles for the test suites. Read-only use; the app does not depend on it.
 window.retouch = {
   APP_VERSION, MAX_WORKING_PIXELS, HISTORY_DEPTH, CROP_ROTATE_MARGIN, RATIOS, TEXT_FONTS,
-  BG_MIN_PERSON, BG_PREVIEW_LONG, BG_FEATHER_STEP, BG_VENDOR,
+  BG_MIN_PERSON, BG_PREVIEW_LONG, BG_FEATHER_STEP, BG_VENDOR, SPOT_LARGE,
   core, app, view, tools, segmenter, openFile, openTool, closeTool, commit, commitTexts, encodeImage, fontsReady, undo, redo, draw,
   readPixels(src, x = 0, y = 0, w = src.width, h = src.height) {
     const c = core.makeCanvas(src.width, src.height);

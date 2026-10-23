@@ -815,7 +815,7 @@ test('before / after hold on the main view and on every tool', async () => {
   await hold('#hold-main');
   await page.evaluate(BG_INIT);
   await page.evaluate(() => { window.__fakeSeg([0, 0, 77], 300); window.__fakeSkin([0, 0, 77], 300); });
-  for (const t of ['crop', 'resize', 'pad', 'text', 'bg', 'skin']) {
+  for (const t of ['crop', 'resize', 'pad', 'text', 'bg', 'skin', 'spot']) {
     await page.click('[data-open-tool="' + t + '"]');
     await hold('.sheet-panel[data-tool="' + t + '"] [data-hold]');
     await idle(page);
@@ -869,7 +869,7 @@ test('phone layout: tap targets at least 44 px, no sideways scroll', async () =>
   await checkVisible('editing');
   await page.evaluate(BG_INIT);
   await page.evaluate(() => { window.__fakeSeg([0, 0, 77], 300); window.__fakeSkin([0, 0, 77], 300); });
-  for (const t of ['crop', 'resize', 'pad', 'text', 'bg', 'bg-brush', 'skin', 'skin-brush']) {
+  for (const t of ['crop', 'resize', 'pad', 'text', 'bg', 'bg-brush', 'skin', 'skin-brush', 'spot']) {
     if (t === 'bg-brush') { await page.click('[data-open-tool="bg"]'); await idle(page); await page.click('[data-bgmode="erase"]'); }
     else if (t === 'skin-brush') { await page.click('[data-open-tool="skin"]'); await idle(page); await page.click('[data-skinmode="erase"]'); }
     else await page.click('[data-open-tool="' + t + '"]');
@@ -2265,6 +2265,154 @@ test('skin: the real model gives skin from its own classes, and a failure is sai
   assert(/Skin smoothing could not start: model file missing/.test(await page.textContent('.notice.fail[data-id="skin"]')), 'failure message');
   await idle(page);
   assert(await page.evaluate(() => retouch.app.tool === null && retouch.app.edits.stack.length === 1), 'tool closed, nothing changed');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+/* ---------- Phase 5: spot eraser ---------- */
+
+test('spot core: the fill rebuilds flat colour, gradients and edges; grain matches; nothing else moves', async () => {
+  const { ctx, page } = await newApp();
+  const r = await page.evaluate(() => {
+    const core = retouch.core, W = 120, H = 100, out = {};
+    const inSpot = (x, y) => Math.hypot(x + 0.5 - 60, y + 0.5 - 50) < 10;
+    const build = (pix) => {
+      const c = core.makeCanvas(W, H), x = c.getContext('2d', { willReadFrequently: true }), img = x.createImageData(W, H);
+      for (let y = 0; y < H; y++) for (let X = 0; X < W; X++) img.data.set([...pix(X, y), 255], (y * W + X) * 4);
+      x.putImageData(img, 0, 0);
+      return x;
+    };
+    const fix = (pix, st = { r: 10, pts: [{ x: 60, y: 50 }] }) => {
+      const x = build(pix), before = x.getImageData(0, 0, W, H).data;
+      const patch = core.fixSpot(x, st, W, H);
+      return { d: x.getImageData(0, 0, W, H).data, before, patch, x };
+    };
+    // Flat colour and a straight gradient under a magenta spot come back exactly.
+    let f = fix((x, y) => (inSpot(x, y) ? [255, 0, 255] : [120, 140, 160]));
+    out.flat = f.d.reduce((m, v, i) => Math.max(m, i % 4 === 3 ? 0 : Math.abs(v - [120, 140, 160][i % 4])), 0);
+    f = fix((x, y) => (inSpot(x, y) ? [255, 0, 255] : [x * 2, y * 2, 77]));
+    let g = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const o = (y * W + x) * 4; g = Math.max(g, Math.abs(f.d[o] - x * 2), Math.abs(f.d[o + 1] - y * 2), Math.abs(f.d[o + 2] - 77)); }
+    out.gradient = g;
+    // Outside the spot nothing changes, and the patch puts the spot back exactly.
+    let moved = 0;
+    for (let i = 0; i < W * H; i++) if (!inSpot(i % W, Math.floor(i / W))) for (let k = 0; k < 4; k++) moved = Math.max(moved, Math.abs(f.d[4 * i + k] - f.before[4 * i + k]));
+    out.moved = moved;
+    f.x.putImageData(f.patch.img, f.patch.x, f.patch.y);
+    out.undo = f.x.getImageData(0, 0, W, H).data.every((v, i) => v === f.before[i]);
+    out.patch = [f.patch.x, f.patch.y, f.patch.img.width, f.patch.img.height];
+    // A hard edge through the middle of the spot is rebuilt near its true place (between x 59 and 60).
+    f = fix((x, y) => (inSpot(x, y) ? [255, 0, 255] : x < 60 ? [40, 40, 40] : [220, 220, 220]));
+    out.edge = [52, 56, 58, 61, 63, 67].map((x) => f.d[(50 * W + x) * 4]);
+    // Grainy skin with a dark spot: the fill takes the skin's colour and grain.
+    let seed = 9; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const gr = Array.from({ length: W * H }, () => (rnd() - 0.5) * 20);
+    f = fix((x, y) => { const v = gr[y * W + x]; return inSpot(x, y) ? [120 + v, 60 + v, 50 + v] : [200 + v, 150 + v, 130 + v]; });
+    const stat = (cond) => { let s2 = 0, m = 0, k = 0; for (let y = 2; y < H - 2; y++) for (let x = 2; x < W - 2; x++) { if (!cond(x, y)) continue; let a = 0; for (let v = -1; v <= 1; v++) for (let u = -1; u <= 1; u++) a += f.d[((y + v) * W + x + u) * 4 + 1]; const e = f.d[(y * W + x) * 4 + 1] - a / 9; s2 += e * e; m += f.d[(y * W + x) * 4 + 1]; k++; } return [Math.sqrt(s2 / k), m / k]; };
+    out.grainSpot = stat((x, y) => Math.hypot(x + 0.5 - 60, y + 0.5 - 50) < 8);
+    out.grainAround = stat((x, y) => { const d = Math.hypot(x + 0.5 - 60, y + 0.5 - 50); return d > 14 && d < 30; });
+    // A spot against the frame edge, and a stroke rather than a dot.
+    f = fix((x, y) => (Math.hypot(x + 0.5, y + 0.5 - 50) < 8 ? [0, 255, 0] : [90, 90, 200]), { r: 8, pts: [{ x: 0, y: 50 }] });
+    out.atEdge = f.d.reduce((m, v, i) => Math.max(m, i % 4 === 3 ? 0 : Math.abs(v - [90, 90, 200][i % 4])), 0);
+    const onLine = (x, y) => Math.abs(y + 0.5 - 30) < 3 && x >= 20 && x < 100;
+    f = fix((x, y) => (onLine(x, y) ? [10, 10, 10] : [180, 170, 160]), { r: 4, pts: [{ x: 18, y: 30 }, { x: 102, y: 30 }] });
+    out.line = f.d.reduce((m, v, i) => Math.max(m, i % 4 === 3 ? 0 : Math.abs(v - [180, 170, 160][i % 4])), 0);
+    // Arrival distance: in a disc of radius 10, T at a pixel is about its distance from the edge.
+    const d = new Uint8ClampedArray(41 * 41 * 4).fill(128), mask = new Uint8Array(41 * 41);
+    for (let i = 0; i < 41 * 41; i++) if (Math.hypot(i % 41 - 20, Math.floor(i / 41) - 20) < 10) mask[i] = 1;
+    const T = core.inpaint(d, 41, 41, mask);
+    out.T = [[20, 20], [25, 20], [20, 14], [27, 27]].map(([x, y]) => +(T[y * 41 + x] - (10 - Math.hypot(x - 20, y - 20))).toFixed(2));
+    out.Tout = T[0] === 0 && T[20 * 41 + 35] === 0;
+    // Grain estimate: an edge running through the ring is not grain.
+    const e = new Uint8ClampedArray(30 * 30 * 4), em = new Uint8Array(900);
+    for (let i = 0; i < 900; i++) { const v = i % 30 < 15 ? 30 : 220; e.set([v, v, v, 255], 4 * i); if (Math.hypot(i % 30 - 15, Math.floor(i / 30) - 15) < 5) em[i] = 1; }
+    out.edgeGrain = core.spotGrain(e, 30, 30, em, core.spotRing(em, 30, 30));
+    // The noise: repeatable, mean about 0, spread about 1.
+    let s1 = 0, s2 = 0; for (let i = 0; i < 20000; i++) { const z = core.spotNoise(i % 200, Math.floor(i / 200)); s1 += z; s2 += z * z; }
+    out.noise = [+(s1 / 20000).toFixed(3), +Math.sqrt(s2 / 20000).toFixed(3), core.spotNoise(5, 7) === core.spotNoise(5, 7), core.spotNoise(5, 7) !== core.spotNoise(7, 5)];
+    return out;
+  });
+  assert(r.flat === 0, 'flat colour should come back exactly, off by ' + r.flat);
+  assert(r.gradient <= 1, 'gradient should come back within 1 level, off by ' + r.gradient);
+  assert(r.moved === 0, 'pixels outside the spot changed by ' + r.moved);
+  assert(r.undo, 'the patch must restore the spot exactly');
+  assert(r.patch.join() === '39,29,42,42', 'patch block ' + r.patch);
+  assert(r.edge[0] < 60 && r.edge[1] < 70 && r.edge[4] > 190 && r.edge[5] > 200 && r.edge[2] < r.edge[3], 'edge rebuilt in place: ' + r.edge);
+  assert(Math.abs(r.grainSpot[1] - r.grainAround[1]) < 4, 'fill colour matches the skin: ' + r.grainSpot[1].toFixed(1) + ' vs ' + r.grainAround[1].toFixed(1));
+  assert(r.grainSpot[0] > 0.7 * r.grainAround[0] && r.grainSpot[0] < 1.3 * r.grainAround[0], 'fill grain matches: ' + r.grainSpot[0].toFixed(2) + ' vs ' + r.grainAround[0].toFixed(2));
+  assert(r.atEdge <= 1 && r.line <= 1, 'spot at the frame edge ' + r.atEdge + ', stroke ' + r.line);
+  assert(r.T.every((v) => Math.abs(v) <= 1.5) && r.Tout, 'arrival distance vs distance from the edge: ' + r.T);
+  assert(r.edgeGrain.every((v) => v < 0.5), 'an edge is not grain: ' + r.edgeGrain);
+  assert(Math.abs(r.noise[0]) < 0.03 && Math.abs(r.noise[1] - 1) < 0.05 && r.noise[2] && r.noise[3], 'noise ' + r.noise);
+  await ctx.close();
+}, { core: true });
+
+// 300 x 200 grainy skin with a dark spot at (80, 70) and a dark scratch along y = 140 from x 150 to 250.
+const spotPng = () => {
+  let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  return makePng(300, 200, (x, y) => {
+    const g = (rnd() - 0.5) * 12;
+    if (Math.hypot(x - 80, y - 70) < 5) return [110 + g, 70 + g, 60 + g, 255].map(Math.round);
+    if (Math.abs(y - 140) < 2 && x >= 150 && x < 250) return [60 + g, 40 + g, 40 + g, 255].map(Math.round);
+    return [200 + g, 150 + g, 130 + g, 255].map(Math.round);
+  });
+};
+// Mean green inside a box of the current image (or the stage preview).
+const meanG = (page, x0, y0, x1, y1, which = 'current') => page.evaluate(([x0, y0, x1, y1, which]) => {
+  const src = which === 'preview' ? retouch.app.preview.src : retouch.app.edits.current;
+  const d = retouch.readPixels(src, x0, y0, x1 - x0, y1 - y0);
+  let s = 0; for (let i = 1; i < d.length; i += 4) s += d[i];
+  return s / (d.length / 4);
+}, [x0, y0, x1, y1, which]);
+
+test('spot: a tap fills a spot, a stroke fills a scratch; undo stroke; two fingers zoom instead', async () => {
+  const { ctx, page } = await newApp({ init: [TEXT_INIT, BG_INIT] });
+  await load(page, spotPng());
+  await textBox(page, { text: 'HI', size: 30 });
+  const before = await texts(page);
+  const spot0 = await meanG(page, 77, 67, 84, 74), line0 = await meanG(page, 160, 139, 240, 142);
+  await page.click('[data-open-tool="spot"]');
+  assert((await page.textContent('#spot-out')) === 'No spots fixed yet.' && await page.isDisabled('#spot-undo-stroke'), 'starts with nothing fixed');
+  await brush(page, [[80, 70]]);                                      // a tap
+  assert((await page.evaluate(() => retouch.tools.spot.patches.length)) === 1, 'tap fixed one spot');
+  const spot1 = await meanG(page, 77, 67, 84, 74, 'preview');
+  assert(spot0 < 90 && spot1 > 140, 'spot filled with skin on the stage: ' + spot0.toFixed(1) + ' to ' + spot1.toFixed(1));
+  await brush(page, [[145, 140], [255, 140]]);
+  assert((await meanG(page, 160, 139, 240, 142, 'preview')) > 140, 'scratch filled');
+  assert((await page.textContent('#spot-out')) === '2 spots fixed.', 'status ' + await page.textContent('#spot-out'));
+  await page.click('#spot-undo-stroke');
+  assert(Math.abs((await meanG(page, 160, 139, 240, 142, 'preview')) - line0) < 0.01, 'undo stroke brings the scratch back exactly');
+  // A second finger: no fill, and the view zooms.
+  const s0 = await page.evaluate(() => retouch.view.scale);
+  await page.evaluate(() => {
+    const c = document.querySelector('#view'), r = c.getBoundingClientRect();
+    const ev = (type, id, x, y) => c.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: r.left + x, clientY: r.top + y, bubbles: true, pointerType: 'touch', isPrimary: id === 51 }));
+    ev('pointerdown', 51, 180, 200); ev('pointermove', 51, 175, 200); ev('pointerdown', 52, 220, 200);
+    for (let i = 1; i <= 10; i++) { ev('pointermove', 51, 175 - i * 6, 200); ev('pointermove', 52, 220 + i * 6, 200); }
+    ev('pointerup', 51, 115, 200); ev('pointerup', 52, 280, 200);
+  });
+  assert((await page.evaluate(() => retouch.tools.spot.patches.length)) === 1, 'the pinch fixed nothing');
+  assert((await page.evaluate(() => retouch.view.scale)) > s0 * 1.5, 'two fingers zoomed');
+  // Zoomed in, the scratch again, then apply.
+  await brush(page, [[145, 140], [255, 140]]);
+  await applyTool(page, 'spot');
+  const spot2 = await meanG(page, 77, 67, 84, 74), line2 = await meanG(page, 160, 139, 240, 142), skin = await meanG(page, 20, 20, 60, 60);
+  assert(Math.abs(spot2 - skin) < 6 && Math.abs(line2 - skin) < 6, 'filled like the skin around: spot ' + spot2.toFixed(1) + ', scratch ' + line2.toFixed(1) + ', skin ' + skin.toFixed(1));
+  assert(Math.abs(spot2 - spot1) < 0.01, 'the result is what the stage showed');
+  assert((await page.evaluate(() => retouch.app.edits.stack[retouch.app.edits.index].label)) === 'Spot eraser', 'history label');
+  assert(JSON.stringify(await texts(page)) === JSON.stringify(before), 'text boxes carried through');
+  await page.click('#btn-undo');
+  assert(Math.abs((await meanG(page, 77, 67, 84, 74)) - spot0) < 0.01, 'undo restores the photo');
+  // Apply with nothing fixed adds no step; a big stroke gets a warning.
+  await page.click('[data-open-tool="spot"]');
+  await applyTool(page, 'spot');
+  assert((await page.evaluate(() => retouch.app.edits.stack.length)) === 3, 'nothing fixed, no step');
+  await page.click('[data-open-tool="spot"]');
+  await page.fill('#spot-brush', '80'); await page.dispatchEvent('#spot-brush', 'input');
+  await brush(page, [[20, 20], [280, 20], [280, 180], [20, 180]]);
+  await page.waitForSelector('.notice[data-id="spot-large"]');
+  await page.click('.sheet-panel[data-tool="spot"] [data-cancel]');
+  assert((await page.evaluate(() => retouch.app.edits.stack.length)) === 3, 'cancel keeps nothing');
   assert(page.errors.length === 0, page.errors.join('; '));
   await ctx.close();
 });
