@@ -2093,6 +2093,15 @@ test('skin core: edge-preserving filter, grain, mix and tiles (independent check
     core.SKIN_TILE = 512;
     const orig = read(c);
     out.tileDiff = whole.reduce((m, v, i) => Math.max(m, Math.abs(v - tiled[i])), 0);
+    // The same on strong random noise, where a tile that read too little around itself shows a seam.
+    const noisy = core.makeCanvas(300, 220), nx = noisy.getContext('2d', { willReadFrequently: true }), ni = nx.createImageData(300, 220);
+    for (let i = 0; i < ni.data.length; i++) ni.data[i] = i % 4 === 3 ? 255 : 60 + rnd() * 140;
+    nx.putImageData(ni, 0, 0);
+    const no = { ...o, eps: 0.05 };
+    core.SKIN_TILE = 4096; const nWhole = read(core.renderSmooth(noisy, a, 300, 220, no));
+    core.SKIN_TILE = 37; const nTiled = read(core.renderSmooth(noisy, a, 300, 220, no));
+    core.SKIN_TILE = 512;
+    out.noiseTileDiff = nWhole.reduce((m, v, i) => Math.max(m, Math.abs(v - nTiled[i])), 0);
     let outside = 0, inside = 0;
     for (let y = 0; y < 220; y++) for (let x = 0; x < 300; x++) for (let k = 0; k < 4; k++) { const i = (y * 300 + x) * 4 + k; if (x >= 240) outside = Math.max(outside, Math.abs(tiled[i] - orig[i])); else inside = Math.max(inside, Math.abs(tiled[i] - orig[i])); }
     out.outside = outside; out.inside = inside;
@@ -2114,7 +2123,7 @@ test('skin core: edge-preserving filter, grain, mix and tiles (independent check
   assert(JSON.stringify(r.radii) === '[{"r":24,"g":5},{"r":12,"g":3},{"r":1,"g":1}]', 'radii ' + JSON.stringify(r.radii));
   assert(r.prob.join() === '0.5,1,0', 'skin = body + face skin, clamped: ' + r.prob);
   assert(JSON.stringify(r.bounds) === '[{"x0":5,"y0":3,"x1":13,"y1":7},{"x0":1,"y0":0,"x1":17,"y1":10},null]', 'alpha bounds ' + JSON.stringify(r.bounds));
-  assert(r.tileDiff <= 1, 'tiles must join without a seam: differs by ' + r.tileDiff);
+  assert(r.tileDiff <= 1 && r.noiseTileDiff <= 1, 'tiles must join without a seam: differs by ' + r.tileDiff + ' (patch), ' + r.noiseTileDiff + ' (noise)');
   assert(r.outside === 0 && r.inside > 5, 'only masked pixels change: outside ' + r.outside + ', inside ' + r.inside);
   assert(r.off && r.empty, 'strength 0 or an empty mask must change nothing');
   assert(r.stepD < 0.02, 'grain put back at a kept edge: ' + r.stepD);
