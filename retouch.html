@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.2.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.2.1 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -401,7 +401,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.2.1';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -1895,15 +1895,19 @@ tools.text = {
     const style = prev ? { font: prev.font, colour: prev.colour, align: prev.align, outline: prev.outline, outlineColour: prev.outlineColour, shadow: prev.shadow }
       : { font: 'sans', colour: '#FFFFFF', align: 'center', outline: 0, outlineColour: '#000000', shadow: 'soft' };
     const y = prev ? Math.min(c.height * 0.9, prev.y + prev.size * 1.6) : c.height / 2;
-    this.s.texts = [...this.s.texts, { id, text: 'Text', ...style, size, x: c.width / 2, y, rotation: 0 }];
+    // The new box starts empty and the text field takes the cursor, so the keyboard is ready.
+    this.s.texts = [...this.s.texts, { id, text: '', ...style, size, x: c.width / 2, y, rotation: 0 }];
     this.s.sel = id;
     this.sync();
+    $('#text-input').value = '';
+    $('#text-input').focus();
   },
   remove() {
     const b = this.box(); if (!b) return;
     this.s.texts = this.s.texts.filter((x) => x.id !== b.id);
     this.s.sel = this.s.texts.length ? this.s.texts[this.s.texts.length - 1].id : null;
     this.sync();
+    $('#text-input').value = this.box() ? this.box().text : '';
   },
   maxSize() { const c = app.edits.current; return Math.max(64, Math.round(Math.min(c.width, c.height) / 2)); },
   sync() {
@@ -2019,6 +2023,9 @@ tools.text = {
   input.addEventListener('input', () => t.update({ text: input.value }));
   input.addEventListener('focus', () => t.typing(true));
   input.addEventListener('blur', () => { t.typing(false); viewResize(); });
+  // Add and Delete sit beside the text field: tapping them must not take the
+  // cursor away, or the style rows reappear and shift the button mid-tap.
+  for (const b of [$('#text-add'), $('#text-delete')]) b.addEventListener('pointerdown', (e) => { if (document.activeElement === input) e.preventDefault(); });
   $('#text-add').addEventListener('click', () => t.add());
   $('#text-delete').addEventListener('click', () => t.remove());
   $('#text-size').addEventListener('input', (e) => t.update({ size: +e.target.value }));
