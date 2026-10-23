@@ -1197,6 +1197,134 @@ core.renderCutout = (src, a, W, H, o) => {
   return out;
 };
 
+/* Skin smoothing. Each colour channel goes through the guided filter with the
+   photo as its own guide: in a window where the colour barely varies (uneven
+   tone, blotches, small spots) the pixel moves to the window mean; where it
+   varies a lot (an eyebrow, a lash line, a lip edge) it is left alone. eps sets
+   the line between the two. The filter also removes the skin's fine grain, so
+   that grain is put back from the original (the Texture slider). The window
+   is sized from the face, so a full-length shot is treated like a close-up. */
+
+core.SKIN_RADIUS = 0.024;       // filter window half-width, as a fraction of the face's size
+core.SKIN_GRAIN = 0.005;        // what counts as grain: detail finer than this share of the face
+core.SKIN_EPS = 0.004;          // variance treated as an edge to keep (a contrast of about 6 %)
+core.SKIN_FEATHER = 0.004;      // soft edge on the skin mask, as a fraction of the photo's long edge
+core.SKIN_MIN_FACE = 0.002;     // a face smaller than this share of the photo is ignored when sizing
+core.SKIN_VEIL = 'rgba(40,150,220,0.45)';   // brush view: tint over what will be smoothed
+core.SKIN_TILE = 512;           // full-size smoothing works in tiles of this many pixels square
+
+// Size of the face in pixels (the side of a square of the same area), from the
+// model's face-skin and all-skin shares. With no face, the skin sets the size; with
+// neither, a tenth of the short side.
+core.skinFaceSize = (faceShare, skinShare, W, H) => {
+  const share = faceShare >= core.SKIN_MIN_FACE ? faceShare : skinShare;
+  return Math.max(Math.sqrt(share * W * H), 0.1 * Math.min(W, H));
+};
+
+// Filter radii in output pixels, for a face of faceSize image pixels drawn at scale k.
+core.skinRadii = (faceSize, k = 1) => ({
+  r: Math.max(1, Math.round(core.SKIN_RADIUS * faceSize * k)),
+  g: Math.max(1, Math.round(core.SKIN_GRAIN * faceSize * k)),
+});
+
+// Skin probability from the model: body skin plus face skin (classes 2 and 3).
+core.skinProb = (body, face) => {
+  const p = new Float32Array(body.length);
+  for (let i = 0; i < p.length; i++) p[i] = Math.min(1, Math.max(0, body[i] + face[i]));
+  return p;
+};
+
+// Edge-preserving smoothing of one channel (0 to 1), the channel as its own guide.
+core.selfGuided = (I, w, h, r, eps) => {
+  const n = w * h;
+  const mI = core.boxMean(Float32Array.from(I), w, h, r);
+  const m2 = new Float32Array(n);
+  for (let i = 0; i < n; i++) m2[i] = I[i] * I[i];
+  core.boxMean(m2, w, h, r);
+  // In place: m2 becomes a (how much of the pixel to keep), mI becomes b.
+  for (let i = 0; i < n; i++) {
+    const v = m2[i] - mI[i] * mI[i], a = v / (v + eps);
+    m2[i] = a; mI[i] = mI[i] - a * mI[i];
+  }
+  core.boxMean(m2, w, h, r); core.boxMean(mI, w, h, r);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = m2[i] * I[i] + mI[i];
+  return out;
+};
+
+// For an RGBA block: per channel, the smoothed values S and the grain D that the
+// smoothing took away (the fine part of original minus smoothed). D is near zero
+// at kept edges, so putting it back never sharpens an edge twice.
+core.skinFilter = (d, w, h, o) => {
+  const n = w * h, S = [], D = [];
+  for (let c = 0; c < 3; c++) {
+    const I = new Float32Array(n);
+    for (let i = 0; i < n; i++) I[i] = d[4 * i + c] / 255;
+    const Sc = core.selfGuided(I, w, h, o.r, o.eps);
+    const E = new Float32Array(n);
+    for (let i = 0; i < n; i++) E[i] = I[i] - Sc[i];
+    const low = core.boxMean(Float32Array.from(E), w, h, o.g);
+    for (let i = 0; i < n; i++) E[i] -= low[i];
+    S.push(Sc); D.push(E);
+  }
+  return { S, D };
+};
+
+// Mix into the RGBA block d: pixel = original + strength x alpha x (smoothed + texture x grain - original).
+// a is the alpha map, aW wide, with the block's top left at (ax, ay); null means 1 everywhere.
+core.skinMix = (d, w, h, f, o, a = null, aW = 0, ax = 0, ay = 0) => {
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x, m = o.strength * (a ? a[(y + ay) * aW + x + ax] : 1);
+      if (!m) continue;
+      for (let c = 0; c < 3; c++) {
+        const I = d[4 * i + c] / 255;
+        d[4 * i + c] = (I + m * (f.S[c][i] + o.texture * f.D[c][i] - I)) * 255;
+      }
+    }
+  }
+};
+
+// Box of pixels where alpha is above zero, grown by m and cut to the image, or null.
+core.alphaBounds = (a, W, H, m = 0) => {
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (a[y * W + x] > 0) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    }
+  }
+  if (x1 < 0) return null;
+  return { x0: Math.max(0, x0 - m), y0: Math.max(0, y0 - m), x1: Math.min(W, x1 + 1 + m), y1: Math.min(H, y1 + 1 + m) };
+};
+
+// The photo with its skin smoothed, as a new W x H canvas. o = { strength, texture,
+// r, g, eps }, radii in output pixels. Works tile by tile over the skin's box; each
+// tile reads a margin wide enough (2r + g) that the tiles join without a seam.
+core.renderSmooth = (src, a, W, H, o) => {
+  const out = core.makeCanvas(W, H);
+  const ctx = out.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, 0, 0, W, H);
+  const bx = core.alphaBounds(a, W, H);
+  if (!bx || !o.strength) return out;
+  const m = 2 * o.r + o.g, T = core.SKIN_TILE;
+  const done = [];
+  for (let ty = bx.y0; ty < bx.y1; ty += T) {
+    for (let tx = bx.x0; tx < bx.x1; tx += T) {
+      const t = { x0: tx, y0: ty, x1: Math.min(bx.x1, tx + T), y1: Math.min(bx.y1, ty + T) };
+      const r = { x0: Math.max(0, t.x0 - m), y0: Math.max(0, t.y0 - m), x1: Math.min(W, t.x1 + m), y1: Math.min(H, t.y1 + m) };
+      const rw = r.x1 - r.x0, rh = r.y1 - r.y0;
+      const img = ctx.getImageData(r.x0, r.y0, rw, rh);
+      const f = core.skinFilter(img.data, rw, rh, o);
+      core.skinMix(img.data, rw, rh, f, o, a, W, r.x0, r.y0);
+      done.push({ img, t, r });
+    }
+  }
+  // Written back only after every tile has read the original pixels around it.
+  for (const { img, t, r } of done) ctx.putImageData(img, r.x0, r.y0, t.x0 - r.x0, t.y0 - r.y0, t.x1 - t.x0, t.y1 - t.y0);
+  return out;
+};
+
 /* Metadata. Encoders in Chrome do not normally write EXIF, but exports are
    still parsed byte by byte, anything that is not image data is removed, and
    the result is checked again before it is handed over. */
@@ -2424,7 +2552,8 @@ tools.text = {
 // cache). The model runs here in WebAssembly; the photo goes nowhere.
 const segmenter = {
   promise: null,
-  override: null,      // test seam: (canvas) => { w, h, data }, used instead of the model
+  override: null,      // test seams, used instead of the model: (canvas) => { w, h, data } for the
+  skinOverride: null,  // person, and (canvas) => { w, h, data, face } for the skin
   load() {
     if (!this.promise) {
       this.promise = (async () => {
@@ -2438,19 +2567,104 @@ const segmenter = {
     }
     return this.promise;
   },
-  // Person probability for a canvas, at the canvas's own size: { w, h, data }.
-  async person(canvas) {
-    if (this.override) return this.override(canvas);
+  // The model's six class confidences for a canvas, at the canvas's own size:
+  // background, hair, body skin, face skin, clothes, others.
+  async classes(canvas) {
     const seg = await this.load();
     const r = seg.segment(canvas);
     try {
-      const m = r.confidenceMasks[0];                          // class 0 is the background
-      return { w: m.width, h: m.height, data: core.bgPerson(m.getAsFloat32Array()) };
+      const m = r.confidenceMasks;
+      return { w: m[0].width, h: m[0].height, conf: m.map((x) => x.getAsFloat32Array().slice()) };
     } finally { r.close(); }
+  },
+  // Person probability: { w, h, data }.
+  async person(canvas) {
+    if (this.override) return this.override(canvas);
+    const c = await this.classes(canvas);
+    return { w: c.w, h: c.h, data: core.bgPerson(c.conf[0]) };
+  },
+  // Skin probability, and the share of the picture that is face skin: { w, h, data, face }.
+  async skin(canvas) {
+    if (this.skinOverride) return this.skinOverride(canvas);
+    const c = await this.classes(canvas);
+    let face = 0;
+    for (const v of c.conf[3]) face += v;
+    return { w: c.w, h: c.h, data: core.skinProb(c.conf[2], c.conf[3]), face: face / (c.w * c.h) };
+  },
+};
+
+// Shared by the tools that work through a mask (background, skin): the refine
+// brush with its undo, and rebuilding the preview's mask. Each tool keeps
+// this.pv (the preview: k, W, H, q, mask canvas), this.strokes, this.s.mode
+// ('view', 'keep' or 'erase') and this.s.brush, and brings its own prepAlpha(),
+// composite() and sync().
+const maskBrush = {
+  // Rebuild the mask from the guided alpha: the tool's own step, then every finished stroke.
+  refreshAlpha() {
+    const pv = this.pv; if (!pv) return;
+    pv.committed = core.bgStrokes(this.prepAlpha(Float32Array.from(pv.q)), pv.W, pv.H, this.strokes, pv.k);
+    pv.work = Float32Array.from(pv.committed);
+    const m = pv.mask.getContext('2d');
+    m.clearRect(0, 0, pv.W, pv.H);
+    core.putAlpha(m, pv.work, pv.W, pv.H);
+    this.composite();
+  },
+  // The stroke in progress: redo only its box, from the finished strokes.
+  paintActive() {
+    const pv = this.pv, st = this.stroke;
+    const bx = core.strokeBounds(st, pv.k, pv.W, pv.H);
+    for (let y = bx.y0; y < bx.y1; y++) pv.work.set(pv.committed.subarray(y * pv.W + bx.x0, y * pv.W + bx.x1), y * pv.W + bx.x0);
+    core.paintStroke(pv.work, pv.W, pv.H, st, pv.k);
+    core.putAlpha(pv.mask.getContext('2d'), pv.work, pv.W, pv.H, bx);
+    this.composite();
+  },
+  toImage(p) { return { x: (p.x - view.tx) / view.scale, y: (p.y - view.ty) / view.scale }; },
+  pointerDown(p) {
+    if (this.s.mode === 'view' || !this.pv) return false;
+    // The brush size is set in screen pixels, so it feels the same at any zoom.
+    this.stroke = { mode: this.s.mode, r: this.s.brush / 2 / view.scale, pts: [this.toImage(p)] };
+    this.cursor = p;
+    this.paintActive();
+    return true;
+  },
+  pointerMove(p) {
+    const st = this.stroke; if (!st) return;
+    const q = this.toImage(p), last = st.pts[st.pts.length - 1];
+    this.cursor = p;
+    if (Math.hypot(q.x - last.x, q.y - last.y) >= st.r / 4) { st.pts.push(q); this.paintActive(); } else requestDraw();
+  },
+  pointerUp() {
+    const st = this.stroke; if (!st) return;
+    this.strokes.push(st);
+    this.pv.committed.set(this.pv.work);
+    this.stroke = null; this.cursor = null;
+    this.sync();
+  },
+  // A second finger arrived (zoom instead), or the system took the touch: drop the stroke.
+  pointerCancel() {
+    if (!this.stroke) return;
+    const pv = this.pv, bx = core.strokeBounds(this.stroke, pv.k, pv.W, pv.H);
+    pv.work.set(pv.committed);
+    core.putAlpha(pv.mask.getContext('2d'), pv.work, pv.W, pv.H, bx);
+    this.stroke = null; this.cursor = null;
+    this.composite();
+  },
+  undoStroke() { if (this.strokes.pop()) { this.refreshAlpha(); this.sync(); } },
+  // The brush outline under the finger while painting.
+  overlay(ctx) {
+    if (!this.cursor || !this.stroke) return;
+    ctx.save();
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    ctx.beginPath();
+    ctx.arc(this.cursor.x, this.cursor.y, this.stroke.r * view.scale, 0, 2 * Math.PI);
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.stroke();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#FFFFFF'; ctx.stroke();
+    ctx.restore();
   },
 };
 
 tools.bg = {
+  ...maskBrush,
   s: null,
   open() {
     if (!this.s) this.s = { fill: 'transparent', colour: '#FFFFFF', blur: 0.5, feather: 3, brush: 40 };
@@ -2511,16 +2725,8 @@ tools.bg = {
     this.refreshBackdrop(false);
     this.refreshAlpha();
   },
-  // Feather and every finished stroke, from the guided alpha.
-  refreshAlpha() {
-    const pv = this.pv; if (!pv) return;
-    pv.committed = core.bgStrokes(core.bgFeather(Float32Array.from(pv.q), pv.W, pv.H, this.s.feather * BG_FEATHER_STEP), pv.W, pv.H, this.strokes, pv.k);
-    pv.work = Float32Array.from(pv.committed);
-    const m = pv.mask.getContext('2d');
-    m.clearRect(0, 0, pv.W, pv.H);
-    core.putAlpha(m, pv.work, pv.W, pv.H);
-    this.composite();
-  },
+  // Feather, before the strokes.
+  prepAlpha(a) { return core.bgFeather(a, this.pv.W, this.pv.H, this.s.feather * BG_FEATHER_STEP); },
   fillOptions() { return this.s.mode === 'view' ? { fill: this.s.fill, colour: this.s.colour, blur: this.s.blur } : { fill: 'veil' }; },
   refreshBackdrop(redraw = true) {
     const pv = this.pv; if (!pv) return;
@@ -2543,58 +2749,6 @@ tools.bg = {
     o.drawImage(pv.bg, 0, 0);
     o.drawImage(pv.fg, 0, 0);
     requestDraw();
-  },
-  // The stroke in progress: redo only its box, from the finished strokes.
-  paintActive() {
-    const pv = this.pv, st = this.stroke;
-    const bx = core.strokeBounds(st, pv.k, pv.W, pv.H);
-    for (let y = bx.y0; y < bx.y1; y++) pv.work.set(pv.committed.subarray(y * pv.W + bx.x0, y * pv.W + bx.x1), y * pv.W + bx.x0);
-    core.paintStroke(pv.work, pv.W, pv.H, st, pv.k);
-    core.putAlpha(pv.mask.getContext('2d'), pv.work, pv.W, pv.H, bx);
-    this.composite();
-  },
-  toImage(p) { return { x: (p.x - view.tx) / view.scale, y: (p.y - view.ty) / view.scale }; },
-  pointerDown(p) {
-    if (this.s.mode === 'view' || !this.pv) return false;
-    // The brush size is set in screen pixels, so it feels the same at any zoom.
-    this.stroke = { mode: this.s.mode, r: this.s.brush / 2 / view.scale, pts: [this.toImage(p)] };
-    this.cursor = p;
-    this.paintActive();
-    return true;
-  },
-  pointerMove(p) {
-    const st = this.stroke; if (!st) return;
-    const q = this.toImage(p), last = st.pts[st.pts.length - 1];
-    this.cursor = p;
-    if (Math.hypot(q.x - last.x, q.y - last.y) >= st.r / 4) { st.pts.push(q); this.paintActive(); } else requestDraw();
-  },
-  pointerUp() {
-    const st = this.stroke; if (!st) return;
-    this.strokes.push(st);
-    this.pv.committed.set(this.pv.work);
-    this.stroke = null; this.cursor = null;
-    this.sync();
-  },
-  // A second finger arrived (zoom instead), or the system took the touch: drop the stroke.
-  pointerCancel() {
-    if (!this.stroke) return;
-    const pv = this.pv, bx = core.strokeBounds(this.stroke, pv.k, pv.W, pv.H);
-    pv.work.set(pv.committed);
-    core.putAlpha(pv.mask.getContext('2d'), pv.work, pv.W, pv.H, bx);
-    this.stroke = null; this.cursor = null;
-    this.composite();
-  },
-  undoStroke() { if (this.strokes.pop()) { this.refreshAlpha(); this.sync(); } },
-  // The brush outline under the finger while painting.
-  overlay(ctx) {
-    if (!this.cursor || !this.stroke) return;
-    ctx.save();
-    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
-    ctx.beginPath();
-    ctx.arc(this.cursor.x, this.cursor.y, this.stroke.r * view.scale, 0, 2 * Math.PI);
-    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.stroke();
-    ctx.lineWidth = 1.5; ctx.strokeStyle = '#FFFFFF'; ctx.stroke();
-    ctx.restore();
   },
   setMode(mode) { const was = this.s.mode; this.s.mode = mode; if ((was === 'view') !== (mode === 'view')) this.refreshBackdrop(); this.sync(); },
   setFill(patch) { Object.assign(this.s, patch); this.refreshBackdrop(); this.sync(); },
