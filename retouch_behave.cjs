@@ -6,7 +6,9 @@
 // Every fixture is synthetic and built here (gradients, flat colours, files
 // with planted EXIF/XMP/IPTC/GPS), so results can be checked as numbers.
 // Tests that need a real person (phase 3 onwards) read reference/test-images/
-// and skip cleanly when it is absent.
+// and skip cleanly when it is absent. The background tests swap the model for a
+// stand-in that marks pixels of a known colour, so the rest of the pipeline can be
+// checked as numbers; one test runs the real model, offline.
 //
 // Run:            node retouch_behave.cjs
 // Core only:      RETOUCH_ONLY=core node retouch_behave.cjs   (used by retouch_mutate.sh)
@@ -167,7 +169,7 @@ function plantWebpMetadata(webp, w, h) {
 
 /* ---------- Static server ---------- */
 
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.png': 'image/png', '.woff2': 'font/woff2', '.webmanifest': 'application/manifest+json', '.txt': 'text/plain' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.png': 'image/png', '.woff2': 'font/woff2', '.webmanifest': 'application/manifest+json', '.txt': 'text/plain', '.wasm': 'application/wasm', '.tflite': 'application/octet-stream' };
 const server = { swVariant: null };
 function startServer() {
   return new Promise((resolve) => {
@@ -211,11 +213,12 @@ async function newApp({ sw = false, init = null, viewport = { width: 412, height
     if (u.protocol === 'blob:' || u.protocol === 'data:') return;
     if (u.origin !== BASE && u.hostname !== 'csp-probe.example') foreignRequests.push(r.url());
   });
-  if (init) await ctx.addInitScript(init);
+  for (const f of [].concat(init || [])) await ctx.addInitScript(f);
   const page = await ctx.newPage();
   page.errors = [];
   page.on('pageerror', (e) => page.errors.push(e.message));
-  page.on('console', (m) => { if (m.type() === 'error') page.errors.push('console: ' + m.text()); });
+  // MediaPipe prints one INFO line through console.error when it starts; that is not a fault.
+  page.on('console', (m) => { if (m.type() === 'error' && !/^INFO: Created TensorFlow Lite XNNPACK delegate/.test(m.text())) page.errors.push('console: ' + m.text()); });
   await page.goto(BASE + '/retouch.html');
   await page.waitForFunction(() => window.retouch && window.retouch.app);
   return { ctx, page };
@@ -810,9 +813,12 @@ test('before / after hold on the main view and on every tool', async () => {
     await page.waitForFunction(() => window.retouch.app.showing === 'after');
   };
   await hold('#hold-main');
-  for (const t of ['crop', 'resize', 'pad', 'text']) {
+  await page.evaluate(BG_INIT);
+  await page.evaluate(() => window.__fakeSeg([0, 0, 77], 300));
+  for (const t of ['crop', 'resize', 'pad', 'text', 'bg']) {
     await page.click('[data-open-tool="' + t + '"]');
     await hold('.sheet-panel[data-tool="' + t + '"] [data-hold]');
+    await idle(page);
     await page.click('.sheet-panel[data-tool="' + t + '"] [data-cancel]');
   }
   await page.click('#btn-export');
@@ -861,12 +867,16 @@ test('phone layout: tap targets at least 44 px, no sideways scroll', async () =>
   await checkVisible('empty state');
   await load(page, gradient());
   await checkVisible('editing');
-  for (const t of ['crop', 'resize', 'pad', 'text']) {
-    await page.click('[data-open-tool="' + t + '"]');
+  await page.evaluate(BG_INIT);
+  await page.evaluate(() => window.__fakeSeg([0, 0, 77], 300));
+  for (const t of ['crop', 'resize', 'pad', 'text', 'bg', 'bg-brush']) {
+    if (t === 'bg-brush') { await page.click('[data-open-tool="bg"]'); await idle(page); await page.click('[data-bgmode="erase"]'); }
+    else await page.click('[data-open-tool="' + t + '"]');
+    if (t === 'bg') await idle(page);
     await checkVisible(t + ' sheet');
     const stage = await page.locator('#stage').boundingBox();
     assert(stage.height > 400, t + ': photo area only ' + stage.height + ' px tall');
-    await page.click('.sheet-panel[data-tool="' + t + '"] [data-cancel]');
+    await page.click('.sheet-panel[data-tool="' + t.replace('-brush', '') + '"] [data-cancel]');
   }
   await page.click('#btn-export');
   await checkVisible('export sheet');
@@ -1500,6 +1510,478 @@ test('text: sheet controls, typing mode and the stage stays usable', async () =>
   await ctx.close();
 });
 
+/* ---------- Phase 3: remove background ---------- */
+
+// In-page helpers. __fakeSeg stands in for the model: a pixel is "person" when its
+// colour is within tol of rgb, and the answer comes back blocky and soft (a quarter
+// of the size, then blurred), the way the real model's mask looks next to a photo.
+const BG_INIT = () => {
+  window.__fakeSeg = (rgb, tol = 60, cell = 4) => {
+    window.retouch.segmenter.override = (canvas) => {
+      const w = canvas.width, h = canvas.height, d = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+      const cw = Math.ceil(w / cell), ch = Math.ceil(h / cell), m = new Float32Array(cw * ch), n = new Float32Array(cw * ch);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const i = Math.floor(y / cell) * cw + Math.floor(x / cell), o = (y * w + x) * 4;
+        n[i]++;
+        if (Math.abs(d[o] - rgb[0]) + Math.abs(d[o + 1] - rgb[1]) + Math.abs(d[o + 2] - rgb[2]) <= tol) m[i]++;
+      }
+      for (let i = 0; i < m.length; i++) {
+        m[i] /= n[i];
+      }
+      // Blur by hand (not with the app's own box filter) so a bug there cannot hide here.
+      const b = new Float32Array(m.length);
+      for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+        let s = 0, k = 0;
+        for (let v = -1; v <= 1; v++) for (let u = -1; u <= 1; u++) {
+          const X = x + u, Y = y + v;
+          if (X >= 0 && X < cw && Y >= 0 && Y < ch) { s += m[Y * cw + X]; k++; }
+        }
+        b[y * cw + x] = s / k;
+      }
+      return { w: cw, h: ch, data: b };
+    };
+  };
+  window.__px = (c, x, y) => Array.from(c.getContext('2d', { willReadFrequently: true }).getImageData(x, y, 1, 1).data);
+};
+const SKIN = [210, 160, 130], SKY = [40, 90, 200];
+// 300 x 200: sky, and a "person" block from x 100 to 199 that runs off the bottom edge.
+const personPng = () => makePng(300, 200, (x, y) => (x >= 100 && x < 200 && y >= 50 ? SKIN : SKY).concat(255));
+async function bgReady(page) {
+  await page.click('[data-open-tool="bg"]');
+  await page.waitForFunction(() => window.retouch.tools.bg.pv && window.retouch.app.busyCount === 0, null, { timeout: 30000 });
+}
+// One finger on the stage through image points pts (screen positions worked out
+// from the current zoom), as a touch.
+const brush = (page, pts) => page.evaluate((pts) => {
+  const c = document.querySelector('#view'), r = c.getBoundingClientRect(), v = retouch.view;
+  const at = (p) => ({ clientX: r.left + v.tx + p[0] * v.scale, clientY: r.top + v.ty + p[1] * v.scale });
+  const ev = (type, p) => c.dispatchEvent(new PointerEvent(type, { pointerId: 31, ...at(p), bubbles: true, pointerType: 'touch', isPrimary: true }));
+  ev('pointerdown', pts[0]);
+  for (let i = 1; i < pts.length; i++) {
+    const [a, b] = [pts[i - 1], pts[i]];
+    for (let t = 1; t <= 8; t++) ev('pointermove', [a[0] + (b[0] - a[0]) * t / 8, a[1] + (b[1] - a[1]) * t / 8]);
+  }
+  ev('pointerup', pts[pts.length - 1]);
+}, pts);
+
+test('background core: box mean, resample, person probability and edge ramp (independent check)', async () => {
+  const { ctx, page } = await newApp();
+  const r = await page.evaluate(() => {
+    const core = retouch.core;
+    // Box mean against a direct sum over the window, cut off at the edges.
+    const w = 23, h = 17, a = new Float32Array(w * h).map((_, i) => Math.sin(i * 12.9898) * 0.5 + 0.5);
+    let boxErr = 0;
+    for (const rad of [0, 1, 3, 30]) {
+      const got = core.boxMean(Float32Array.from(a), w, h, rad);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        let s = 0, n = 0;
+        for (let v = Math.max(0, y - rad); v <= Math.min(h - 1, y + rad); v++) for (let u = Math.max(0, x - rad); u <= Math.min(w - 1, x + rad); u++) { s += a[v * w + u]; n++; }
+        boxErr = Math.max(boxErr, Math.abs(got[y * w + x] - s / n));
+      }
+    }
+    // Resample: 2 x 2 to 4 x 4 with centres lined up, and a 3 x 1 ramp to 6 x 2.
+    const up = Array.from(core.resampleMask(new Float32Array([0, 1, 0, 1]), 2, 2, 4, 4)).map((v) => +v.toFixed(4));
+    const ramp = Array.from(core.resampleMask(new Float32Array([0, 0.5, 1]), 3, 1, 6, 2)).map((v) => +v.toFixed(4));
+    const same = Array.from(core.resampleMask(new Float32Array([0.2, 0.4, 0.6, 0.8, 1, 0]), 3, 2, 3, 2)).map((v) => +v.toFixed(4));
+    // Uneven scale: x doubled, y kept.
+    const uneven = Array.from(core.resampleMask(new Float32Array([0, 1, 1, 0]), 2, 2, 4, 2)).map((v) => +v.toFixed(4));
+    const person = Array.from(core.bgPerson(new Float32Array([0, 0.25, 1, 1.2, -0.1]))).map((v) => +v.toFixed(4));
+    const lo = core.BG_EDGE_LO, hi = core.BG_EDGE_HI;
+    const curve = [lo - 0.1, lo, (lo + hi) / 2, hi, hi + 0.1, lo + (hi - lo) * 0.25].map((q) => +core.bgCurve(q).toFixed(4));
+    // Faint haze (under 0.2) is cleared, near-certain person (over 0.8) is kept whole,
+    // and the ramp is centred on an even chance.
+    const haze = [0.15, 0.5, 0.85].map((q) => +core.bgCurve(q).toFixed(4));
+    // Share of the photo the model calls a person, from a mask at the guide's size.
+    const g = core.makeCanvas(40, 30), gm = new Float32Array(1200).map((_, i) => (i % 40 < 10 ? 1 : 0));
+    const coverage = +core.bgModel(g, { w: 40, h: 30, data: gm }).coverage.toFixed(4);
+    // putAlpha over a box writes only that box, from the matching part of the map.
+    const pc = core.makeCanvas(30, 20), pctx = pc.getContext('2d', { willReadFrequently: true });
+    const amap = new Float32Array(600).map((_, i) => (i % 30) / 29);
+    core.STRIP_PIXELS = 7;                                              // force many strips
+    core.putAlpha(pctx, amap, 30, 20, { x0: 10, y0: 5, x1: 25, y1: 15 });
+    core.STRIP_PIXELS = 1000000;
+    const pa = (x, y) => pctx.getImageData(x, y, 1, 1).data[3];
+    const put = [pa(9, 8), pa(10, 8), pa(24, 14), pa(25, 14), pa(17, 4), pa(17, 5), pa(17, 15), pa(20, 10)];
+    const guideDims = [core.bgGuideDims(4080, 3072), core.bgGuideDims(3072, 4080), core.bgGuideDims(300, 200)];
+    return { boxErr, up, ramp, same, uneven, person, curve, lo, hi, guideDims, guideLong: core.BG_GUIDE_LONG, haze, coverage, put };
+  });
+  assert(r.boxErr < 1e-5, 'box mean differs from a direct sum by ' + r.boxErr);
+  assert(r.up.join() === '0,0.25,0.75,1,0,0.25,0.75,1,0,0.25,0.75,1,0,0.25,0.75,1', 'resample 2x2 to 4x4: ' + r.up);
+  assert(r.ramp.join() === '0,0.125,0.375,0.625,0.875,1,0,0.125,0.375,0.625,0.875,1', 'resample ramp: ' + r.ramp);
+  assert(r.same.join() === '0.2,0.4,0.6,0.8,1,0', 'resample to the same size copies: ' + r.same);
+  assert(r.uneven.join() === '0,0.25,0.75,1,1,0.75,0.25,0', 'resample x only: ' + r.uneven);
+  assert(r.person.join() === '1,0.75,0,0,1', 'person = 1 - background, clamped: ' + r.person);
+  assert(r.lo > 0 && r.hi < 1 && r.lo < r.hi, 'ramp ends ' + r.lo + ', ' + r.hi);
+  assert(r.curve.join() === '0,0,0.5,1,1,0.1563', 'edge ramp (smoothstep): ' + r.curve);
+  assert(r.guideLong === 1024, 'guide long edge ' + r.guideLong);
+  assert(r.haze.join() === '0,0.5,1', 'haze cleared, certain kept, centred: ' + r.haze);
+  assert(r.coverage === 0.25, 'person share ' + r.coverage);
+  assert(r.put.join() === '0,88,211,0,0,149,0,176', 'putAlpha over a box: ' + r.put);
+  assert(JSON.stringify(r.guideDims) === '[{"w":1024,"h":771},{"w":771,"h":1024},{"w":300,"h":200}]', 'guide sizes ' + JSON.stringify(r.guideDims));
+  await ctx.close();
+}, { core: true });
+
+test('background core: guided upscale snaps a rough, offset mask onto the photo edge', async () => {
+  const { ctx, page } = await newApp();
+  const r = await page.evaluate(() => {
+    const core = retouch.core;
+    const W = 768, H = 576, R0 = 150, CX = 384, CY = 288;
+    const c = core.makeCanvas(W, H), x = c.getContext('2d', { willReadFrequently: true });
+    // Two-tone striped background, a skin-coloured disc for the person.
+    for (let i = 0; i < W; i += 12) { x.fillStyle = (i / 12) % 2 ? 'rgb(60,120,190)' : 'rgb(90,150,210)'; x.fillRect(i, 0, 12, H); }
+    x.fillStyle = 'rgb(205,160,130)'; x.beginPath(); x.arc(CX, CY, R0, 0, 2 * Math.PI); x.fill();
+    // The rough mask: 1/16 scale, blurred, and drawn shift px too big or too small.
+    const rough = (shift) => {
+      const cw = W / 16, ch = H / 16, m = new Float32Array(cw * ch);
+      for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) {
+        let n = 0;
+        for (let u = 0; u < 4; u++) for (let v = 0; v < 4; v++) if (Math.hypot((i + (u + 0.5) / 4) * 16 - CX, (j + (v + 0.5) / 4) * 16 - CY) < R0 + shift) n++;
+        m[j * cw + i] = n / 16;
+      }
+      return { w: cw, h: ch, data: m };
+    };
+    const measure = (a) => {
+      let err = 0, width = 0, inside = 1, outside = 0;
+      for (let k = 0; k < 16; k++) {
+        const th = k * Math.PI / 8 + 0.1, cs = Math.cos(th), sn = Math.sin(th);
+        const at = (rr) => a[Math.round(CY + rr * sn - 0.5) * W + Math.round(CX + rr * cs - 0.5)];
+        let r90 = null, r50 = null, r10 = null;
+        for (let rr = R0 - 40; rr < R0 + 40; rr += 0.25) { const v = at(rr); if (r90 === null && v < 0.9) r90 = rr; if (r50 === null && v < 0.5) r50 = rr; if (r10 === null && v < 0.1) r10 = rr; }
+        err = Math.max(err, Math.abs(r50 - R0)); width = Math.max(width, r10 - r90);
+        inside = Math.min(inside, at(R0 - 25)); outside = Math.max(outside, at(R0 + 25));
+      }
+      let haze = 0;
+      for (let py = 0; py < H; py += 2) for (let px = 0; px < W; px += 2) if (Math.hypot(px + 0.5 - CX, py + 0.5 - CY) > R0 + 30) haze = Math.max(haze, a[py * W + px]);
+      return { err, width, inside, outside, haze };
+    };
+    const out = {};
+    for (const shift of [0, 6, -6]) {
+      const m = rough(shift);
+      out['guided' + shift] = measure(core.bgGuided(c, W, H, core.bgModel(c, m)));
+      out['plain' + shift] = measure(core.resampleMask(m.data, m.w, m.h, W, H).map(core.bgCurve));
+    }
+    // The model fitted on a half-size guide, applied at full size: edges stay crisp.
+    const half = core.makeCanvas(W / 2, H / 2);
+    half.getContext('2d').drawImage(c, 0, 0, W / 2, H / 2);
+    core.STRIP_PIXELS = 10000;                                          // full size read in many strips
+    out.fromHalf = measure(core.bgGuided(c, W, H, core.bgModel(half, rough(6))));
+    core.STRIP_PIXELS = 1000000;
+    // Properties of the filter itself: a flat mask stays flat; a mask equal to the
+    // red channel comes back as the red channel.
+    const g = x.getImageData(0, 0, W, H).data, n = W * H, I = new Float32Array(3 * n), red = new Float32Array(n);
+    for (let i = 0; i < n; i++) { I[3 * i] = g[4 * i] / 255; I[3 * i + 1] = g[4 * i + 1] / 255; I[3 * i + 2] = g[4 * i + 2] / 255; red[i] = I[3 * i]; }
+    const apply = (m) => { let e = 0; for (let i = 0; i < n; i += 37) e = Math.max(e, Math.abs(m.ar[i] * I[3 * i] + m.ag[i] * I[3 * i + 1] + m.ab[i] * I[3 * i + 2] + m.b[i] - m.want(i))); return e; };
+    const flat = core.guidedCoeffs(I, new Float32Array(n).fill(0.3), W, H, 8, 1e-3); flat.want = () => 0.3;
+    const lin = core.guidedCoeffs(I, red, W, H, 8, 1e-6); lin.want = (i) => red[i];
+    out.flatErr = apply(flat); out.linErr = apply(lin);
+    // The whole filter against a slow, direct reading of He, Sun and Tang on a small random
+    // photo: per window, means and the colour covariance, a 3 x 3 solve by elimination,
+    // then each pixel averages the a and b of every window that covers it.
+    const w = 13, h = 9, rad = 2, eps = 0.01, N = w * h;
+    let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const Ir = new Float32Array(3 * N).map(rnd), pr = new Float32Array(N).map(rnd);
+    const win = (cx, cy, f) => { let s = 0, k = 0; for (let y = Math.max(0, cy - rad); y <= Math.min(h - 1, cy + rad); y++) for (let x = Math.max(0, cx - rad); x <= Math.min(w - 1, cx + rad); x++) { s += f(y * w + x); k++; } return s / k; };
+    const solve = (M, v) => {
+      const A = M.map((row, i) => [...row, v[i]]);
+      for (let c = 0; c < 3; c++) {
+        let piv = c; for (let i = c + 1; i < 3; i++) if (Math.abs(A[i][c]) > Math.abs(A[piv][c])) piv = i;
+        [A[c], A[piv]] = [A[piv], A[c]];
+        for (let i = 0; i < 3; i++) if (i !== c) { const f = A[i][c] / A[c][c]; for (let j = c; j < 4; j++) A[i][j] -= f * A[c][j]; }
+      }
+      return A.map((row, i) => row[3] / row[i]);
+    };
+    const ak = [], bk = [];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const mu = [0, 1, 2].map((c) => win(x, y, (i) => Ir[3 * i + c])), mp = win(x, y, (i) => pr[i]);
+      const S = [0, 1, 2].map((c) => [0, 1, 2].map((d) => win(x, y, (i) => Ir[3 * i + c] * Ir[3 * i + d]) - mu[c] * mu[d] + (c === d ? eps : 0)));
+      const cv = [0, 1, 2].map((c) => win(x, y, (i) => Ir[3 * i + c] * pr[i]) - mu[c] * mp);
+      const a = solve(S, cv);
+      ak.push(a); bk.push(mp - a[0] * mu[0] - a[1] * mu[1] - a[2] * mu[2]);
+    }
+    const ref = { ar: (i) => win(i % w, Math.floor(i / w), (j) => ak[j][0]), ag: (i) => win(i % w, Math.floor(i / w), (j) => ak[j][1]),
+      ab: (i) => win(i % w, Math.floor(i / w), (j) => ak[j][2]), b: (i) => win(i % w, Math.floor(i / w), (j) => bk[j]) };
+    const gc = core.guidedCoeffs(Ir, pr, w, h, rad, eps);
+    out.refErr = Math.max(...['ar', 'ag', 'ab', 'b'].map((k) => Math.max(...Array.from(gc[k]).map((v, i) => Math.abs(v - ref[k](i))))));
+    // A photo of one flat colour has no colour variance at all: eps alone keeps the
+    // solve finite, and the result is the mask, smoothed.
+    const flatI = new Float32Array(3 * N).fill(0.5), fc = core.guidedCoeffs(flatI, pr, w, h, rad, eps);
+    out.flatPhoto = ['ar', 'ag', 'ab', 'b'].every((k) => fc[k].every(Number.isFinite)) && Math.max(...Array.from(fc.ar).map(Math.abs)) < 1e-6;
+    // Reading coefficients back at another size: b = 0.2 to 0.8 across a 2 x 2 grid, read
+    // at 4 x 2, gives the same values as resampling b; and each colour weight picks its channel.
+    const rd = (m, data, W, H) => { const o = new Float32Array(W * H); core.guidedApply(data, W, H, 0, H, m, o); return Array.from(o).map((v) => +v.toFixed(4)); };
+    const z = new Float32Array(4);
+    const bmap = new Float32Array([0.2, 0.8, 0.2, 0.8]);
+    out.readB = rd({ ar: z, ag: z, ab: z, b: bmap, w: 2, h: 2 }, new Uint8ClampedArray(32), 4, 2);
+    out.readBWant = Array.from(core.resampleMask(bmap, 2, 2, 4, 2)).map((v) => +core.bgCurve(v).toFixed(4));
+    const one = new Float32Array(4).fill(1), px1 = new Uint8ClampedArray([51, 128, 204, 255]);
+    out.readC = [rd({ ar: one, ag: z, ab: z, b: z, w: 2, h: 2 }, px1, 1, 1)[0], rd({ ar: z, ag: one, ab: z, b: z, w: 2, h: 2 }, px1, 1, 1)[0], rd({ ar: z, ag: z, ab: one, b: z, w: 2, h: 2 }, px1, 1, 1)[0]];
+    out.readCWant = [51, 128, 204].map((v) => +core.bgCurve(v / 255).toFixed(4));
+    return out;
+  });
+  for (const shift of [0, 6, -6]) {
+    const g = r['guided' + shift], p = r['plain' + shift];
+    assert(g.err <= 1.5, 'mask ' + shift + ' px off: edge lands ' + g.err + ' px from the photo edge');
+    assert(g.width <= 3, 'mask ' + shift + ' px off: edge is ' + g.width + ' px wide (10 to 90 %)');
+    assert(g.inside >= 0.98 && g.outside <= 0.02 && g.haze <= 0.02, 'mask ' + shift + ': inside ' + g.inside + ', outside ' + g.outside + ', haze ' + g.haze);
+    assert(p.width >= 6, 'the plain upscale should be soft, which is the point of the filter: ' + p.width);
+  }
+  assert(r.plain6.err >= 4, 'an offset mask upscaled plainly stays offset: ' + r.plain6.err);
+  assert(r.fromHalf.err <= 1.5 && r.fromHalf.width <= 3, 'half-size guide, full-size result: ' + JSON.stringify(r.fromHalf));
+  assert(r.flatErr < 1e-3, 'flat mask changed by ' + r.flatErr);
+  assert(r.linErr < 0.02, 'a mask that is the red channel came back off by ' + r.linErr);
+  assert(r.refErr < 1e-4, 'guided filter differs from the direct reading by ' + r.refErr);
+  assert(r.flatPhoto, 'flat photo: coefficients must stay finite, with no colour weight');
+  assert(r.readB.every((v, i) => Math.abs(v - r.readBWant[i]) < 1e-3) && r.readB[0] !== r.readB[1], 'coefficients read back at 4 x 2: ' + r.readB + ' want ' + r.readBWant);
+  assert(r.readC.every((v, i) => Math.abs(v - r.readCWant[i]) < 1e-3), 'colour weights pick their channel: ' + r.readC + ' want ' + r.readCWant);
+  await ctx.close();
+}, { core: true });
+
+test('background core: feather, brush strokes and the backdrop fills', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  const r = await page.evaluate(() => {
+    const core = retouch.core, out = {};
+    // Feather against a direct double box blur, and no fading at the frame.
+    const W = 120, H = 40, step = new Float32Array(W * H).map((_, i) => (i % W < 60 ? 1 : 0));
+    const f = 8 / W, rad = 4;                                          // r = round(f * 120 / 2) = 4
+    const got = core.bgFeather(Float32Array.from(step), W, H, f);
+    const box1 = (a) => { const o = new Float32Array(a.length); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let s = 0, n = 0; for (let v = Math.max(0, y - rad); v <= Math.min(H - 1, y + rad); v++) for (let u = Math.max(0, x - rad); u <= Math.min(W - 1, x + rad); u++) { s += a[v * W + u]; n++; } o[y * W + x] = s / n; } return o; };
+    const want = box1(box1(step));
+    out.featherErr = Math.max(...got.map((v, i) => Math.abs(v - want[i])));
+    out.featherRow = Array.from(got.subarray(50, 70)).map((v) => +v.toFixed(3));
+    out.featherEnds = [got[0], got[W - 1], got[(H - 1) * W], got[H * W - 1]];
+    out.featherRowsSame = [0, H - 1].every((y) => got.subarray(y * W, y * W + W).every((v, x) => Math.abs(v - got[20 * W + x]) < 1e-6));
+    out.featherOff = core.bgFeather(Float32Array.from(step), W, H, 0).every((v, i) => v === step[i]);
+    // Brush: a keep stroke on nothing, along y = 50.5 from x 20 to 80, radius 10.
+    const A = (v) => new Float32Array(100 * 100).fill(v);
+    const paint = (a, W, H, st, k) => { core.paintStroke(a, W, H, st, k); return a; };
+    const keep = { mode: 'keep', r: 10, pts: [{ x: 20, y: 50.5 }, { x: 80, y: 50.5 }] };
+    const k1 = paint(A(0), 100, 100, keep);
+    const at = (a, x, y) => +a[y * 100 + x].toFixed(3);
+    out.keep = [at(k1, 50, 50), at(k1, 50, 45), at(k1, 50, 42), at(k1, 50, 40), at(k1, 50, 58), at(k1, 50, 60), at(k1, 5, 50), at(k1, 95, 50), at(k1, 89, 50)];
+    // Pixels (50, 42) and (50, 58) have their centres 8 px from the line: inside the 10 px
+    // radius, in the soft outer 35 %, so (10 - 8) / 3.5 = 0.571. (89, 50) is 9.5 px past
+    // the end: 0.5 / 3.5 = 0.143. (50, 40) and (50, 60) are exactly 10 px away: nothing.
+    const e1 = paint(A(1), 100, 100, { ...keep, mode: 'erase' });
+    out.eraseIsMirror = e1.every((v, i) => Math.abs(v - (1 - k1[i])) < 1e-6);
+    const half = paint(A(0.5), 100, 100, keep);
+    out.keepHalf = [at(half, 50, 42), at(half, 50, 30)];
+    // Going back and forth over the same line paints the same as once.
+    const back = paint(A(0), 100, 100, { mode: 'keep', r: 10, pts: [{ x: 20, y: 50.5 }, { x: 80, y: 50.5 }, { x: 30, y: 50.5 }, { x: 80, y: 50.5 }] });
+    out.backSame = back.every((v, i) => Math.abs(v - k1[i]) < 1e-6);
+    // Order matters: keep then erase leaves it cut, erase then keep leaves it kept.
+    const ke = core.bgStrokes(A(0.5), 100, 100, [keep, { ...keep, mode: 'erase' }]);
+    const ek = core.bgStrokes(A(0.5), 100, 100, [{ ...keep, mode: 'erase' }, keep]);
+    out.order = [at(ke, 50, 50), at(ek, 50, 50)];
+    // Every pixel against a direct reckoning: distance from the pixel centre to the
+    // nearest point of the stroke, full inside 65 % of the radius, fading to 0 at it.
+    const ref = (W, H, st, k) => {
+      const a = new Float32Array(W * H), r = st.r * k;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        let d = Infinity;
+        for (let i = 0; i < st.pts.length; i++) {
+          const P = st.pts[i], Q = st.pts[Math.min(i + 1, st.pts.length - 1)];
+          for (let t = 0; t <= 1; t += 1 / 512) d = Math.min(d, Math.hypot(x + 0.5 - k * (P.x + (Q.x - P.x) * t), y + 0.5 - k * (P.y + (Q.y - P.y) * t)));
+        }
+        a[y * W + x] = d >= r ? 0 : d <= 0.65 * r ? 1 : (r - d) / (0.35 * r);
+      }
+      return a;
+    };
+    const maxDiff = (u, v) => u.reduce((m, x, i) => Math.max(m, Math.abs(x - v[i])), 0);
+    // A tap is one point: a round dot. Scaled by k = 0.5: the same stroke at half size.
+    const tap = { mode: 'keep', r: 6, pts: [{ x: 30, y: 30 }] };
+    const zig = { mode: 'keep', r: 7, pts: [{ x: 10, y: 10 }, { x: 60, y: 30 }, { x: 20, y: 80 }] };
+    out.refDiff = [maxDiff(k1, ref(100, 100, keep, 1)), maxDiff(paint(A(0), 100, 100, tap), ref(100, 100, tap, 1)),
+      maxDiff(paint(new Float32Array(2500), 50, 50, keep, 0.5), ref(50, 50, keep, 0.5)), maxDiff(paint(A(0), 100, 100, zig), ref(100, 100, zig, 1)),
+      maxDiff(paint(new Float32Array(3600), 60, 60, zig, 0.6), ref(60, 60, zig, 0.6))];
+    out.bounds = core.strokeBounds({ r: 10, pts: [{ x: 5, y: 50 }, { x: 80, y: 95 }] }, 1, 100, 100);
+    // Backdrops: a 40 x 30 photo, left half kept, right half cut.
+    const src = core.makeCanvas(40, 30), sx = src.getContext('2d');
+    sx.fillStyle = 'rgb(200,100,50)'; sx.fillRect(0, 0, 20, 30); sx.fillStyle = 'rgb(20,40,220)'; sx.fillRect(20, 0, 20, 30);
+    const alpha = new Float32Array(40 * 30).map((_, i) => (i % 40 < 20 ? 1 : 0));
+    const px = (c, x, y) => window.__px(c, x, y);
+    const t = core.renderCutout(src, alpha, 40, 30, { fill: 'transparent' });
+    const col = core.renderCutout(src, alpha, 40, 30, { fill: 'colour', colour: '#10E020' });
+    const blur = core.renderCutout(src, alpha, 40, 30, { fill: 'blur', blur: 0.5 });
+    const veil = core.renderCutout(src, alpha, 40, 30, { fill: 'veil' });
+    const halfA = core.renderCutout(src, new Float32Array(1200).fill(0.5), 40, 30, { fill: 'colour', colour: '#FFFFFF' });
+    out.fills = { t: [px(t, 5, 5), px(t, 35, 5)], col: [px(col, 5, 5), px(col, 35, 5)], blur: [px(blur, 5, 5), px(blur, 35, 5), px(blur, 21, 15)], veil: [px(veil, 5, 5), px(veil, 35, 5)], half: px(halfA, 5, 5), dims: [t.width, t.height] };
+    return out;
+  });
+  assert(r.featherErr < 1e-5, 'feather differs from a double box blur by ' + r.featherErr);
+  assert(r.featherRow[0] === 1 && r.featherRow[19] === 0 && r.featherRow.every((v, i) => i === 0 || v <= r.featherRow[i - 1]), 'feather ramp ' + r.featherRow);
+  assert(Math.abs(r.featherRow[9] + r.featherRow[10] - 1) < 1e-3, 'feather is centred on the edge ' + r.featherRow);
+  assert(r.featherEnds.join() === '1,0,1,0', 'feather must not fade the frame edges: ' + r.featherEnds);
+  assert(r.featherRowsSame, 'feather faded the top or bottom row');
+  assert(r.featherOff, 'feather 0 must change nothing');
+  assert(r.keep.join() === '1,1,0.571,0,0.571,0,0,0,0.143', 'keep stroke ' + r.keep);
+  assert(r.eraseIsMirror, 'erase on a full mask must mirror keep on an empty one');
+  assert(r.keepHalf.join() === '0.786,0.5', 'keep pulls towards 1 by the coverage: ' + r.keepHalf);
+  assert(r.backSame, 'a stroke over itself must not paint twice');
+  assert(r.order.join() === '0,1', 'later strokes win: ' + r.order);
+  assert(r.refDiff.every((d) => d < 0.01), 'strokes (line, tap, half size, zigzag, zigzag at 0.6) against a direct reckoning: ' + r.refDiff);
+  assert(JSON.stringify(r.bounds) === '{"x0":0,"y0":40,"x1":90,"y1":100}', 'bounds ' + JSON.stringify(r.bounds));
+  const f = r.fills;
+  assert(f.dims.join() === '40,30', 'cutout size ' + f.dims);
+  samePx(f.t[0], [200, 100, 50, 255], 0, 'transparent: kept part');
+  assert(f.t[1][3] === 0, 'transparent: cut part alpha ' + f.t[1]);
+  samePx(f.col[0], [200, 100, 50, 255], 0, 'colour: kept part');
+  samePx(f.col[1], [16, 224, 32, 255], 0, 'colour: cut part is the colour');
+  samePx(f.blur[0], [200, 100, 50, 255], 0, 'blur: kept part');
+  assert(f.blur[1][3] === 255 && f.blur[1][2] > 150 && f.blur[1][0] < 120, 'blur: cut part is the blurred photo, mostly its blue side ' + f.blur[1]);
+  assert(f.blur[2][3] === 255 && f.blur[2][0] > 40, 'blur: next to the kept side, the backdrop carries its colour spread over: ' + f.blur[2]);
+  samePx(f.veil[0], [200, 100, 50, 255], 0, 'veil: kept part');
+  samePx(f.veil[1], [117, 40, 155, 255], 3, 'veil: cut part tinted');
+  samePx(f.half, [228, 178, 153, 255], 2, 'half alpha over white');
+  await ctx.close();
+}, { core: true });
+
+test('background: the sheet cuts the person out onto transparent, colour and blur', async () => {
+  const { ctx, page } = await newApp({ init: [TEXT_INIT, BG_INIT] });
+  await load(page, personPng());
+  await textBox(page, { text: 'HI', size: 30 });
+  const before = await texts(page);
+  await page.evaluate(() => window.__fakeSeg([210, 160, 130]));
+  await bgReady(page);
+  assert(/Person found in \d+ % of the photo/.test(await page.textContent('#bg-out')), 'status line ' + await page.textContent('#bg-out'));
+  assert(await page.isVisible('#bg-view-rows') && await page.isHidden('#bg-brush-rows'), 'view mode shows feather and fill');
+  // The live preview is the result: compare it with what Apply makes.
+  const preview = await page.evaluate(() => [[150, 120], [20, 20], [150, 199], [96, 120], [104, 120]].map(([x, y]) => window.__px(retouch.app.preview.src, x, y)));
+  await applyTool(page, 'bg');
+  const got = await page.evaluate(() => [[150, 120], [20, 20], [150, 199], [96, 120], [104, 120], [199, 199], [100, 50]].map(([x, y]) => retouch.readPixels(retouch.app.edits.current, x, y, 1, 1)));
+  samePx(got[0], SKIN.concat(255), 1, 'person kept as it was');
+  assert(got[1][3] === 0, 'sky cut away: ' + got[1]);
+  samePx(got[2], SKIN.concat(255), 1, 'person at the bottom edge of the frame is not faded');
+  assert(got[3][3] <= 40 && got[4][3] >= 215, 'edge sits on the photo edge at x = 100: ' + got[3] + ' / ' + got[4]);
+  assert(got[5][3] >= 200 && got[6][3] >= 100, 'corner pixels of the person kept: ' + got[5] + ' / ' + got[6]);
+  for (let i = 0; i < preview.length; i++) assert(Math.abs(preview[i][3] - got[i][3]) <= 2, 'preview alpha differs from the result at point ' + i + ': ' + preview[i] + ' vs ' + got[i]);
+  assert(JSON.stringify(await texts(page)) === JSON.stringify(before), 'text boxes carried through unchanged');
+  const step = await page.evaluate(() => [retouch.app.edits.stack.length, retouch.app.edits.stack[retouch.app.edits.index].label]);
+  assert(step.join() === '3,Remove background', 'history ' + step);
+  // Transparent areas mean the export is PNG.
+  await page.click('#btn-export');
+  assert(await page.isVisible('#export-alpha-note'), 'alpha note on export');
+  assert((await page.getAttribute('[data-format="png"]', 'aria-pressed')) === 'true', 'PNG forced');
+  await page.click('.sheet-panel[data-tool="export"] [data-cancel]');
+  // Undo, then colour and blur backdrops.
+  await page.click('#btn-undo');
+  samePx(await px(page, 20, 20), SKY.concat(255), 0, 'undo brings the sky back');
+  await bgReady(page);
+  await page.click('[data-bgfill="colour"]');
+  assert(await page.isVisible('#bg-colour-row'), 'colour swatches shown');
+  await page.click('[data-bgcolour="#000000"]');
+  await applyTool(page, 'bg');
+  samePx(await px(page, 20, 20), [0, 0, 0, 255], 0, 'black backdrop');
+  samePx(await px(page, 150, 120), SKIN.concat(255), 1, 'person on black');
+  await page.click('#btn-undo');
+  await bgReady(page);
+  assert((await page.getAttribute('[data-bgfill="colour"]', 'aria-pressed')) === 'true', 'the backdrop choice is remembered');
+  await page.click('[data-bgfill="blur"]');
+  assert(await page.isVisible('#bg-blur-row') && await page.isHidden('#bg-colour-row'), 'blur slider shown');
+  await applyTool(page, 'bg');
+  const sky = await px(page, 20, 20), nearPerson = await px(page, 90, 150);
+  assert(sky[3] === 255 && nearPerson[3] === 255, 'blur backdrop is opaque');
+  assert(nearPerson[0] > SKY[0] + 15, 'the blurred photo shows the person spread into the sky beside them: ' + nearPerson);
+  samePx(await px(page, 150, 120), SKIN.concat(255), 1, 'person sharp on the blur');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('background: refine brush keeps and erases with one finger; two fingers zoom instead', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  await load(page, personPng());
+  await page.evaluate(() => window.__fakeSeg([210, 160, 130]));
+  await bgReady(page);
+  await page.click('[data-bgmode="erase"]');
+  assert(await page.isVisible('#bg-brush-rows') && await page.isHidden('#bg-view-rows'), 'brush mode shows the brush rows');
+  // The brush view tints what will be cut away, over the photo.
+  samePx(await page.evaluate(() => window.__px(retouch.app.preview.src, 20, 20)), [127, 65, 145, 255], 4, 'sky under the red veil');
+  samePx(await page.evaluate(() => window.__px(retouch.app.preview.src, 150, 120)), SKIN.concat(255), 1, 'person clear in the brush view');
+  await page.fill('#bg-brush', '30');
+  await page.dispatchEvent('#bg-brush', 'input');
+  await brush(page, [[120, 120], [180, 120]]);
+  let st = await page.evaluate(() => retouch.tools.bg.strokes.map((s) => [s.mode, s.pts.length, +(s.r * retouch.view.scale).toFixed(2)]));
+  assert(st.length === 1 && st[0][0] === 'erase' && st[0][1] > 4 && st[0][2] === 15, 'erase stroke ' + JSON.stringify(st));
+  assert(await page.isEnabled('#bg-undo-stroke'), 'undo stroke enabled');
+  samePx(await page.evaluate(() => window.__px(retouch.app.preview.src, 150, 120)), [212, 100, 110, 255], 4, 'erased skin shows under the veil in the preview');
+  await page.click('[data-bgmode="keep"]');
+  await brush(page, [[20, 20], [60, 20]]);
+  assert((await page.evaluate(() => retouch.tools.bg.strokes.length)) === 2, 'keep stroke added');
+  // A second finger cancels the stroke the first one started, and zooms.
+  const s0 = await page.evaluate(() => retouch.view.scale);
+  await page.evaluate(() => {
+    const c = document.querySelector('#view'), r = c.getBoundingClientRect();
+    const ev = (type, id, x, y) => c.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: r.left + x, clientY: r.top + y, bubbles: true, pointerType: 'touch', isPrimary: id === 41 }));
+    ev('pointerdown', 41, 180, 200); ev('pointermove', 41, 175, 200);
+    ev('pointerdown', 42, 220, 200);
+    for (let i = 1; i <= 10; i++) { ev('pointermove', 41, 175 - i * 6, 200); ev('pointermove', 42, 220 + i * 6, 200); }
+    ev('pointerup', 41, 115, 200); ev('pointerup', 42, 280, 200);
+  });
+  assert((await page.evaluate(() => retouch.tools.bg.strokes.length)) === 2, 'the pinch must not leave a stroke');
+  assert((await page.evaluate(() => retouch.view.scale)) > s0 * 1.5, 'two fingers zoomed in');
+  samePx(await page.evaluate(() => window.__px(retouch.app.preview.src, 150, 200 - 1)), SKIN.concat(255), 1, 'cancelled stroke left no mark');
+  await page.click('#bg-undo-stroke');
+  assert((await page.evaluate(() => retouch.tools.bg.strokes.map((s) => s.mode).join())) === 'erase', 'undo stroke drops the last one');
+  // Zoomed in now: the brush is the same size on screen, smaller on the photo.
+  await brush(page, [[20, 20], [60, 20]]);
+  st = await page.evaluate(() => retouch.tools.bg.strokes.map((s) => [s.mode, +(s.r * retouch.view.scale).toFixed(2)]));
+  assert(st.length === 2 && st[1][0] === 'keep' && st[1][1] === 15, 'keep stroke after zoom ' + JSON.stringify(st));
+  await page.click('[data-bgmode="view"]');
+  await applyTool(page, 'bg');
+  const got = await page.evaluate(() => [[150, 120], [150, 170], [40, 20], [40, 80]].map(([x, y]) => retouch.readPixels(retouch.app.edits.current, x, y, 1, 1)));
+  assert(got[0][3] === 0, 'erased across the person: ' + got[0]);
+  samePx(got[1], SKIN.concat(255), 1, 'rest of the person kept');
+  samePx(got[2], SKY.concat(255), 1, 'sky painted back with keep');
+  assert(got[3][3] === 0, 'unpainted sky still cut: ' + got[3]);
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('background: the real model runs from vendor/, offline, and nothing else is asked for', async () => {
+  const { ctx, page } = await newApp({ sw: true });
+  await page.waitForFunction(() => navigator.serviceWorker.controller, null, { timeout: 30000 });
+  const cached = await page.evaluate(async () => {
+    const names = await caches.keys(), mp = names.find((n) => n.startsWith('retouch-mediapipe-'));
+    return { names, files: mp ? (await (await caches.open(mp)).keys()).map((r) => new URL(r.url).pathname.split('/').pop()).sort() : [] };
+  });
+  assert(cached.files.join() === 'selfie_multiclass_256x256.tflite,vision_bundle.js,vision_wasm_internal.js,vision_wasm_internal.wasm', 'MediaPipe cache: ' + JSON.stringify(cached));
+  await ctx.setOffline(true);
+  await page.reload();
+  await page.waitForFunction(() => window.retouch && window.retouch.app);
+  await load(page, personPng());
+  const labels = [];
+  await page.exposeFunction('__busyLabel', (t) => labels.push(t));
+  await page.evaluate(() => new MutationObserver(() => window.__busyLabel(document.querySelector('#busy').textContent)).observe(document.querySelector('#busy'), { childList: true, characterData: true, subtree: true }));
+  await bgReady(page);
+  const m = await page.evaluate(() => { const t = retouch.tools.bg; return { w: t.model.w, h: t.model.h, cov: t.model.coverage, n: t.model.ar.length, override: retouch.segmenter.override }; });
+  assert(m.w === 300 && m.h === 200 && m.n === 60000, 'model on the guide grid: ' + JSON.stringify(m));
+  assert(m.cov >= 0 && m.cov <= 1 && m.override === null, 'person share from the real model ' + m.cov);
+  assert(labels.includes('Loading model'), 'first use says it is loading the model: ' + labels);
+  await applyTool(page, 'bg');
+  const d = await dims(page);
+  assert(d.join() === '300,200', 'result size ' + d);
+  // A second opening reuses the loaded model.
+  await page.click('#btn-undo');
+  await bgReady(page);
+  assert(labels[labels.length - 1] !== 'Loading model', 'second use does not load again: ' + labels);
+  await page.click('.sheet-panel[data-tool="bg"] [data-cancel]');
+  await ctx.setOffline(false);
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('background: a failed model load says so plainly and leaves the photo alone', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  await load(page, personPng());
+  await page.evaluate(() => { window.retouch.segmenter.override = () => { throw new Error('model file missing'); }; });
+  await page.click('[data-open-tool="bg"]');
+  await page.waitForSelector('.notice.fail[data-id="bg"]');
+  const t = await page.textContent('.notice.fail[data-id="bg"]');
+  assert(/Background removal could not start: model file missing/.test(t), 'message ' + t);
+  await idle(page);
+  assert(await page.evaluate(() => retouch.app.tool === null && retouch.app.edits.stack.length === 1), 'tool closed, no step added');
+  await ctx.close();
+});
+
 test('real-photo tests (reference/test-images)', async () => {
   if (!fs.existsSync(REFERENCE)) skip('reference/test-images/ not present');
   const imgs = fs.readdirSync(REFERENCE).filter((f) => /\.(jpe?g|png|webp|avif)$/i.test(f));
@@ -1515,7 +1997,23 @@ test('real-photo tests (reference/test-images)', async () => {
     const left = findImageMetadata(fs.readFileSync(await dl.path()));
     assert(!left.length, f + ' export carries ' + left);
     await page.click('.sheet-panel[data-tool="export"] [data-cancel]');
+    // Background removal with the real model: these are photos of people, so a person
+    // must be found, and the cut-out exports as a clean PNG.
+    await bgReady(page);
+    const cov = await page.evaluate(() => retouch.tools.bg.model.coverage);
+    assert(cov > 0.03 && cov < 0.97, f + ': person found in ' + (cov * 100).toFixed(1) + ' % of the photo');
+    await applyTool(page, 'bg');
+    await page.click('#btn-export');
+    await page.waitForFunction(() => !document.querySelector('#export-download').disabled, null, { timeout: 30000 });
+    const [cut] = await Promise.all([page.waitForEvent('download'), page.click('#export-download')]);
+    const bytes = fs.readFileSync(await cut.path());
+    assert(imageFormat(bytes) === 'png', f + ': cut-out should export as PNG');
+    const left2 = findImageMetadata(bytes);
+    assert(!left2.length, f + ' cut-out export carries ' + left2);
+    await page.click('.sheet-panel[data-tool="export"] [data-cancel]');
+    console.log('      ' + f + ': person ' + (cov * 100).toFixed(1) + ' %');
   }
+  assert(page.errors.length === 0, page.errors.join('; '));
   await ctx.close();
 });
 

@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.2.1 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.3.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -20,6 +20,17 @@ change the version here in the same commit as the file.
   vendor/fonts/OFL-caveat.txt                          licence text from @fontsource/caveat 5.3.0
   Text tool fonts: Source Sans 3 600 (shared with the UI), Playfair Display 700,
   Bebas Neue 400, Caveat 600. Latin subset only.
+  vendor/mediapipe/vision_bundle.js            @mediapipe/tasks-vision 0.10.35 (27/04/26), vision_bundle.mjs, Apache-2.0, sha256 55d7ab624fbb70dcc5adc4ae6d7ea9cfcb569139d3dbfbf2b1deafcb966bc0fe
+  vendor/mediapipe/vision_wasm_internal.js     @mediapipe/tasks-vision 0.10.35, wasm/, Apache-2.0, sha256 e7fd9858e8e8f221d9b96eddc11f8e077f263e0b7bbd79d3cbe882b134274f8c
+  vendor/mediapipe/vision_wasm_internal.wasm   @mediapipe/tasks-vision 0.10.35, wasm/, Apache-2.0, sha256 6a5c64584c2ab61c763b6e204afbdbc7ce1caf7f5216187322bca8df94f646bc
+  vendor/mediapipe/selfie_multiclass_256x256.tflite  MediaPipe selfie multiclass 256x256, float32, model version 1 (model card dated 10/05/23), Apache-2.0, sha256 c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0
+  vendor/mediapipe/LICENSE-apache-2.0.txt      Apache License 2.0 text from apache.org, covers the four files above, sha256 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+  MediaPipe notes: only the SIMD build is vendored (Chrome on Android has had wasm
+  SIMD since version 91). The bundle is the package's vision_bundle.mjs byte for
+  byte, saved as .js so any web server sends it with a JavaScript type.
+  Why 0.10.35 and not the newer 1.x: from 1.0 the bundle carries a usage logger
+  that posts to a Google logging server. The CSP would block it, but retouch
+  does not ship telemetry code at all. retouch_checks.cjs looks for it.
 
 How the file is laid out:
   1. Content-Security-Policy: the browser itself refuses any network call to
@@ -29,14 +40,15 @@ How the file is laid out:
   4. Script:
      a. Constants (working-size ceiling, history depth, ratios).
      b. CORE: pure image functions (geometry, crop, resize, add canvas,
-        text layout and drawing, metadata strip, edit history). Tests and the
-        mutation runner target this block.
+        text layout and drawing, background mask refinement, brush and
+        cut-out, metadata strip, edit history). Tests and the mutation runner
+        target this block. MediaPipe itself sits outside it, in the app.
      c. App: view (zoom, pan), tools, open, export, service worker.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#1F6F8B">
 <meta name="color-scheme" content="light dark">
@@ -348,6 +360,53 @@ fieldset:disabled{opacity:.4}
     <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
   </div>
 
+  <div class="sheet-panel" data-tool="bg" hidden>
+    <div class="sheet-head">
+      <div class="grow"><div class="entry-code" data-entry></div><h2>Remove background</h2></div>
+      <button class="btn hold" data-hold>Hold: before</button>
+    </div>
+    <div class="row scroller" role="group" aria-label="Brush">
+      <button class="chip word" data-bgmode="view" aria-pressed="true">View</button>
+      <button class="chip word" data-bgmode="keep" aria-pressed="false">Keep</button>
+      <button class="chip word" data-bgmode="erase" aria-pressed="false">Erase</button>
+      <span class="divider"></span>
+      <button class="btn" id="bg-undo-stroke" disabled>Undo stroke</button>
+    </div>
+    <div id="bg-view-rows">
+      <div class="row">
+        <label for="bg-feather">Feather</label>
+        <input type="range" id="bg-feather" min="0" max="40" step="1" value="3">
+        <span class="readout" id="bg-feather-out"></span>
+      </div>
+      <div class="row scroller" role="group" aria-label="Background">
+        <button class="chip word" data-bgfill="transparent" aria-pressed="true">Transparent</button>
+        <button class="chip word" data-bgfill="colour" aria-pressed="false">Colour</button>
+        <button class="chip word" data-bgfill="blur" aria-pressed="false">Blur</button>
+      </div>
+      <div class="row" id="bg-colour-row" hidden>
+        <button class="swatch" data-bgcolour="#FFFFFF" style="background:#FFFFFF" aria-label="White" aria-pressed="true"></button>
+        <button class="swatch" data-bgcolour="#000000" style="background:#000000" aria-label="Black" aria-pressed="false"></button>
+        <button class="swatch" data-bgcolour="#F7F8F6" style="background:#F7F8F6" aria-label="Paper" aria-pressed="false"></button>
+        <input type="color" id="bg-colour" value="#ffffff" aria-label="Pick colour">
+      </div>
+      <div class="row" id="bg-blur-row" hidden>
+        <label for="bg-blur">Blur</label>
+        <input type="range" id="bg-blur" min="0" max="100" step="1" value="50">
+        <span class="readout" id="bg-blur-out">50</span>
+      </div>
+    </div>
+    <div id="bg-brush-rows" hidden>
+      <div class="row">
+        <label for="bg-brush">Brush</label>
+        <input type="range" id="bg-brush" min="10" max="120" step="1" value="40">
+        <span class="readout" id="bg-brush-out">40 px</span>
+      </div>
+      <div class="small">Red shows what will be cut away. One finger paints; two fingers zoom and move.</div>
+    </div>
+    <div class="small" id="bg-out"></div>
+    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
+  </div>
+
   <div class="sheet-panel" data-tool="export" hidden>
     <div class="sheet-head">
       <div class="grow"><div class="entry-code" data-entry></div><h2>Export</h2></div>
@@ -390,6 +449,9 @@ fieldset:disabled{opacity:.4}
   <button class="tool" data-open-tool="text" disabled>
     <svg viewBox="0 0 24 24"><path d="M5 6.5V4.5h14v2"/><path d="M12 4.5v15"/><path d="M9 19.5h6"/></svg>Text
   </button>
+  <button class="tool" data-open-tool="bg" disabled>
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="9.5" r="3.5"/><path d="M5.5 20.5c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M3.5 7.5v-4h4M16.5 3.5h4v4M20.5 16.5v4M3.5 16.5v4"/></svg>Background
+  </button>
 </nav>
 
 <input type="file" id="file" accept="image/*,.avif,.heic,.heif,.webp" hidden>
@@ -401,7 +463,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.2.1';
+const APP_VERSION = '0.3.0';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -437,6 +499,21 @@ const TEXT_FONTS = [
   { id: 'bebas', label: 'Bebas', family: 'Bebas Neue', weight: 400 },
   { id: 'hand', label: 'Hand', family: 'Caveat', weight: 600 },
 ];
+
+// Background removal. MediaPipe and the model are vendored (see the build notes)
+// and load only when the tool is first opened.
+const BG_VENDOR = {
+  loader: 'vendor/mediapipe/vision_wasm_internal.js',
+  wasm: 'vendor/mediapipe/vision_wasm_internal.wasm',
+  model: 'vendor/mediapipe/selfie_multiclass_256x256.tflite',
+};
+// Below this share of the photo, the model has not found a person.
+const BG_MIN_PERSON = 0.01;
+// The live preview is drawn at the screen's size, but never smaller than this on
+// its long edge, so hair edges stay readable when zoomed in to brush.
+const BG_PREVIEW_LONG = 1600;
+// Feather slider steps, as a fraction of the photo's long edge (40 steps = 1 %).
+const BG_FEATHER_STEP = 1 / 4000;
 
 /* ============================================================
    b. CORE: pure image functions.
@@ -821,6 +898,305 @@ core.textsAfterPad = (texts, o, k = 1) => texts.map((b) => ({
 // Boxes whose centre is still on the image. The rest were cut away.
 core.textsInside = (texts, W, H) => texts.filter((b) => b.x >= 0 && b.x <= W && b.y >= 0 && b.y <= H);
 
+/* Background removal. The segmentation model looks at the photo at 256 x 256, so
+   its mask is soft and blocky at full size. Three steps turn it into a clean cut:
+   1. Guided filter. On a guide copy of the photo (up to 1024 px), fit a small
+      linear model in every window: mask = a . colour + b. Where the photo has an
+      edge, a picks it up, so the mask snaps to the photo's own edges.
+   2. Those coefficients are smoothed, then read back at any output size and
+      applied to that size's own pixels, so full-size edges stay crisp.
+   3. Feather (a soft blur of the result), then the refine brush strokes.
+   An alpha map here is a Float32Array of W x H values from 0 (cut away) to 1 (kept). */
+
+core.BG_GUIDE_LONG = 1024;      // guide image long edge, px
+core.BG_GUIDE_RADIUS = 0.024;   // filter window half-width, as a fraction of the guide's long edge
+core.BG_GUIDE_EPS = 0.001;      // how strongly it follows colour edges (smaller follows harder)
+core.BG_GUIDE_PASSES = 2;       // the second pass starts from the first one's result, which pulls
+                                // a mask that sits a few pixels off back onto the edge
+core.BG_EDGE_LO = 0.2;          // the filtered mask is ramped from LO (cut) to HI (kept),
+core.BG_EDGE_HI = 0.8;          // which clears faint haze around the person
+core.BRUSH_SOFT = 0.35;         // the outer share of the brush radius that fades out
+core.BG_VEIL = 'rgba(214,40,90,0.5)';   // brush view: tint over what will be cut away
+core.STRIP_PIXELS = 1000000;    // full-size pixels are read and written in strips of about this many
+
+// Person probability from MediaPipe's confidence for class 0 (background).
+core.bgPerson = (bg) => {
+  const p = new Float32Array(bg.length);
+  for (let i = 0; i < bg.length; i++) p[i] = Math.min(1, Math.max(0, 1 - bg[i]));
+  return p;
+};
+
+// Bilinear resample of a w x h map to W x H, pixel centres lined up.
+core.resampleMask = (src, w, h, W, H) => {
+  const out = new Float32Array(W * H);
+  const sx = w / W, sy = h / H;
+  for (let y = 0; y < H; y++) {
+    const fy = Math.min(h - 1, Math.max(0, (y + 0.5) * sy - 0.5));
+    const y0 = Math.floor(fy), y1 = Math.min(h - 1, y0 + 1), ty = fy - y0;
+    for (let x = 0; x < W; x++) {
+      const fx = Math.min(w - 1, Math.max(0, (x + 0.5) * sx - 0.5));
+      const x0 = Math.floor(fx), x1 = Math.min(w - 1, x0 + 1), tx = fx - x0;
+      const top = src[y0 * w + x0] + (src[y0 * w + x1] - src[y0 * w + x0]) * tx;
+      const bot = src[y1 * w + x0] + (src[y1 * w + x1] - src[y1 * w + x0]) * tx;
+      out[y * W + x] = top + (bot - top) * ty;
+    }
+  }
+  return out;
+};
+
+// Mean over a (2r + 1) x (2r + 1) window, in place. Near the edges the window is
+// cut off and the mean is over what is left, so the border is never faded.
+core.boxMean = (a, w, h, r) => {
+  // Rows: a running sum along each row, from a copy of it.
+  const line = new Float64Array(w);
+  for (let y = 0; y < h; y++) {
+    const o = y * w;
+    for (let x = 0; x < w; x++) line[x] = a[o + x];
+    let s = 0;
+    for (let x = 0; x < Math.min(r, w); x++) s += line[x];
+    for (let x = 0; x < w; x++) {
+      if (x + r < w) s += line[x + r];
+      if (x - r - 1 >= 0) s -= line[x - r - 1];
+      a[o + x] = s / (Math.min(w - 1, x + r) - Math.max(0, x - r) + 1);
+    }
+  }
+  // Columns: running sums down every column at once, a row at a time. A row that
+  // leaves the window has already been overwritten, so a ring keeps its old values.
+  const sum = new Float64Array(w), ring = new Float32Array((r + 1) * w);
+  for (let y = 0; y < Math.min(r, h); y++) for (let x = 0; x < w; x++) sum[x] += a[y * w + x];
+  for (let y = 0; y < h; y++) {
+    const o = y * w, slot = (y % (r + 1)) * w;
+    if (y + r < h) { const ao = (y + r) * w; for (let x = 0; x < w; x++) sum[x] += a[ao + x]; }
+    if (y - r - 1 >= 0) for (let x = 0; x < w; x++) sum[x] -= ring[slot + x];   // row y - r - 1 shares this slot
+    const n = Math.min(h - 1, y + r) - Math.max(0, y - r) + 1;
+    for (let x = 0; x < w; x++) { ring[slot + x] = a[o + x]; a[o + x] = sum[x] / n; }
+  }
+  return a;
+};
+
+// Colour guided filter (He, Sun and Tang). I holds w x h RGB values (0 to 1,
+// interleaved), p the rough mask. Returns the smoothed coefficients
+// { ar, ag, ab, b }: the filtered mask at any pixel is ar R + ag G + ab B + b.
+core.guidedCoeffs = (I, p, w, h, r, eps) => {
+  const n = w * h;
+  const R = new Float32Array(n), G = new Float32Array(n), B = new Float32Array(n);
+  for (let i = 0; i < n; i++) { R[i] = I[3 * i]; G[i] = I[3 * i + 1]; B[i] = I[3 * i + 2]; }
+  const mean = (u, v) => {                                  // window mean of u, or of u times v
+    const o = new Float32Array(n);
+    if (v) for (let i = 0; i < n; i++) o[i] = u[i] * v[i]; else o.set(u);
+    return core.boxMean(o, w, h, r);
+  };
+  const mR = mean(R), mG = mean(G), mB = mean(B), mP = mean(p);
+  const mRp = mean(R, p), mGp = mean(G, p), mBp = mean(B, p);
+  const mRR = mean(R, R), mRG = mean(R, G), mRB = mean(R, B), mGG = mean(G, G), mGB = mean(G, B), mBB = mean(B, B);
+  const ar = new Float32Array(n), ag = new Float32Array(n), ab = new Float32Array(n), b = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    // Covariance of colour with the mask, and the colour covariance matrix (plus eps).
+    const cR = mRp[i] - mR[i] * mP[i], cG = mGp[i] - mG[i] * mP[i], cB = mBp[i] - mB[i] * mP[i];
+    const rr = mRR[i] - mR[i] * mR[i] + eps, rg = mRG[i] - mR[i] * mG[i], rb = mRB[i] - mR[i] * mB[i];
+    const gg = mGG[i] - mG[i] * mG[i] + eps, gb = mGB[i] - mG[i] * mB[i], bb = mBB[i] - mB[i] * mB[i] + eps;
+    // Inverse of that symmetric 3 x 3 matrix, by cofactors.
+    const i00 = gg * bb - gb * gb, i01 = gb * rb - rg * bb, i02 = rg * gb - gg * rb;
+    const i11 = rr * bb - rb * rb, i12 = rg * rb - rr * gb, i22 = rr * gg - rg * rg;
+    const det = rr * i00 + rg * i01 + rb * i02;
+    ar[i] = (i00 * cR + i01 * cG + i02 * cB) / det;
+    ag[i] = (i01 * cR + i11 * cG + i12 * cB) / det;
+    ab[i] = (i02 * cR + i12 * cG + i22 * cB) / det;
+    b[i] = mP[i] - ar[i] * mR[i] - ag[i] * mG[i] - ab[i] * mB[i];
+  }
+  return { ar: core.boxMean(ar, w, h, r), ag: core.boxMean(ag, w, h, r), ab: core.boxMean(ab, w, h, r), b: core.boxMean(b, w, h, r) };
+};
+
+// The ramp from filtered mask to alpha.
+core.bgCurve = (q) => {
+  const t = Math.min(1, Math.max(0, (q - core.BG_EDGE_LO) / (core.BG_EDGE_HI - core.BG_EDGE_LO)));
+  return t * t * (3 - 2 * t);
+};
+
+// Guide size for a photo: up to BG_GUIDE_LONG on the long edge, never enlarged.
+core.bgGuideDims = (w, h) => {
+  const k = Math.min(1, core.BG_GUIDE_LONG / Math.max(w, h));
+  return { w: Math.max(1, Math.round(w * k)), h: Math.max(1, Math.round(h * k)) };
+};
+
+core.bgGuide = (src) => {
+  const g = core.bgGuideDims(src.width, src.height);
+  const c = core.makeCanvas(g.w, g.h);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, 0, 0, g.w, g.h);
+  return c;
+};
+
+// person = { w, h, data } from the model, any size. Returns the coefficients on the
+// guide's grid, and the share of the photo the model thinks is a person.
+core.bgModel = (guide, person) => {
+  const w = guide.width, h = guide.height, n = w * h;
+  const d = guide.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  const I = new Float32Array(3 * n);
+  for (let i = 0; i < n; i++) { I[3 * i] = d[4 * i] / 255; I[3 * i + 1] = d[4 * i + 1] / 255; I[3 * i + 2] = d[4 * i + 2] / 255; }
+  let p = person.w === w && person.h === h ? person.data : core.resampleMask(person.data, person.w, person.h, w, h);
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += p[i];
+  const r = Math.max(1, Math.round(core.BG_GUIDE_RADIUS * Math.max(w, h)));
+  let m = null;
+  for (let k = 0; k < core.BG_GUIDE_PASSES; k++) {
+    if (m) { p = new Float32Array(n); core.guidedApply(d, w, h, 0, h, m, p); }
+    m = { ...core.guidedCoeffs(I, p, w, h, r, core.BG_GUIDE_EPS), w, h };
+  }
+  return { ...m, coverage: sum / n };
+};
+
+// Alpha for rows y0 to y0 + n of a W x H output, from those rows' RGBA pixels:
+// the coefficients are read bilinearly at each pixel, then the ramp.
+core.guidedApply = (data, W, H, y0, n, m, out) => {
+  const sx = m.w / W, sy = m.h / H;
+  const xa = new Int32Array(W), xb = new Int32Array(W), xt = new Float32Array(W);
+  for (let x = 0; x < W; x++) {
+    const f = Math.min(m.w - 1, Math.max(0, (x + 0.5) * sx - 0.5));
+    xa[x] = Math.floor(f); xb[x] = Math.min(m.w - 1, xa[x] + 1); xt[x] = f - xa[x];
+  }
+  const { ar, ag, ab, b } = m;
+  for (let j = 0; j < n; j++) {
+    const fy = Math.min(m.h - 1, Math.max(0, (y0 + j + 0.5) * sy - 0.5));
+    const ya = Math.floor(fy), r0 = ya * m.w, r1 = Math.min(m.h - 1, ya + 1) * m.w, ty = fy - ya;
+    for (let x = 0; x < W; x++) {
+      const tx = xt[x], w00 = (1 - tx) * (1 - ty), w01 = tx * (1 - ty), w10 = (1 - tx) * ty, w11 = tx * ty;
+      const i00 = r0 + xa[x], i01 = r0 + xb[x], i10 = r1 + xa[x], i11 = r1 + xb[x];
+      const o = (j * W + x) * 4;
+      const q = ((ar[i00] * w00 + ar[i01] * w01 + ar[i10] * w10 + ar[i11] * w11) * data[o] +
+                 (ag[i00] * w00 + ag[i01] * w01 + ag[i10] * w10 + ag[i11] * w11) * data[o + 1] +
+                 (ab[i00] * w00 + ab[i01] * w01 + ab[i10] * w10 + ab[i11] * w11) * data[o + 2]) / 255 +
+                 b[i00] * w00 + b[i01] * w01 + b[i10] * w10 + b[i11] * w11;
+      out[(y0 + j) * W + x] = core.bgCurve(q);
+    }
+  }
+};
+
+// Alpha for the photo drawn at W x H, before feather and brush.
+core.bgGuided = (src, W, H, m) => {
+  const c = core.makeCanvas(W, H);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, 0, 0, W, H);
+  const a = new Float32Array(W * H);
+  const rows = Math.max(1, Math.floor(core.STRIP_PIXELS / W));
+  try {
+    for (let y = 0; y < H; y += rows) {
+      const n = Math.min(rows, H - y);
+      core.guidedApply(ctx.getImageData(0, y, W, n).data, W, H, y, n, m, a);
+    }
+  } finally { core.release(c); }
+  return a;
+};
+
+// Feather: two box passes (close to a Gaussian). f is a fraction of the long edge.
+core.bgFeather = (a, W, H, f) => {
+  const r = Math.round(f * Math.max(W, H) / 2);
+  if (r > 0) { core.boxMean(a, W, H, r); core.boxMean(a, W, H, r); }
+  return a;
+};
+
+/* Refine brush. A stroke is { mode: 'keep' | 'erase', r, pts: [{ x, y }, ...] } in
+   image pixels; k scales it to the output (the preview is smaller than the photo). */
+
+// The stroke's bounding box on a W x H output, cut to the output. x1 and y1 are exclusive.
+core.strokeBounds = (st, k, W, H) => {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of st.pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  const r = st.r * k;
+  return { x0: Math.max(0, Math.floor(x0 * k - r)), y0: Math.max(0, Math.floor(y0 * k - r)),
+    x1: Math.min(W, Math.ceil(x1 * k + r)), y1: Math.min(H, Math.ceil(y1 * k + r)) };
+};
+
+// Paint one stroke into the alpha. Its coverage at a pixel is the most any part of
+// the stroke reaches it, so a stroke that goes back over itself is not doubled.
+// Keep pulls alpha towards 1, erase towards 0.
+core.paintStroke = (a, W, H, st, k = 1) => {
+  const bx = core.strokeBounds(st, k, W, H);
+  const bw = bx.x1 - bx.x0, bh = bx.y1 - bx.y0;
+  if (bw <= 0 || bh <= 0) return bx;
+  const r = st.r * k, inner = r * (1 - core.BRUSH_SOFT);
+  const pts = st.pts.map((p) => ({ x: p.x * k, y: p.y * k }));
+  const cov = new Float32Array(bw * bh);
+  for (let s = 0; s < Math.max(1, pts.length - 1); s++) {
+    const P = pts[s], Q = pts[Math.min(s + 1, pts.length - 1)];
+    const dx = Q.x - P.x, dy = Q.y - P.y, L2 = dx * dx + dy * dy;
+    const sx0 = Math.max(bx.x0, Math.floor(Math.min(P.x, Q.x) - r)), sx1 = Math.min(bx.x1, Math.ceil(Math.max(P.x, Q.x) + r));
+    const sy0 = Math.max(bx.y0, Math.floor(Math.min(P.y, Q.y) - r)), sy1 = Math.min(bx.y1, Math.ceil(Math.max(P.y, Q.y) + r));
+    for (let y = sy0; y < sy1; y++) {
+      for (let x = sx0; x < sx1; x++) {
+        const px = x + 0.5 - P.x, py = y + 0.5 - P.y;
+        const t = L2 ? Math.min(1, Math.max(0, (px * dx + py * dy) / L2)) : 0;
+        const ex = px - t * dx, ey = py - t * dy, d = Math.sqrt(ex * ex + ey * ey);
+        if (d >= r) continue;
+        const c = d <= inner ? 1 : (r - d) / (r - inner);
+        const i = (y - bx.y0) * bw + (x - bx.x0);
+        if (c > cov[i]) cov[i] = c;
+      }
+    }
+  }
+  const keep = st.mode === 'keep';
+  for (let y = 0; y < bh; y++) {
+    for (let x = 0; x < bw; x++) {
+      const c = cov[y * bw + x];
+      if (!c) continue;
+      const i = (y + bx.y0) * W + x + bx.x0;
+      a[i] = keep ? a[i] + (1 - a[i]) * c : a[i] * (1 - c);
+    }
+  }
+  return bx;
+};
+
+core.bgStrokes = (a, W, H, strokes, k = 1) => { for (const st of strokes) core.paintStroke(a, W, H, st, k); return a; };
+
+// Write alpha into a canvas as white with that opacity, over box bx (default: all of it).
+core.putAlpha = (ctx, a, W, H, bx = { x0: 0, y0: 0, x1: W, y1: H }) => {
+  const bw = bx.x1 - bx.x0;
+  if (bw <= 0 || bx.y1 <= bx.y0) return;
+  const rows = Math.max(1, Math.floor(core.STRIP_PIXELS / bw));
+  for (let y = bx.y0; y < bx.y1; y += rows) {
+    const n = Math.min(rows, bx.y1 - y);
+    const img = ctx.createImageData(bw, n), d = img.data;
+    for (let j = 0; j < n; j++) {
+      for (let x = 0; x < bw; x++) {
+        const o = (j * bw + x) * 4;
+        d[o] = 255; d[o + 1] = 255; d[o + 2] = 255;
+        d[o + 3] = a[(y + j) * W + bx.x0 + x] * 255;
+      }
+    }
+    ctx.putImageData(img, bx.x0, y);
+  }
+};
+
+// What goes behind the person. o.fill is 'transparent', 'colour', 'blur', or 'veil'
+// (the brush view: the photo under a tint, so what is cut away stays visible).
+core.drawBackdrop = (ctx, src, W, H, o) => {
+  switch (o.fill) {
+    case 'colour': ctx.fillStyle = o.colour; ctx.fillRect(0, 0, W, H); break;
+    case 'blur': core.drawBlurCover(ctx, src, W, H, o.blur); break;
+    case 'veil': ctx.drawImage(src, 0, 0, W, H); ctx.fillStyle = core.BG_VEIL; ctx.fillRect(0, 0, W, H); break;
+  }
+};
+
+// The photo through the alpha, on its backdrop: a new W x H canvas.
+core.renderCutout = (src, a, W, H, o) => {
+  const fg = core.makeCanvas(W, H);
+  const fctx = fg.getContext('2d');
+  core.putAlpha(fctx, a, W, H);
+  fctx.globalCompositeOperation = 'source-in';
+  fctx.imageSmoothingQuality = 'high';
+  fctx.drawImage(src, 0, 0, W, H);
+  if (o.fill === 'transparent') return fg;
+  const out = core.makeCanvas(W, H);
+  const ctx = out.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  core.drawBackdrop(ctx, src, W, H, o);
+  ctx.drawImage(fg, 0, 0);
+  core.release(fg);
+  return out;
+};
+
 /* Metadata. Encoders in Chrome do not normally write EXIF, but exports are
    still parsed byte by byte, anything that is not image data is removed, and
    the result is checked again before it is handed over. */
@@ -1092,8 +1468,9 @@ function notify(text, kind = 'info', opts = {}) {
   return el;
 }
 
-function busy(on) {
+function busy(on, label = 'Working') {
   app.busyCount += on ? 1 : -1;
+  if (on) $('#busy').textContent = label;
   $('#busy').hidden = app.busyCount <= 0;
 }
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
@@ -1241,7 +1618,7 @@ view.canvas.addEventListener('pointerdown', (e) => {
     if (gesture.toolDrag) return;
   }
   if (gesture.pointers.size === 2 && gesture.toolDrag) {        // second finger: stop the tool drag, zoom instead
-    if (app.tool.pointerUp) app.tool.pointerUp();
+    if (app.tool.pointerCancel) app.tool.pointerCancel(); else if (app.tool.pointerUp) app.tool.pointerUp();
     gesture.toolDrag = false;
   }
   if (app.tool && app.tool.fixedView) return;
@@ -1282,7 +1659,11 @@ function endPointer(e) {
   gesture.pointers.delete(e.pointerId);
   if (app.tool && app.tool.touch) { app.tool.touch('up', gesture.pointers); return; }
   if (gesture.toolDrag) {
-    if (gesture.pointers.size === 0) { gesture.toolDrag = false; if (app.tool && app.tool.pointerUp) app.tool.pointerUp(); }
+    if (gesture.pointers.size === 0) {
+      gesture.toolDrag = false;
+      if (e.type === 'pointercancel' && app.tool && app.tool.pointerCancel) app.tool.pointerCancel();
+      else if (app.tool && app.tool.pointerUp) app.tool.pointerUp();
+    }
     return;
   }
   if (app.tool && app.tool.fixedView) return;
@@ -2037,6 +2418,237 @@ tools.text = {
   for (const b of $$('[data-shadow]')) b.addEventListener('click', () => t.update({ shadow: b.dataset.shadow }));
 })();
 
+/* ---------- Tool: remove background ---------- */
+
+// MediaPipe loads the first time the tool opens, from vendor/ (or the offline
+// cache). The model runs here in WebAssembly; the photo goes nowhere.
+const segmenter = {
+  promise: null,
+  override: null,      // test seam: (canvas) => { w, h, data }, used instead of the model
+  load() {
+    if (!this.promise) {
+      this.promise = (async () => {
+        const mp = await import('./vendor/mediapipe/vision_bundle.js');
+        return mp.ImageSegmenter.createFromOptions(
+          { wasmLoaderPath: BG_VENDOR.loader, wasmBinaryPath: BG_VENDOR.wasm },
+          { baseOptions: { modelAssetPath: BG_VENDOR.model, delegate: 'CPU' }, runningMode: 'IMAGE',
+            outputConfidenceMasks: true, outputCategoryMask: false });
+      })();
+      this.promise.catch(() => { this.promise = null; });      // a failed load can be tried again
+    }
+    return this.promise;
+  },
+  // Person probability for a canvas, at the canvas's own size: { w, h, data }.
+  async person(canvas) {
+    if (this.override) return this.override(canvas);
+    const seg = await this.load();
+    const r = seg.segment(canvas);
+    try {
+      const m = r.confidenceMasks[0];                          // class 0 is the background
+      return { w: m.width, h: m.height, data: core.bgPerson(m.getAsFloat32Array()) };
+    } finally { r.close(); }
+  },
+};
+
+tools.bg = {
+  s: null,
+  open() {
+    if (!this.s) this.s = { fill: 'transparent', colour: '#FFFFFF', blur: 0.5, feather: 3, brush: 40 };
+    this.s.mode = 'view';
+    this.strokes = []; this.stroke = null; this.cursor = null;
+    this.model = null; this.pv = null;
+    this.sync();
+    const ticket = (this.ticket = (this.ticket || 0) + 1);
+    this.ready = this.prepare(ticket);
+    this.ready.catch(() => {});
+  },
+  close() {
+    this.ticket++;
+    const pv = this.pv;
+    if (pv) for (const c of [pv.photo, pv.mask, pv.fg, pv.bg]) core.release(c);   // pv.out is app.preview.src
+    this.pv = null; this.model = null; this.strokes = []; this.stroke = null; this.cursor = null;
+  },
+  // Find the person, fit the edges, and build the preview. Runs once per opening.
+  async prepare(ticket) {
+    busy(true, segmenter.promise || segmenter.override ? 'Finding the person' : 'Loading model');
+    try {
+      await nextFrame();
+      const guide = core.bgGuide(app.edits.current);
+      try {
+        const person = await segmenter.person(guide);
+        if (ticket !== this.ticket) return;
+        $('#busy').textContent = 'Finding the edges';
+        await nextFrame();
+        this.model = core.bgModel(guide, person);
+      } finally { core.release(guide); }
+      this.buildPreview();
+      if (this.model.coverage < BG_MIN_PERSON) {
+        notify('No person found in this photo. Use Keep to paint in what should stay.', 'watch', { id: 'bg-none' });
+      }
+      this.sync();
+    } catch (err) {
+      if (ticket === this.ticket) {
+        notify('Background removal could not start: ' + (err && err.message ? err.message : err), 'fail', { sticky: true, id: 'bg' });
+        closeTool();
+      }
+      throw err;
+    } finally { busy(false); }
+  },
+  // The preview works at screen size: the guided alpha (q) is kept, so feather
+  // and brush changes only redo the cheap steps after it.
+  buildPreview() {
+    const src = app.edits.current;
+    const maxSide = Math.max(view.cssW, view.cssH) * view.dpr;
+    const k = Math.min(1, Math.max(BG_PREVIEW_LONG, maxSide) / Math.max(src.width, src.height));
+    const W = Math.max(1, Math.round(src.width * k)), H = Math.max(1, Math.round(src.height * k));
+    const photo = core.makeCanvas(W, H), pctx = photo.getContext('2d');
+    pctx.imageSmoothingQuality = 'high';
+    pctx.drawImage(src, 0, 0, W, H);
+    const pv = { k, W, H, photo, q: core.bgGuided(photo, W, H, this.model),
+      mask: core.makeCanvas(W, H), fg: core.makeCanvas(W, H), bg: core.makeCanvas(W, H), out: core.makeCanvas(W, H) };
+    this.pv = pv;
+    app.preview = { src: pv.out, w: src.width, h: src.height, texts: app.edits.texts };
+    this.refreshBackdrop(false);
+    this.refreshAlpha();
+  },
+  // Feather and every finished stroke, from the guided alpha.
+  refreshAlpha() {
+    const pv = this.pv; if (!pv) return;
+    pv.committed = core.bgStrokes(core.bgFeather(Float32Array.from(pv.q), pv.W, pv.H, this.s.feather * BG_FEATHER_STEP), pv.W, pv.H, this.strokes, pv.k);
+    pv.work = Float32Array.from(pv.committed);
+    const m = pv.mask.getContext('2d');
+    m.clearRect(0, 0, pv.W, pv.H);
+    core.putAlpha(m, pv.work, pv.W, pv.H);
+    this.composite();
+  },
+  fillOptions() { return this.s.mode === 'view' ? { fill: this.s.fill, colour: this.s.colour, blur: this.s.blur } : { fill: 'veil' }; },
+  refreshBackdrop(redraw = true) {
+    const pv = this.pv; if (!pv) return;
+    const ctx = pv.bg.getContext('2d');
+    ctx.clearRect(0, 0, pv.W, pv.H);
+    ctx.imageSmoothingQuality = 'high';
+    core.drawBackdrop(ctx, pv.photo, pv.W, pv.H, this.fillOptions());
+    if (redraw) this.composite();
+  },
+  composite() {
+    const pv = this.pv;
+    const f = pv.fg.getContext('2d');
+    f.clearRect(0, 0, pv.W, pv.H);
+    f.drawImage(pv.mask, 0, 0);
+    f.globalCompositeOperation = 'source-in';
+    f.drawImage(pv.photo, 0, 0);
+    f.globalCompositeOperation = 'source-over';
+    const o = pv.out.getContext('2d');
+    o.clearRect(0, 0, pv.W, pv.H);
+    o.drawImage(pv.bg, 0, 0);
+    o.drawImage(pv.fg, 0, 0);
+    requestDraw();
+  },
+  // The stroke in progress: redo only its box, from the finished strokes.
+  paintActive() {
+    const pv = this.pv, st = this.stroke;
+    const bx = core.strokeBounds(st, pv.k, pv.W, pv.H);
+    for (let y = bx.y0; y < bx.y1; y++) pv.work.set(pv.committed.subarray(y * pv.W + bx.x0, y * pv.W + bx.x1), y * pv.W + bx.x0);
+    core.paintStroke(pv.work, pv.W, pv.H, st, pv.k);
+    core.putAlpha(pv.mask.getContext('2d'), pv.work, pv.W, pv.H, bx);
+    this.composite();
+  },
+  toImage(p) { return { x: (p.x - view.tx) / view.scale, y: (p.y - view.ty) / view.scale }; },
+  pointerDown(p) {
+    if (this.s.mode === 'view' || !this.pv) return false;
+    // The brush size is set in screen pixels, so it feels the same at any zoom.
+    this.stroke = { mode: this.s.mode, r: this.s.brush / 2 / view.scale, pts: [this.toImage(p)] };
+    this.cursor = p;
+    this.paintActive();
+    return true;
+  },
+  pointerMove(p) {
+    const st = this.stroke; if (!st) return;
+    const q = this.toImage(p), last = st.pts[st.pts.length - 1];
+    this.cursor = p;
+    if (Math.hypot(q.x - last.x, q.y - last.y) >= st.r / 4) { st.pts.push(q); this.paintActive(); } else requestDraw();
+  },
+  pointerUp() {
+    const st = this.stroke; if (!st) return;
+    this.strokes.push(st);
+    this.pv.committed.set(this.pv.work);
+    this.stroke = null; this.cursor = null;
+    this.sync();
+  },
+  // A second finger arrived (zoom instead), or the system took the touch: drop the stroke.
+  pointerCancel() {
+    if (!this.stroke) return;
+    const pv = this.pv, bx = core.strokeBounds(this.stroke, pv.k, pv.W, pv.H);
+    pv.work.set(pv.committed);
+    core.putAlpha(pv.mask.getContext('2d'), pv.work, pv.W, pv.H, bx);
+    this.stroke = null; this.cursor = null;
+    this.composite();
+  },
+  undoStroke() { if (this.strokes.pop()) { this.refreshAlpha(); this.sync(); } },
+  // The brush outline under the finger while painting.
+  overlay(ctx) {
+    if (!this.cursor || !this.stroke) return;
+    ctx.save();
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    ctx.beginPath();
+    ctx.arc(this.cursor.x, this.cursor.y, this.stroke.r * view.scale, 0, 2 * Math.PI);
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.stroke();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#FFFFFF'; ctx.stroke();
+    ctx.restore();
+  },
+  setMode(mode) { const was = this.s.mode; this.s.mode = mode; if ((was === 'view') !== (mode === 'view')) this.refreshBackdrop(); this.sync(); },
+  setFill(patch) { Object.assign(this.s, patch); this.refreshBackdrop(); this.sync(); },
+  // The slider sends many steps a second; redo the alpha at most once a frame.
+  setFeather(v) {
+    this.s.feather = v;
+    this.sync();
+    if (this.featherQueued) return;
+    this.featherQueued = true;
+    requestAnimationFrame(() => { this.featherQueued = false; this.refreshAlpha(); });
+  },
+  sync() {
+    const s = this.s, brush = s.mode !== 'view', ready = !!this.pv;
+    setPressed($$('[data-bgmode]'), (b) => b.dataset.bgmode === s.mode);
+    setPressed($$('[data-bgfill]'), (b) => b.dataset.bgfill === s.fill);
+    setPressed($$('[data-bgcolour]'), (b) => b.dataset.bgcolour.toLowerCase() === s.colour.toLowerCase());
+    $('#bg-view-rows').hidden = brush;
+    $('#bg-brush-rows').hidden = !brush;
+    $('#bg-colour-row').hidden = s.fill !== 'colour';
+    $('#bg-blur-row').hidden = s.fill !== 'blur';
+    $('#bg-colour').value = s.colour.toLowerCase();
+    $('#bg-blur').value = String(Math.round(s.blur * 100));
+    $('#bg-blur-out').textContent = String(Math.round(s.blur * 100));
+    $('#bg-feather').value = String(s.feather);
+    const c = app.edits.current;
+    $('#bg-feather-out').textContent = Math.round(s.feather * BG_FEATHER_STEP * Math.max(c.width, c.height)) + ' px';
+    $('#bg-brush').value = String(s.brush);
+    $('#bg-brush-out').textContent = s.brush + ' px';
+    $('#bg-undo-stroke').disabled = !this.strokes.length;
+    const n = this.strokes.length;
+    $('#bg-out').textContent = !ready ? 'Finding the person.' :
+      'Person found in ' + Math.round(this.model.coverage * 100) + ' % of the photo' + (n ? ', ' + n + (n > 1 ? ' strokes.' : ' stroke.') : '.');
+  },
+  async apply() {
+    await this.ready;
+    const src = app.edits.current, W = src.width, H = src.height;
+    const model = this.model, strokes = this.strokes.slice(), feather = this.s.feather * BG_FEATHER_STEP;
+    const o = { fill: this.s.fill, colour: this.s.colour, blur: this.s.blur };
+    await commit('Remove background', (img) => {
+      const a = core.bgStrokes(core.bgFeather(core.bgGuided(img, W, H, model), W, H, feather), W, H, strokes, 1);
+      return core.renderCutout(img, a, W, H, o);
+    });
+  },
+};
+
+for (const b of $$('[data-bgmode]')) b.addEventListener('click', () => tools.bg.setMode(b.dataset.bgmode));
+for (const b of $$('[data-bgfill]')) b.addEventListener('click', () => tools.bg.setFill({ fill: b.dataset.bgfill }));
+for (const b of $$('[data-bgcolour]')) b.addEventListener('click', () => tools.bg.setFill({ colour: b.dataset.bgcolour }));
+$('#bg-colour').addEventListener('input', (e) => tools.bg.setFill({ colour: e.target.value.toUpperCase() }));
+$('#bg-blur').addEventListener('input', (e) => tools.bg.setFill({ blur: +e.target.value / 100 }));
+$('#bg-feather').addEventListener('input', (e) => tools.bg.setFeather(+e.target.value));
+$('#bg-brush').addEventListener('input', (e) => { tools.bg.s.brush = +e.target.value; tools.bg.sync(); });
+$('#bg-undo-stroke').addEventListener('click', () => tools.bg.undoStroke());
+
 /* ---------- Export ---------- */
 
 const FORMATS = { jpeg: { mime: 'image/jpeg', ext: 'jpg', label: 'JPEG' }, png: { mime: 'image/png', ext: 'png', label: 'PNG' }, webp: { mime: 'image/webp', ext: 'webp', label: 'WebP' } };
@@ -2208,7 +2820,8 @@ receiveShared().catch((err) => notify('The shared photo could not be opened: ' +
 // Handles for the test suites. Read-only use; the app does not depend on it.
 window.retouch = {
   APP_VERSION, MAX_WORKING_PIXELS, HISTORY_DEPTH, CROP_ROTATE_MARGIN, RATIOS, TEXT_FONTS,
-  core, app, view, tools, openFile, openTool, closeTool, commit, commitTexts, encodeImage, fontsReady, undo, redo, draw,
+  BG_MIN_PERSON, BG_PREVIEW_LONG, BG_FEATHER_STEP, BG_VENDOR,
+  core, app, view, tools, segmenter, openFile, openTool, closeTool, commit, commitTexts, encodeImage, fontsReady, undo, redo, draw,
   readPixels(src, x = 0, y = 0, w = src.width, h = src.height) {
     const c = core.makeCanvas(src.width, src.height);
     const ctx = c.getContext('2d', { willReadFrequently: true });
