@@ -1457,6 +1457,19 @@ test('text: sheet controls, typing mode and the stage stays usable', async () =>
   await load(page, gradient());
   await page.click('[data-open-tool="text"]');
   assert((await page.evaluate(() => retouch.tools.text.s.texts.length)) === 1, 'opening Text with no boxes adds one');
+  assert((await page.evaluate(() => retouch.tools.text.box().text)) === '', 'a new box starts empty');
+  assert((await page.inputValue('#text-input')) === '', 'the text field starts empty, showing only its placeholder');
+  assert((await page.getAttribute('#text-input', 'placeholder')) === 'Type here', 'placeholder');
+  assert(await page.evaluate(() => document.activeElement === document.querySelector('#text-input')), 'the text field takes the cursor');
+  // Applying an untouched empty box adds nothing to the history.
+  await applyTool(page, 'text');
+  assert((await page.evaluate(() => [retouch.app.edits.stack.length, retouch.app.edits.texts.length])).join() === '1,0', 'empty box must not make a step');
+  await page.click('[data-open-tool="text"]');
+  await page.click('#text-add');
+  assert((await page.inputValue('#text-input')) === '' && await page.evaluate(() => document.activeElement === document.querySelector('#text-input')), 'Add gives an empty, focused field');
+  await page.click('.sheet-panel[data-tool="text"] [data-cancel]');
+  await page.click('[data-open-tool="text"]');
+  await page.fill('#text-input', 'Caption');
   await page.focus('#text-input');
   assert(await page.isHidden('#text-style'), 'style rows hide while typing');
   const stage = await page.locator('#stage').boundingBox();
