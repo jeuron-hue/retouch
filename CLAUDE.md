@@ -28,9 +28,9 @@ retouch has its own darkroom style. It does not use Lab Book (Gary's general des
 - Dark only. A neutral near-black surround so colour and skin tones are judged fairly; the photo is the brightest thing on screen. No light theme.
 - Tokens (CSS custom properties at the top of retouch.html): stage #0B0B0B, chrome #141312, raised #1D1B19, pressed #2E2B27, lines #2C2925 / #3A3631, ink #EEE8DE, muted #A59E92, faint #8A8377. One accent, the amber safelight #F2A33A (text on it #1B1205). Pass #7DBE8A, watch #E0A84A, fail #E57360. The cut-out brush veil is darkroom red; the skin veil stays blue.
 - Type: Barlow Semi Condensed 400/600 for labels and buttons (labels in spaced capitals), IBM Plex Mono 400/500 for numbers and edit codes, vendored in vendor/fonts/. The Text tool's own fonts are separate.
-- Motifs: film-edge edit codes in amber mono (RT-003 ▸ ...), sprocket holes along the tool bar and the empty screen, crop-mark corners on the empty screen and the icon.
+- Motifs: film-edge labels in amber mono (an edit count, "0 edit", "1 edit", "3 edits", then the date or tool name; no count on the empty screen), sprocket holes along the tool bar and the empty screen, crop-mark corners on the empty screen and the icon.
 - Phone first: portrait, one-handed. Tool bar at the bottom (icon and word), image fills the rest. Pinch to zoom, drag to pan. Tap targets at least 44 px.
-- Uncluttered sheets: header row is cancel (✕), title, hold-before (half circle) and apply (amber ✓); no footer buttons. Status lines go in the thin strip that replaces the top bar while a tool is open. How-to text is a short caption on the photo, shown only when it applies. Figures sit in a row of cells, not a table. Text settings are split into Font, Colour and Style tabs.
+- Uncluttered sheets: header row is cancel (✕), title, hold-before (half circle labelled HOLD) and apply (amber ✓); no footer buttons. Status lines go in the thin strip that replaces the top bar while a tool is open. How-to text is a short caption on the photo, shown only when it applies. Figures sit in a row of cells, not a table. Text settings are split into Font, Colour and Style tabs.
 - Self-host every font in vendor/ (offline requirement).
 
 ## v1 features
