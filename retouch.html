@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.6.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.6.1 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -145,8 +145,11 @@ body[data-tool="spot"] .strip [data-for="spot"]{display:inline}
 /* Stage: the photo fills everything between the bars. */
 #stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;touch-action:none;background:var(--stage)}
 #view{position:absolute;inset:0;width:100%;height:100%;display:block}
-.hold-fab{position:absolute;right:14px;bottom:14px;width:52px;height:52px;border-radius:50%;border:1px solid var(--line-strong);background:rgba(20,19,18,.86);color:var(--ink);display:flex;align-items:center;justify-content:center;padding:0;touch-action:none;z-index:3}
+.hold-fab{position:absolute;right:14px;bottom:14px;width:56px;height:60px;border-radius:12px;border:1px solid var(--line-strong);background:rgba(20,19,18,.86);color:var(--ink);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:0;touch-action:none;z-index:3}
 .hold svg,.hold-fab svg{width:24px;height:24px}
+.hold{flex-direction:column;gap:1px}
+.hold svg{width:20px;height:20px}
+.hold-label{font-size:9.5px;line-height:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;pointer-events:none}
 .hold svg .ring,.hold-fab svg .ring{fill:none;stroke:currentColor;stroke-width:1.5}
 .hold svg .half,.hold-fab svg .half{fill:currentColor}
 .hold{touch-action:none}
@@ -187,7 +190,6 @@ body[data-tool="bg"][data-brush] .hint[data-for="bg"],body[data-tool="skin"][dat
 .empty-actions .btn-primary{min-height:56px;font-size:15px;letter-spacing:.16em;display:flex;align-items:center;justify-content:center;gap:10px}
 .empty-actions .btn-primary svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .empty-actions .btn{min-height:48px}
-.empty-actions p{margin:4px 0 0;text-align:center;font-size:14px;color:var(--muted)}
 body[data-empty] .topbar,body[data-empty] .toolbar{display:none}
 
 /* Tool bar: film edge on top, seven tools. */
@@ -301,7 +303,7 @@ fieldset:disabled{opacity:.4}
 
   <section class="empty" id="empty">
     <div class="band top">
-      <div class="line"><span class="edge">retouch ▸ <span id="empty-code"></span></span></div>
+      <div class="line"><span class="edge">retouch ▸ <span id="empty-date"></span></span></div>
       <div class="sprockets" aria-hidden="true"></div>
     </div>
     <div class="empty-body">
@@ -316,7 +318,6 @@ fieldset:disabled{opacity:.4}
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="1"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-5 4 4 2.5-2.5L20 17"/></svg>Open a photo
         </button>
         <button class="btn" id="btn-install" hidden>Install app</button>
-        <p>Or share a photo to retouch from Google Photos.</p>
       </div>
     </div>
     <div class="band bottom">
@@ -327,6 +328,7 @@ fieldset:disabled{opacity:.4}
 
   <button class="hold-fab" id="hold-main" data-hold aria-label="Hold to see the original" title="Hold to see the original" hidden>
     <svg viewBox="0 0 24 24" aria-hidden="true"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg>
+    <span class="hold-label">Hold</span>
   </button>
   <div class="busy" id="busy" hidden>Working</div>
 </main>
@@ -338,7 +340,7 @@ fieldset:disabled{opacity:.4}
       <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       <span class="gap"></span>
       <h2>Crop &amp; straighten</h2>
-      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
       <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="scroller" id="crop-ratios" role="group" aria-label="Crop ratio"></div>
@@ -360,7 +362,7 @@ fieldset:disabled{opacity:.4}
       <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       <span class="gap"></span>
       <h2>Resize</h2>
-      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
       <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="scroller" role="group" aria-label="Resize preset">
@@ -386,7 +388,7 @@ fieldset:disabled{opacity:.4}
       <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       <span class="gap"></span>
       <h2>Add canvas</h2>
-      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
       <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="scroller" id="pad-ratios" role="group" aria-label="Frame ratio"></div>
@@ -421,7 +423,7 @@ fieldset:disabled{opacity:.4}
       <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       <span class="gap"></span>
       <h2>Text</h2>
-      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
       <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="row" style="gap:6px">
@@ -486,7 +488,7 @@ fieldset:disabled{opacity:.4}
       <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       <span class="gap"></span>
       <h2>Cut out</h2>
-      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
       <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="row" style="gap:8px">
@@ -534,7 +536,7 @@ fieldset:disabled{opacity:.4}
       <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       <span class="gap"></span>
       <h2>Smooth skin</h2>
-      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
       <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="row" style="gap:8px">
@@ -571,7 +573,7 @@ fieldset:disabled{opacity:.4}
       <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       <span class="gap"></span>
       <h2>Spot eraser</h2>
-      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
       <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="row">
@@ -587,7 +589,7 @@ fieldset:disabled{opacity:.4}
       <button class="icon-btn" data-cancel aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       <span class="gap"></span>
       <h2>Export</h2>
-      <button class="icon-btn hold" data-hold aria-label="Hold to see the original" title="Hold to see the original"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see the original" title="Hold to see the original"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
       <span class="gap"></span>
     </div>
     <div class="seg mono" role="group" aria-label="Format">
@@ -649,7 +651,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.6.0';
+const APP_VERSION = '0.6.1';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -2116,9 +2118,10 @@ function stamp(d = new Date()) {
   return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + '/' + pad2(d.getFullYear() % 100) +
     ' · ' + pad2(d.getHours()) + pad2(d.getMinutes()) + ' hrs';
 }
-function entryCode() {
-  const step = app.edits ? app.edits.index : 0;
-  return 'RT-' + String(step).padStart(3, '0') + ' · ' + stamp();
+// Edits applied so far: "0 edit", "1 edit", "2 edits" (a step back with undo counts down).
+function editCount() {
+  const n = app.edits ? app.edits.index : 0;
+  return n + (n >= 2 ? ' edits' : ' edit');
 }
 const fmtDims = (w, h) => w + ' × ' + h;
 const fmtMP = (w, h) => (w * h / 1e6).toFixed(1) + ' MP';
@@ -2434,8 +2437,8 @@ function afterHistoryChange() {
   if (e) {
     const c = e.current;
     $('#dims').textContent = fmtDims(c.width, c.height) + ' · ' + fmtMP(c.width, c.height);
-    const d = new Date();   // short form so it fits beside the buttons: RT-003 ▸ 24/10 1329
-    $('#top-code').textContent = entryCode().split(' · ')[0] + ' ▸ ' + pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + ' ' + pad2(d.getHours()) + pad2(d.getMinutes());
+    const d = new Date();   // short form so it fits beside the buttons: 3 edits ▸ 24/10 1329
+    $('#top-code').textContent = editCount() + ' ▸ ' + pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + ' ' + pad2(d.getHours()) + pad2(d.getMinutes());
   } else { $('#dims').textContent = ''; $('#top-code').textContent = ''; }
   view.fitMode = true;
   fitView();
@@ -2551,7 +2554,7 @@ function openTool(id) {
   for (const p of $$('.sheet-panel')) p.hidden = p.dataset.tool !== id;
   const panel = $('.sheet-panel[data-tool="' + id + '"]');
   // The thin strip that stands in for the top bar: edit number and tool name.
-  $('#strip-code').textContent = entryCode().split(' · ')[0] + ' ▸ ' + $('h2', panel).textContent;
+  $('#strip-code').textContent = editCount() + ' ▸ ' + $('h2', panel).textContent;
   document.body.dataset.tool = id;
   $('#hold-main').hidden = true;
   t.open();
@@ -3800,7 +3803,7 @@ $('#btn-install').addEventListener('click', async () => {
 
 /* ---------- Start ---------- */
 
-$('#empty-code').textContent = 'RT-000 · ' + stamp();
+$('#empty-date').textContent = stamp();
 $('#version').textContent = 'v' + APP_VERSION + ' · working limit ' + (MAX_WORKING_PIXELS / 1e6).toFixed(1) + ' MP';
 new ResizeObserver(() => viewResize()).observe($('#stage'));
 viewResize();

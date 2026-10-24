@@ -828,6 +828,28 @@ test('before / after hold on the main view and on every tool', async () => {
   await ctx.close();
 });
 
+test('edit counter reads 0 edit, 1 edit, 2 edits; the empty screen has no counter', async () => {
+  const { ctx, page } = await newApp();
+  const emptyText = await page.textContent('#empty');
+  assert(!/\d+\s+edits?\b/i.test(emptyText) && !/RT-|Google Photos/.test(emptyText), 'empty screen: ' + emptyText.replace(/\s+/g, ' '));
+  await load(page, gradient());
+  const top = () => page.textContent('#top-code');
+  assert(/^0 edit ▸ /.test(await top()), 'after open: ' + await top());
+  await page.click('[data-open-tool="resize"]');
+  await page.click('[data-long="1080"]');
+  await applyTool(page, 'resize');
+  assert(/^1 edit ▸ /.test(await top()), 'after one edit: ' + await top());
+  await page.click('[data-open-tool="resize"]');
+  assert(/^1 edit ▸ Resize$/.test(await page.textContent('#strip-code')), 'strip: ' + await page.textContent('#strip-code'));
+  await page.click('[data-long="1600"]');
+  await applyTool(page, 'resize');
+  assert(/^2 edits ▸ /.test(await top()), 'after two edits: ' + await top());
+  await page.click('#btn-undo');
+  assert(/^1 edit ▸ /.test(await top()), 'after undo: ' + await top());
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
 test('pinch to zoom and drag to pan', async () => {
   const { ctx, page } = await newApp();
   await load(page, gradient());
