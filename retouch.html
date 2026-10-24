@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.5.1 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.5.2 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -41,7 +41,7 @@ How the file is laid out:
      a. Constants (working-size ceiling, history depth, ratios).
      b. CORE: pure image functions (geometry, crop, resize, add canvas,
         text layout and drawing, background mask refinement, brush and
-        cut-out, skin smoothing, spot inpainting, metadata strip, edit history). Tests and the mutation runner
+        cut-out, skin smoothing, spot healing and inpainting, metadata strip, edit history). Tests and the mutation runner
         target this block. MediaPipe itself sits outside it, in the app.
      c. App: view (zoom, pan), tools, open, export, service worker.
 -->
@@ -454,7 +454,7 @@ fieldset:disabled{opacity:.4}
       <span class="readout" id="spot-brush-out">30 px</span>
     </div>
     <div class="row">
-      <span class="small" style="flex:1">Tap or brush over a spot; it fills from around it when you lift your finger. Two fingers zoom and move. Small spots only.</span>
+      <span class="small" style="flex:1">Tap or brush over a spot; it is healed from skin nearby when you lift your finger. Two fingers zoom and move. Small spots only.</span>
       <button class="btn" id="spot-undo-stroke" disabled>Undo stroke</button>
     </div>
     <div class="small" id="spot-out"></div>
@@ -523,7 +523,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.5.1';
+const APP_VERSION = '0.5.2';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -1800,32 +1800,170 @@ core.spotGrain = (d, w, h, mask, ring) => {
   });
 };
 
-// Fix one stroke on the canvas ctx (W x H): fill it, add the ring's grain. The
-// stroke is { r, pts } in image pixels. Returns the block as it was, for undo.
+/* Healing. Telea's fill is smooth, so on skin a spot of more than a few pixels
+   shows: no texture, and seams where the fill fronts meet in the middle. So the
+   spot eraser first looks for a patch of the photo nearby to copy, the way a
+   healing brush does:
+   1. Try every source position in a band round the spot (for a large spot, a
+      grid one-eighth of its size apart, then every position near the best
+      five). Score each by how well the ring just outside the spot matches the
+      same ring round the source (after allowing for an overall colour
+      difference), and by whether the source holds a mark of its own (its middle
+      unlike its edge). Lines and wrinkles crossing the spot then meet their
+      copies. The best one wins.
+   2. Copy the source's pixels into the spot, then add the smoothest correction
+      that makes them meet the spot's edge exactly (a membrane: each pixel the
+      average of its four neighbours, held to "photo minus copy" on the edge).
+   The copy brings real skin texture and wrinkles; the membrane removes any seam.
+   Where no source fits (against the frame edge), Telea's fill and grain are used. */
+
+core.SPOT_HEAL_RING = 3;                  // ring compared round the spot and the source, px
+core.SPOT_HEAL_DIST = [1.3, 2.5];         // band of source distances, in spot half-sizes (plus the ring)
+core.SPOT_HEAL_GRID = 8;                  // a large spot is searched on a grid of its half-size / this
+core.SPOT_HEAL_SAMPLE = 1500;             // pixels of the spot and of the ring compared, at most
+
+// Membrane: solve for h inside the mask so each pixel is the mean of its four
+// neighbours, with h outside the mask held fixed. h is interleaved RGB (3 per pixel).
+// Over-relaxed Gauss-Seidel, until no pixel moves by more than 0.02 of a level.
+core.membrane = (h, w, hh, mask) => {
+  const idx = [], nbs = [];
+  for (let i = 0; i < w * hh; i++) {
+    if (!mask[i]) continue;
+    const x = i % w, y = (i - x) / w;
+    idx.push(i);
+    // Neighbours inside the block; at the frame edge there are fewer (the edge is left free).
+    nbs.push([x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < hh - 1 ? i + w : -1].filter((j) => j >= 0));
+  }
+  if (!idx.length) return h;
+  // Start from the mean of the fixed pixels that touch the mask.
+  const start = [0, 0, 0];
+  let k = 0;
+  for (const nb of nbs) for (const j of nb) if (!mask[j]) { for (let c = 0; c < 3; c++) start[c] += h[3 * j + c]; k++; }
+  for (const i of idx) for (let c = 0; c < 3; c++) h[3 * i + c] = k ? start[c] / k : 0;
+  const omega = 1.9;
+  for (let it = 0; it < 5000; it++) {
+    let moved = 0;
+    for (let t = 0; t < idx.length; t++) {
+      const i = idx[t], nb = nbs[t];
+      for (let c = 0; c < 3; c++) {
+        let sum = 0;
+        for (const j of nb) sum += h[3 * j + c];
+        const avg = sum / nb.length;
+        const step = omega * (avg - h[3 * i + c]);
+        h[3 * i + c] += step;
+        if (Math.abs(step) > moved) moved = Math.abs(step);
+      }
+    }
+    if (moved < 0.02) break;
+  }
+  return h;
+};
+
+// Pick the source offset for a spot in an RGBA block d (w x h). mask marks the spot,
+// half its half-size. Returns { dx, dy } or null when nothing fits inside the block.
+core.healSource = (d, w, h, mask, half) => {
+  const R = core.SPOT_HEAL_RING;
+  const spot = [], ring = core.spotRing(mask, w, h, R), rim = [];
+  for (let i = 0; i < w * h; i++) { if (mask[i]) spot.push(i); else if (ring[i]) rim.push(i); }
+  // Compare at most SPOT_HEAL_SAMPLE pixels of each, evenly spread.
+  const thin = (a) => a.filter((_, k) => k % Math.ceil(a.length / core.SPOT_HEAL_SAMPLE) === 0);
+  const spotS = thin(spot), rimS = thin(rim);
+  const all = spot.concat(rim);
+  let bx0 = w, by0 = h, bx1 = 0, by1 = 0;
+  for (const i of all) { const x = i % w, y = (i - x) / w; bx0 = Math.min(bx0, x); bx1 = Math.max(bx1, x); by0 = Math.min(by0, y); by1 = Math.max(by1, y); }
+  const rIn = core.SPOT_HEAL_DIST[0] * half + R, rOut = core.SPOT_HEAL_DIST[1] * half + R;
+  // Score one offset, or Infinity if it does not fit.
+  const scoreAt = (dx, dy) => {
+    // Spot and rim must land inside the block, and the source must not overlap the spot.
+    if (bx0 + dx < 0 || bx1 + dx >= w || by0 + dy < 0 || by1 + dy >= h) return Infinity;
+    const off = dy * w + dx;
+    for (const i of spot) if (mask[i + off]) return Infinity;
+    // Rim match: spread of (photo - source) round the rim, per channel.
+    let score = 0;
+    for (let c = 0; c < 3; c++) {
+      let s1 = 0, s2 = 0;
+      for (const i of rimS) { const v = d[4 * i + c] - d[4 * (i + off) + c]; s1 += v; s2 += v * v; }
+      score += s2 / rimS.length - (s1 / rimS.length) ** 2;
+    }
+    // A mark inside the source: its middle's mean against its own rim's mean.
+    for (let c = 0; c < 3; c++) {
+      let mi = 0, mr = 0;
+      for (const i of spotS) mi += d[4 * (i + off) + c];
+      for (const i of rimS) mr += d[4 * (i + off) + c];
+      score += 2 * (mi / spotS.length - mr / rimS.length) ** 2;
+    }
+    return score * (1 + 0.05 * Math.hypot(dx, dy) / rOut);   // a little preference for near sources
+  };
+  const step = Math.max(1, Math.round(half / core.SPOT_HEAL_GRID));
+  const tried = [];
+  const lim = Math.ceil(rOut);
+  for (let dy = -lim; dy <= lim; dy += step) {
+    for (let dx = -lim; dx <= lim; dx += step) {
+      const dist = Math.hypot(dx, dy);
+      if (dist < rIn || dist > rOut) continue;
+      const score = scoreAt(dx, dy);
+      if (score < Infinity) tried.push({ dx, dy, score });
+    }
+  }
+  tried.sort((p, q) => p.score - q.score);
+  let best = tried[0] || null;
+  if (step > 1) {
+    for (const t of tried.slice(0, 5)) {
+      for (let v = -step + 1; v < step; v++) {
+        for (let u = -step + 1; u < step; u++) {
+          const score = scoreAt(t.dx + u, t.dy + v);
+          if (score < best.score) best = { dx: t.dx + u, dy: t.dy + v, score };
+        }
+      }
+    }
+  }
+  return best;
+};
+
+// The fallback: Telea's fill, then the ring's grain. (x0, y0) is the block's place
+// in the photo, so the grain is the same wherever the block starts.
+core.fillTelea = (d, w, h, mask, x0 = 0, y0 = 0) => {
+  const grain = core.spotGrain(d, w, h, mask, core.spotRing(mask, w, h));
+  core.inpaint(d, w, h, mask);
+  for (let i = 0; i < w * h; i++) {
+    if (!mask[i]) continue;
+    const z = core.spotNoise(i % w + x0, Math.floor(i / w) + y0);
+    for (let c = 0; c < 3; c++) d[4 * i + c] += z * grain[c];
+  }
+};
+
+// Fix one stroke on the canvas ctx (W x H). The stroke is { r, pts } in image
+// pixels. Returns the block it changed as it was, for undo.
 core.fixSpot = (ctx, st, W, H) => {
-  const m = core.SPOT_EPS + core.SPOT_RING + 2;
   const bx = core.strokeBounds(st, 1, W, H);
+  if (bx.x1 <= bx.x0 || bx.y1 <= bx.y0) return null;
+  const half = Math.max(bx.x1 - bx.x0, bx.y1 - bx.y0) / 2;
+  // Read wide enough for the farthest source, plus a margin for the fallback.
+  const m = Math.ceil(core.SPOT_HEAL_DIST[core.SPOT_HEAL_DIST.length - 1] * half + 2 * core.SPOT_HEAL_RING) + core.SPOT_EPS + core.SPOT_RING + 2;
   const x0 = Math.max(0, bx.x0 - m), y0 = Math.max(0, bx.y0 - m), x1 = Math.min(W, bx.x1 + m), y1 = Math.min(H, bx.y1 + m);
   const w = x1 - x0, h = y1 - y0;
-  if (w <= 0 || h <= 0) return null;
-  const before = ctx.getImageData(x0, y0, w, h);
-  const img = new ImageData(new Uint8ClampedArray(before.data), w, h), d = img.data;
+  const img = ctx.getImageData(x0, y0, w, h), d = img.data;
   const cov = new Float32Array(w * h);
   core.paintStroke(cov, w, h, { mode: 'keep', r: st.r, pts: st.pts.map((p) => ({ x: p.x - x0, y: p.y - y0 })) });
   const mask = new Uint8Array(w * h);
   for (let i = 0; i < w * h; i++) mask[i] = cov[i] > 0 ? 1 : 0;
-  const grain = core.spotGrain(d, w, h, mask, core.spotRing(mask, w, h));
-  core.inpaint(d, w, h, mask);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y * w + x;
-      if (!mask[i]) continue;
-      const z = core.spotNoise(x + x0, y + y0);
-      for (let c = 0; c < 3; c++) d[4 * i + c] += z * grain[c];
+  // The block written back (and kept for undo): the spot's box plus one pixel.
+  const ux0 = Math.max(0, bx.x0 - 1), uy0 = Math.max(0, bx.y0 - 1), ux1 = Math.min(W, bx.x1 + 1), uy1 = Math.min(H, bx.y1 + 1);
+  const before = ctx.getImageData(ux0, uy0, ux1 - ux0, uy1 - uy0);
+  const src = core.healSource(d, w, h, mask, half);
+  if (src) {
+    // h = photo - copy outside the spot, then the membrane inside; the fill is copy + h.
+    const off = src.dy * w + src.dx, hm = new Float32Array(3 * w * h);
+    for (let i = 0; i < w * h; i++) {
+      const x = i % w + src.dx, y = Math.floor(i / w) + src.dy;
+      if (x < 0 || x >= w || y < 0 || y >= h) continue;
+      for (let c = 0; c < 3; c++) hm[3 * i + c] = d[4 * i + c] - d[4 * (i + off) + c];
     }
-  }
-  ctx.putImageData(img, x0, y0);
-  return { x: x0, y: y0, img: before };
+    core.membrane(hm, w, h, mask);
+    for (let i = 0; i < w * h; i++) if (mask[i]) for (let c = 0; c < 3; c++) d[4 * i + c] = d[4 * (i + off) + c] + hm[3 * i + c];
+  } else core.fillTelea(d, w, h, mask, x0, y0);
+  ctx.putImageData(img, x0, y0, ux0 - x0, uy0 - y0, ux1 - ux0, uy1 - uy0);
+  return { x: ux0, y: uy0, img: before, healed: !!src };
 };
 // CORE:END
 
@@ -3262,7 +3400,7 @@ $('#skin-undo-stroke').addEventListener('click', () => tools.skin.undoStroke());
 
 /* ---------- Tool: spot eraser ---------- */
 
-// Each stroke is filled at full size on a working copy as soon as the finger
+// Each stroke is healed at full size on a working copy as soon as the finger
 // lifts, so the stage shows exactly what Apply keeps. Undo stroke puts back the
 // block of pixels the fill changed.
 const SPOT_LARGE = 0.02;   // a stroke covering more than this share of the photo gets a warning
@@ -3283,6 +3421,7 @@ tools.spot = {
   close() { this.patches = []; this.stroke = null; this.cursor = null; this.work = null; this.wctx = null; },   // the work canvas is app.preview.src
   toImage(p) { return { x: (p.x - view.tx) / view.scale, y: (p.y - view.ty) / view.scale }; },
   pointerDown(p) {
+    if (app.busyCount > 0) return false;                    // still healing the last one: pan instead
     this.stroke = { r: this.s.brush / 2 / view.scale, pts: [this.toImage(p)] };
     this.cursor = p;
     requestDraw();
@@ -3295,15 +3434,21 @@ tools.spot = {
     if (Math.hypot(q.x - last.x, q.y - last.y) >= st.r / 4) st.pts.push(q);
     requestDraw();
   },
-  pointerUp() {
+  async pointerUp() {
     const st = this.stroke; if (!st) return;
     this.stroke = null; this.cursor = null;
     const W = this.work.width, H = this.work.height, bx = core.strokeBounds(st, 1, W, H);
     if ((bx.x1 - bx.x0) * (bx.y1 - bx.y0) > SPOT_LARGE * W * H) {
-      notify('That is a large area: it fills with a blur. The spot eraser is for small spots; Undo stroke takes it back.', 'watch', { id: 'spot-large' });
+      notify('That is a large area. The spot eraser is for small spots; Undo stroke takes it back.', 'watch', { id: 'spot-large' });
     }
-    const patch = core.fixSpot(this.wctx, st, W, H);
-    if (patch) this.patches.push(patch);
+    // A long stroke takes a second or two on the phone: say so rather than freeze.
+    busy(true, 'Healing');
+    try {
+      await nextFrame();
+      if (app.tool !== this) return;
+      const patch = core.fixSpot(this.wctx, st, W, H);
+      if (patch) this.patches.push(patch);
+    } finally { busy(false); }
     this.sync();
     requestDraw();
   },

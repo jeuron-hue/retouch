@@ -2332,7 +2332,7 @@ test('spot core: the fill rebuilds flat colour, gradients and edges; grain match
     // Large spots on grainy, shaded skin (the case that burst into black and white rays
     // on the phone, 24/10/26, reaching 0 and 255): the bulk of the fill (1st to 99th
     // percentile) stays within 15 levels of the skin's own, nothing comes near black or
-    // white, and its texture is no more than 40 % busier than the skin's.
+    // white, and its texture is the skin's own (spread within 20 % of the skin's).
     out.big = [[20, 30], [20, 45], [30, 60]].map(([amp, rad]) => {
       const BW = 300; let sd = 7; const rr = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
       const c = core.makeCanvas(BW, BW), x = c.getContext('2d', { willReadFrequently: true }), img = x.createImageData(BW, BW);
@@ -2375,6 +2375,94 @@ test('spot core: the fill rebuilds flat colour, gradients and edges; grain match
       const e = Math.abs(T2[i] - Math.sqrt(best)); tmax = Math.max(tmax, e); tsum += e; tn++;
     }
     out.Tall = [+tmax.toFixed(2), +(tsum / tn).toFixed(3)];
+    // Healing. The membrane against a direct solve (Jacobi, run to the end) on a small
+    // random problem: inside the mask each value is the mean of its four neighbours.
+    {
+      const mw = 14, mh = 11, mk = new Uint8Array(mw * mh), hv = new Float32Array(3 * mw * mh);
+      let sd = 5; const rr = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+      for (let i = 0; i < mw * mh; i++) { const x = i % mw, y = Math.floor(i / mw); if (x > 2 && x < 11 && y > 2 && y < 8 && !(x === 5 && y === 4)) mk[i] = 1; for (let c = 0; c < 3; c++) hv[3 * i + c] = rr() * 100; }
+      const ref = Float32Array.from(hv);
+      for (let it = 0; it < 20000; it++) { const nx = Float32Array.from(ref); for (let i = 0; i < mw * mh; i++) if (mk[i]) for (let c = 0; c < 3; c++) nx[3 * i + c] = (ref[3 * (i - 1) + c] + ref[3 * (i + 1) + c] + ref[3 * (i - mw) + c] + ref[3 * (i + mw) + c]) / 4; ref.set(nx); }
+      core.membrane(hv, mw, mh, mk);
+      out.membrane = Math.max(...Array.from(hv).map((v, i) => Math.abs(v - ref[i])));
+    }
+    // The source: with a second dark mark beside the spot, on each side in turn, the copy
+    // never brings it in; and the healed fill is used (not the fallback).
+    out.avoid = [[100, 72], [128, 100], [100, 128], [72, 100], [120, 80]].map(([mx, my]) => {
+      const BW = 200; let sd = 3; const rr = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+      const c = core.makeCanvas(BW, BW), x = c.getContext('2d', { willReadFrequently: true }), img = x.createImageData(BW, BW);
+      for (let y = 0; y < BW; y++) for (let X = 0; X < BW; X++) { const g = (rr() - 0.5) * 16; const dark = Math.hypot(X - 100, y - 100) < 8 || Math.hypot(X - mx, y - my) < 8; img.data.set([dark ? 120 + g : 200 + g, dark ? 70 + g : 150 + g, dark ? 60 + g : 130 + g, 255], (y * BW + X) * 4); }
+      x.putImageData(img, 0, 0);
+      const p = core.fixSpot(x, { r: 10, pts: [{ x: 100, y: 100 }] }, BW, BW);
+      const d = x.getImageData(90, 90, 20, 20).data; let mn = 255; for (let i = 1; i < d.length; i += 4) mn = Math.min(mn, d[i]);
+      return [mn, p.healed];
+    });
+    // No room for a source (a spot filling most of a small photo): Telea's fill is used.
+    {
+      const x = build((X, y) => [120 + (X % 3), 140, 160]);
+      const tiny = core.makeCanvas(40, 40), tx = tiny.getContext('2d', { willReadFrequently: true });
+      tx.drawImage(x.canvas, 0, 0);
+      const p = core.fixSpot(tx, { r: 12, pts: [{ x: 20, y: 20 }] }, 40, 40);
+      const d = tx.getImageData(14, 14, 12, 12).data; let e = 0; for (let i = 0; i < d.length; i += 4) e = Math.max(e, Math.abs(d[i + 1] - 140), Math.abs(d[i + 2] - 160));
+      out.fallback = [p.healed, e];
+    }
+    // The fallback (Telea's fill and grain) on the same scenes, called directly.
+    const telea = (pix, rad = 10, cx = 60, cy = 50, BW = W, BH = H) => {
+      const x = (() => { const c = core.makeCanvas(BW, BH), xx = c.getContext('2d', { willReadFrequently: true }), img = xx.createImageData(BW, BH); for (let y = 0; y < BH; y++) for (let X = 0; X < BW; X++) img.data.set([...pix(X, y), 255], (y * BW + X) * 4); xx.putImageData(img, 0, 0); return xx; })();
+      const img = x.getImageData(0, 0, BW, BH), mk = new Uint8Array(BW * BH);
+      for (let i = 0; i < BW * BH; i++) if (Math.hypot(i % BW + 0.5 - cx, Math.floor(i / BW) + 0.5 - cy) < rad) mk[i] = 1;
+      core.fillTelea(img.data, BW, BH, mk);
+      return img.data;
+    };
+    const tin = (x, y) => Math.hypot(x + 0.5 - 60, y + 0.5 - 50) < 10;
+    {
+      let t = telea((x, y) => (tin(x, y) ? [255, 0, 255] : [120, 140, 160]));
+      out.tFlat = t.reduce((m, v, i) => Math.max(m, i % 4 === 3 ? 0 : Math.abs(v - [120, 140, 160][i % 4])), 0);
+      t = telea((x, y) => (tin(x, y) ? [255, 0, 255] : [x * 2, y * 2, 77]));
+      let g = 0; for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const o = (y * W + x) * 4; g = Math.max(g, Math.abs(t[o] - x * 2), Math.abs(t[o + 1] - y * 2)); }
+      out.tGrad = g;
+      const tm = (truth) => { const d = telea(truth); let e = 0, k = 0; for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (tin(x, y)) { e += Math.abs(d[(y * W + x) * 4] - truth(x, y)[0]); k++; } return +(e / k).toFixed(2); };
+      out.tMae = [tm((x) => (x < 60 ? [40, 40, 40] : [220, 220, 220])), tm((x, y) => (x - 60 + (y - 50) * 0.5 < 0 ? [40, 40, 40] : [220, 220, 220])),
+        tm((x, y) => (Math.abs((x - 60) * 0.6 - (y - 50) * 0.8) < 1.5 ? [30, 30, 30] : [200, 200, 200]))];
+      // Grainy, shaded skin, a small and a large spot: the fill stays in range, and its
+      // texture is close to the skin's (grain put back; not streaky).
+      out.tTex = [[12, 15], [30, 60]].map(([amp, rad]) => {
+        let sd = 7; const rr = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+        const gr = Array.from({ length: 300 * 300 }, () => (rr() - 0.5) * amp);
+        const tt = telea((X, y) => { const v = gr[y * 300 + X] + 6 * Math.sin(y / 3); return [205 + v - y * 0.05, 150 + v, 130 + v]; }, rad, 150, 150, 300, 300);
+        const sdOf = (cond) => { const vs = []; for (let y = 0; y < 300; y++) for (let X = 0; X < 300; X++) if (cond(Math.hypot(X - 150, y - 150))) vs.push(tt[(y * 300 + X) * 4 + 1]); vs.sort((p, q) => p - q); const m = vs.reduce((a2, c) => a2 + c, 0) / vs.length; return { sd: Math.sqrt(vs.reduce((a2, c) => a2 + (c - m) ** 2, 0) / vs.length), lo: vs[0], hi: vs[vs.length - 1] }; };
+        const fill = sdOf((r) => r < rad - 1), around = sdOf((r) => r > rad + 5 && r < rad + 30);
+        return { rad, ratio: +(fill.sd / around.sd).toFixed(2), lo: fill.lo, hi: fill.hi };
+      });
+    }
+    // Healing scenes where each rule of the source search decides the result.
+    {
+      const make = (BW, BH, pix) => { const c = core.makeCanvas(BW, BH), x = c.getContext('2d', { willReadFrequently: true }), img = x.createImageData(BW, BH); for (let y = 0; y < BH; y++) for (let X = 0; X < BW; X++) img.data.set([...pix(X, y).map((v) => Math.round(v)), 255], (y * BW + X) * 4); x.putImageData(img, 0, 0); return x; };
+      const maeIn = (x, BW, truth, inside) => { const d = x.getImageData(0, 0, BW, x.canvas.height).data; let e = 0, k = 0; for (let i = 0; i < d.length / 4; i++) { const X = i % BW, y = Math.floor(i / BW); if (!inside(X, y)) continue; e += Math.abs(d[4 * i + 1] - truth(X, y)[1]); k++; } return +(e / k).toFixed(2); };
+      const minIn = (x, BW, inside) => { const d = x.getImageData(0, 0, BW, x.canvas.height).data; let m = 255; for (let i = 0; i < d.length / 4; i++) if (inside(i % BW, Math.floor(i / BW))) m = Math.min(m, d[4 * i + 1]); return m; };
+      const barsAt = (X, y) => Math.abs(y - 100) <= 3 && ((X >= 112 && X <= 128) || (X >= 72 && X <= 88));
+      const inC = (X, y) => Math.hypot(X + 0.5 - 100, y + 0.5 - 100) < 9;
+      // Wrinkle rows with dark bars where the best-matching sources would come from, with
+      // grain (the rim match must allow for a colour difference) and without (marks in a
+      // source must count against it): the bars are never copied in.
+      out.marks = [[6, 3], [0, 2.3]].map(([gamp, per]) => {
+        let sd = 4; const rr = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+        const x = make(200, 200, (X, y) => { const g = (rr() - 0.5) * gamp + 18 * Math.sin(y / per); return barsAt(X, y) ? [110, 60, 50] : [200 + g, 150 + g, 130 + g]; });
+        core.fixSpot(x, { r: 10, pts: [{ x: 100, y: 100 }] }, 200, 200);
+        return minIn(x, 200, inC);
+      });
+      // A long scratch over wrinkle rows: healed with skin, nothing dark left.
+      const scratch = (X, y) => Math.abs(y - 100) <= 1 && X >= 60 && X <= 240;
+      const xs = make(300, 220, (X, y) => { const v = 150 + 18 * Math.sin(y / 3); return scratch(X, y) ? [60, 40, 40] : [v + 50, v, v - 20]; });
+      core.fixSpot(xs, { r: 4, pts: [{ x: 58, y: 100 }, { x: 242, y: 100 }] }, 300, 220);
+      out.scratch = minIn(xs, 300, scratch);
+      // A large spot on fine tilted wrinkles: the search lines them up to within a fraction of a level.
+      const tilt = (X, y) => { const v = 150 + 40 * Math.sin((y - 0.37 * X) / 1.6); return [v + 50, v, v - 20]; };
+      const inT = (X, y) => Math.hypot(X + 0.5 - 150, y + 0.5 - 150) < 30;
+      const xt = make(300, 300, (X, y) => (inT(X, y) ? [0, 0, 0] : tilt(X, y)));
+      core.fixSpot(xt, { r: 30, pts: [{ x: 150, y: 150 }] }, 300, 300);
+      out.tilted = maeIn(xt, 300, tilt, inT);
+    }
     // The heap gives keys back smallest first, whatever order they went in.
     const hp = core.minHeap(), keys = Array.from({ length: 500 }, (_, i) => Math.sin(i * 7.3) * 100);
     keys.forEach((k, i) => hp.push(i, k));
@@ -2403,16 +2491,25 @@ test('spot core: the fill rebuilds flat colour, gradients and edges; grain match
   assert(r.gradient <= 1, 'gradient should come back within 1 level, off by ' + r.gradient);
   assert(r.moved === 0, 'pixels outside the spot changed by ' + r.moved);
   assert(r.undo, 'the patch must restore the spot exactly');
-  assert(r.patch.join() === '39,29,42,42', 'patch block ' + r.patch);
+  assert(r.patch.join() === '49,39,22,22', 'patch block (the spot\'s box plus a pixel) ' + r.patch);
   assert(r.edge[0] < 60 && r.edge[1] < 70 && r.edge[4] > 190 && r.edge[5] > 200 && r.edge[2] < r.edge[3], 'edge rebuilt in place: ' + r.edge);
   assert(Math.abs(r.grainSpot[1] - r.grainAround[1]) < 4, 'fill colour matches the skin: ' + r.grainSpot[1].toFixed(1) + ' vs ' + r.grainAround[1].toFixed(1));
   assert(r.grainSpot[0] > 0.7 * r.grainAround[0] && r.grainSpot[0] < 1.3 * r.grainAround[0], 'fill grain matches: ' + r.grainSpot[0].toFixed(2) + ' vs ' + r.grainAround[0].toFixed(2));
   assert(r.atEdge <= 1 && r.line <= 1, 'spot at the frame edge ' + r.atEdge + ', stroke ' + r.line);
   assert(r.T.every((v) => Math.abs(v) <= 1.5) && r.Tout, 'arrival distance vs distance from the edge: ' + r.T);
   assert(r.Tall[0] <= 1 && r.Tall[1] <= 0.1, 'arrival distance over an L-shaped spot, worst and mean error: ' + r.Tall);
-  assert(r.mae[0] <= 12 && r.mae[1] <= 14.5 && r.mae[2] <= 28, 'fill error at a vertical edge, slanted edge, thin line: ' + r.mae);
-  for (const b of r.big) assert(b.inRange && b.extremes[0] > 60 && b.extremes[1] < 240 && b.sdRatio <= 1.4 && b.meanDiff <= 6, 'large spot, radius ' + b.rad + ': ' + JSON.stringify(b));
+  assert(r.mae.every((v) => v <= 2), 'healed error at a vertical edge, slanted edge, thin line (a copy from along the line): ' + r.mae);
+  for (const b of r.big) assert(b.inRange && b.extremes[0] > 60 && b.extremes[1] < 240 && b.sdRatio >= 0.8 && b.sdRatio <= 1.25 && b.meanDiff <= 4, 'large spot, radius ' + b.rad + ': ' + JSON.stringify(b));
   assert(r.heap, 'heap must give keys back smallest first');
+  assert(r.tFlat === 0 && r.tGrad <= 1, 'fallback: flat ' + r.tFlat + ', gradient ' + r.tGrad);
+  assert(r.tMae[0] <= 12 && r.tMae[1] <= 14.5 && r.tMae[2] <= 28, 'fallback error at a vertical edge, slanted edge, thin line: ' + r.tMae);
+  assert(r.tTex.every((t) => t.ratio >= 0.8 && t.ratio <= 1.35 && t.lo > 60 && t.hi < 240), 'fallback texture on grainy skin (fill spread against the skin\'s): ' + JSON.stringify(r.tTex));
+  assert(r.membrane < 0.1, 'membrane differs from a direct solve by ' + r.membrane);
+  assert(r.avoid.every(([mn, healed]) => healed && mn > 110), 'the copy must not bring in a nearby mark: ' + JSON.stringify(r.avoid));
+  assert(r.fallback[0] === false && r.fallback[1] <= 2, 'no room for a source: Telea fill used, flat colour kept: ' + r.fallback);
+  assert(r.marks.every((m) => m > 110), 'dark bars near the spot must not be copied in: ' + r.marks);
+  assert(r.scratch > 150, 'scratch healed with skin (wrinkle rows lined up): darkest ' + r.scratch);
+  assert(r.tilted <= 0.6, 'large spot on tilted wrinkles, error ' + r.tilted);
   assert(r.cone[0] <= r.cone[1], 'fill on a cone must not pass the brightest pixel at its edge: ' + r.cone);
   assert(r.edgeGrain.every((v) => v < 0.5), 'an edge is not grain: ' + r.edgeGrain);
   assert(r.knownGrain.every((v) => Math.abs(v - 10) < 1.5), 'grain of noise with spread 10: ' + r.knownGrain);
@@ -2446,11 +2543,11 @@ test('spot: a tap fills a spot, a stroke fills a scratch; undo stroke; two finge
   const spot0 = await meanG(page, 77, 67, 84, 74), line0 = await meanG(page, 160, 139, 240, 142);
   await page.click('[data-open-tool="spot"]');
   assert((await page.textContent('#spot-out')) === 'No spots fixed yet.' && await page.isDisabled('#spot-undo-stroke'), 'starts with nothing fixed');
-  await brush(page, [[80, 70]]);                                      // a tap
+  await brush(page, [[80, 70]]); await idle(page);                    // a tap
   assert((await page.evaluate(() => retouch.tools.spot.patches.length)) === 1, 'tap fixed one spot');
   const spot1 = await meanG(page, 77, 67, 84, 74, 'preview');
   assert(spot0 < 90 && spot1 > 140, 'spot filled with skin on the stage: ' + spot0.toFixed(1) + ' to ' + spot1.toFixed(1));
-  await brush(page, [[145, 140], [255, 140]]);
+  await brush(page, [[145, 140], [255, 140]]); await idle(page);
   assert((await meanG(page, 160, 139, 240, 142, 'preview')) > 140, 'scratch filled');
   assert((await page.textContent('#spot-out')) === '2 spots fixed.', 'status ' + await page.textContent('#spot-out'));
   await page.click('#spot-undo-stroke');
@@ -2467,7 +2564,7 @@ test('spot: a tap fills a spot, a stroke fills a scratch; undo stroke; two finge
   assert((await page.evaluate(() => retouch.tools.spot.patches.length)) === 1, 'the pinch fixed nothing');
   assert((await page.evaluate(() => retouch.view.scale)) > s0 * 1.5, 'two fingers zoomed');
   // Zoomed in, the scratch again, then apply.
-  await brush(page, [[145, 140], [255, 140]]);
+  await brush(page, [[145, 140], [255, 140]]); await idle(page);
   await applyTool(page, 'spot');
   const spot2 = await meanG(page, 77, 67, 84, 74), line2 = await meanG(page, 160, 139, 240, 142), skin = await meanG(page, 20, 20, 60, 60);
   assert(Math.abs(spot2 - skin) < 6 && Math.abs(line2 - skin) < 6, 'filled like the skin around: spot ' + spot2.toFixed(1) + ', scratch ' + line2.toFixed(1) + ', skin ' + skin.toFixed(1));
@@ -2482,7 +2579,7 @@ test('spot: a tap fills a spot, a stroke fills a scratch; undo stroke; two finge
   assert((await page.evaluate(() => retouch.app.edits.stack.length)) === 3, 'nothing fixed, no step');
   await page.click('[data-open-tool="spot"]');
   await page.fill('#spot-brush', '80'); await page.dispatchEvent('#spot-brush', 'input');
-  await brush(page, [[20, 20], [280, 20], [280, 180], [20, 180]]);
+  await brush(page, [[20, 20], [280, 20], [280, 180], [20, 180]]); await idle(page);
   await page.waitForSelector('.notice[data-id="spot-large"]');
   await page.click('.sheet-panel[data-tool="spot"] [data-cancel]');
   assert((await page.evaluate(() => retouch.app.edits.stack.length)) === 3, 'cancel keeps nothing');

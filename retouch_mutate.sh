@@ -191,6 +191,18 @@ spot: no front ||| flag[i] = BAND; push(i, 0); ||| flag[i] = BAND;
 spot: no slope carried ||| const at = (c) => d[4 * q + c] + S[6 * q + 2 * c] * dx + S[6 * q + 2 * c + 1] * dy; ||| const at = (c) => d[4 * q + c];
 spot: slope sign ||| const at = (c) => d[4 * q + c] + S[6 * q + 2 * c] * dx + ||| const at = (c) => d[4 * q + c] - S[6 * q + 2 * c] * dx +
 spot: slope not shrunk ||| S[6 * q + j] = m * m * m / (m * m + scatter + 1e-9); ||| S[6 * q + j] = m;
+heal: off, always the fallback ||| const src = core.healSource(d, w, h, mask, half); ||| const src = null;
+heal: rim not compared ||| for (const i of rimS) { const v = d[4 * i + c] - d[4 * (i + off) + c]; s1 += v; s2 += v * v; } ||| /* removed */
+heal: colour offset not allowed for ||| score += s2 / rimS.length - (s1 / rimS.length) ** 2; ||| score += s2 / rimS.length;
+heal: marks in the source ignored ||| score += 2 * (mi / spotS.length - mr / rimS.length) ** 2; ||| score += 0;
+heal: source may hang off the block ||| if (bx0 + dx < 0 || bx1 + dx >= w || by0 + dy < 0 || by1 + dy >= h) return Infinity; ||| /* removed */
+heal: band too far ||| core.SPOT_HEAL_DIST = [1.3, 2.5]; ||| core.SPOT_HEAL_DIST = [3, 4];
+heal: grid not refined ||| if (step > 1) { ||| if (false) {
+heal: no membrane ||| core.membrane(hm, w, h, mask); ||| /* removed */
+heal: copy from the wrong side ||| for (let i = 0; i < w * h; i++) if (mask[i]) for (let c = 0; c < 3; c++) d[4 * i + c] = d[4 * (i + off) + c] + hm[3 * i + c]; ||| for (let i = 0; i < w * h; i++) if (mask[i]) for (let c = 0; c < 3; c++) d[4 * i + c] = d[4 * (i - off) + c] + hm[3 * i + c];
+membrane: three neighbours ||| const avg = sum / nb.length; ||| const avg = sum / 3;
+membrane: stops too early ||| if (moved < 0.02) break; ||| if (moved < 50) break;
+spot: writes back the wrong block ||| ctx.putImageData(img, x0, y0, ux0 - x0, uy0 - y0, ux1 - ux0, uy1 - uy0); ||| ctx.putImageData(img, x0, y0, 0, 0, ux1 - ux0, uy1 - uy0);
 spot: slope window ignored ||| core.SPOT_SLOPE = 2; ||| core.SPOT_SLOPE = 0;
 spot: filled pixels carry no slope ||| for (let k = 0; k < 6; k++) S[6 * i + k] = sl[k] / ws; ||| /* removed */
 spot: fill not bounded ||| for (let c = 0; c < 3; c++) d[4 * i + c] = Math.min(maxC[c], Math.max(minC[c], v[c])); ||| for (let c = 0; c < 3; c++) d[4 * i + c] = v[c];
@@ -201,7 +213,7 @@ spot: grain is the mean, not the median ||| return a[a.length >> 1] * 1.4826 * M
 spot: grain not scaled up ||| return a[a.length >> 1] * 1.4826 * Math.sqrt(9 / 8); ||| return a[a.length >> 1];
 spot: grain left out ||| for (let c = 0; c < 3; c++) d[4 * i + c] += z * grain[c]; ||| /* removed */
 spot: noise all one value ||| return (s - 1.5) * 2; ||| return 0.5;
-spot: block margin dropped ||| const m = core.SPOT_EPS + core.SPOT_RING + 2; ||| const m = 0;
+spot: block margin too small ||| const m = Math.ceil(core.SPOT_HEAL_DIST[core.SPOT_HEAL_DIST.length - 1] * half + 2 * core.SPOT_HEAL_RING) + core.SPOT_EPS + core.SPOT_RING + 2; ||| const m = 2;
 spot: mask from the wrong place ||| pts: st.pts.map((p) => ({ x: p.x - x0, y: p.y - y0 })) ||| pts: st.pts
 EOF
 )
