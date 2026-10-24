@@ -1,7 +1,7 @@
 # CLAUDE.md: retouch
 
 ## What this is
-retouch is Gary's personal photo editor for his Pixel 9 Pro XL, installed as a PWA from GitHub Pages (jeuron-hue/retouch, public). Private working tool, not a portfolio piece. Most edits are photos of people headed for Instagram.
+retouch is Gary's personal photo editor for his Pixel 9 Pro XL, installed as a PWA from GitHub Pages (jeuron-hue/retouch, public). Private working tool, not a portfolio piece. Most edits are photos of people. The 4:5 and 1080 presets are just handy sizes; Gary does not post to Instagram.
 
 ## Hard rule: photos never leave the phone
 - All image processing runs on the device, in the browser. No uploads, no cloud APIs, no analytics, no telemetry.
@@ -24,9 +24,14 @@ retouch is Gary's personal photo editor for his Pixel 9 Pro XL, installed as a P
 - Record the pinned version of every vendored library in the file header build notes. Never upgrade one silently.
 
 ## Design
-- Lab Book design system. Reference implementation: E:\Homerig\Git\reflux\reflux.html. Spec: https://claude.ai/artifact/9Gxm7gcSPntP3pqxrDJxnj
-- Self-host the Lab Book fonts in vendor/ (offline requirement).
-- Phone first: portrait, one-handed. Tool bar at the bottom, controls in a bottom sheet, image fills the rest. Pinch to zoom, drag to pan. Tap targets at least 44 px. A before/after hold button on every tool.
+retouch has its own darkroom style. It does not use Lab Book (Gary's general design system); this section is the reference instead. Approved from a mockup on 24/10/26.
+- Dark only. A neutral near-black surround so colour and skin tones are judged fairly; the photo is the brightest thing on screen. No light theme.
+- Tokens (CSS custom properties at the top of retouch.html): stage #0B0B0B, chrome #141312, raised #1D1B19, pressed #2E2B27, lines #2C2925 / #3A3631, ink #EEE8DE, muted #A59E92, faint #8A8377. One accent, the amber safelight #F2A33A (text on it #1B1205). Pass #7DBE8A, watch #E0A84A, fail #E57360. The cut-out brush veil is darkroom red; the skin veil stays blue.
+- Type: Barlow Semi Condensed 400/600 for labels and buttons (labels in spaced capitals), IBM Plex Mono 400/500 for numbers and edit codes, vendored in vendor/fonts/. The Text tool's own fonts are separate.
+- Motifs: film-edge edit codes in amber mono (RT-003 ▸ ...), sprocket holes along the tool bar and the empty screen, crop-mark corners on the empty screen and the icon.
+- Phone first: portrait, one-handed. Tool bar at the bottom (icon and word), image fills the rest. Pinch to zoom, drag to pan. Tap targets at least 44 px.
+- Uncluttered sheets: header row is cancel (✕), title, hold-before (half circle) and apply (amber ✓); no footer buttons. Status lines go in the thin strip that replaces the top bar while a tool is open. How-to text is a short caption on the photo, shown only when it applies. Figures sit in a row of cells, not a table. Text settings are split into Font, Colour and Style tabs.
+- Self-host every font in vendor/ (offline requirement).
 
 ## v1 features
 1. Open: JPEG, PNG, WebP, plus anything else Chrome decodes (AVIF). If decoding fails (e.g. some HEIC), say so plainly. No RAW.
@@ -52,6 +57,7 @@ Phase 4: skin smoothing.
 Phase 5: spot eraser.
 Gate at the end of each phase: each phase is built on its own branch (phase-1, phase-2, ...) and pushed to GitHub with all suites green. Gary reviews and merges to main, GitHub Pages deploys, Gary tests on the Pixel at jeuron-hue.github.io/retouch and confirms before the next phase starts. Nothing reaches main with a failing suite. No partial builds.
 Builds may run in cloud sessions (claude.ai/code) or locally on the rig; both follow the same gate.
+After Phase 5: the darkroom UI redesign (v0.6.0, 24/10/26). Gary then uses retouch day to day for a few months before deciding whether it becomes the final 1.0 release; fixes in that period follow the same gate.
 
 ## Testing
 - retouch_checks.cjs (static): CSP present, no external origins anywhere in the source, no CDN URLs, required files present, vendored versions recorded.

@@ -15,7 +15,7 @@
 // in retouch.html (retouch_checks.cjs fails if they differ). A new version makes
 // the browser install a fresh worker, and the app shows "Update available".
 
-const CACHE_VERSION = '0.5.2';
+const CACHE_VERSION = '0.6.0';
 const CACHE = 'retouch-v' + CACHE_VERSION;
 const SHARE_CACHE = 'retouch-share';
 const SHARE_KEY = 'shared-image';
@@ -32,10 +32,11 @@ const SHELL = [
   'icons/icon-512.png',
   'icons/icon-maskable-512.png',
   'icons/apple-touch-180.png',
-  'vendor/fonts/source-sans-3-latin-400-normal.woff2',
+  'vendor/fonts/barlow-semi-condensed-latin-400-normal.woff2',
+  'vendor/fonts/barlow-semi-condensed-latin-600-normal.woff2',
+  'vendor/fonts/ibm-plex-mono-latin-400-normal.woff2',
+  'vendor/fonts/ibm-plex-mono-latin-500-normal.woff2',
   'vendor/fonts/source-sans-3-latin-600-normal.woff2',
-  'vendor/fonts/jetbrains-mono-latin-400-normal.woff2',
-  'vendor/fonts/jetbrains-mono-latin-500-normal.woff2',
   'vendor/fonts/playfair-display-latin-700-normal.woff2',
   'vendor/fonts/bebas-neue-latin-400-normal.woff2',
   'vendor/fonts/caveat-latin-600-normal.woff2',
