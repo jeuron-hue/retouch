@@ -2,24 +2,27 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.5.2 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.6.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
-  vendor/fonts/source-sans-3-latin-400-normal.woff2    @fontsource/source-sans-3 5.3.0 (font v19), SIL OFL 1.1
+  vendor/fonts/barlow-semi-condensed-latin-400-normal.woff2  @fontsource/barlow-semi-condensed 5.3.0 (font v16), SIL OFL 1.1
+  vendor/fonts/barlow-semi-condensed-latin-600-normal.woff2  @fontsource/barlow-semi-condensed 5.3.0 (font v16), SIL OFL 1.1
+  vendor/fonts/ibm-plex-mono-latin-400-normal.woff2    @fontsource/ibm-plex-mono 5.3.0 (font v20), SIL OFL 1.1
+  vendor/fonts/ibm-plex-mono-latin-500-normal.woff2    @fontsource/ibm-plex-mono 5.3.0 (font v20), SIL OFL 1.1
   vendor/fonts/source-sans-3-latin-600-normal.woff2    @fontsource/source-sans-3 5.3.0 (font v19), SIL OFL 1.1
-  vendor/fonts/jetbrains-mono-latin-400-normal.woff2   @fontsource/jetbrains-mono 5.3.0 (font v24), SIL OFL 1.1
-  vendor/fonts/jetbrains-mono-latin-500-normal.woff2   @fontsource/jetbrains-mono 5.3.0 (font v24), SIL OFL 1.1
   vendor/fonts/playfair-display-latin-700-normal.woff2 @fontsource/playfair-display 5.3.0 (font v40), SIL OFL 1.1
   vendor/fonts/bebas-neue-latin-400-normal.woff2       @fontsource/bebas-neue 5.3.0 (font v16), SIL OFL 1.1
   vendor/fonts/caveat-latin-600-normal.woff2           @fontsource/caveat 5.3.0 (font v23), SIL OFL 1.1
+  vendor/fonts/OFL-barlow-semi-condensed.txt           licence text from @fontsource/barlow-semi-condensed 5.3.0
+  vendor/fonts/OFL-ibm-plex-mono.txt                   licence text from @fontsource/ibm-plex-mono 5.3.0
   vendor/fonts/OFL-source-sans-3.txt                   licence text from @fontsource/source-sans-3 5.3.0
-  vendor/fonts/OFL-jetbrains-mono.txt                  licence text from @fontsource/jetbrains-mono 5.3.0
   vendor/fonts/OFL-playfair-display.txt                licence text from @fontsource/playfair-display 5.3.0
   vendor/fonts/OFL-bebas-neue.txt                      licence text from @fontsource/bebas-neue 5.3.0
   vendor/fonts/OFL-caveat.txt                          licence text from @fontsource/caveat 5.3.0
-  Text tool fonts: Source Sans 3 600 (shared with the UI), Playfair Display 700,
-  Bebas Neue 400, Caveat 600. Latin subset only.
+  Interface fonts: Barlow Semi Condensed 400 and 600 (labels, buttons), IBM Plex Mono
+  400 and 500 (numbers, edit codes). Text tool fonts: Source Sans 3 600, Playfair
+  Display 700, Bebas Neue 400, Caveat 600. Latin subset only.
   vendor/mediapipe/vision_bundle.js            @mediapipe/tasks-vision 0.10.35 (27/04/26), vision_bundle.mjs, Apache-2.0, sha256 55d7ab624fbb70dcc5adc4ae6d7ea9cfcb569139d3dbfbf2b1deafcb966bc0fe
   vendor/mediapipe/vision_wasm_internal.js     @mediapipe/tasks-vision 0.10.35, wasm/, Apache-2.0, sha256 e7fd9858e8e8f221d9b96eddc11f8e077f263e0b7bbd79d3cbe882b134274f8c
   vendor/mediapipe/vision_wasm_internal.wasm   @mediapipe/tasks-vision 0.10.35, wasm/, Apache-2.0, sha256 6a5c64584c2ab61c763b6e204afbdbc7ce1caf7f5216187322bca8df94f646bc
@@ -35,8 +38,12 @@ change the version here in the same commit as the file.
 How the file is laid out:
   1. Content-Security-Policy: the browser itself refuses any network call to
      another origin (connect-src 'self'), so photos cannot leave the phone.
-  2. CSS: Lab Book tokens, then layout (top bar, stage, bottom sheet, tool bar).
+  2. CSS: darkroom tokens (dark only: a neutral near-black surround so colour
+     and skin tones are judged fairly, one amber safelight accent), then layout:
+     top bar, tool strip, stage, bottom sheet, tool bar, empty state.
   3. HTML: the stage canvas, the sheets for each tool, the tool bar.
+     While a tool is open, body[data-tool] swaps the top bar for a thin strip
+     that carries the edit code and the tool's status line.
   4. Script:
      a. Constants (working-size ceiling, history depth, ratios).
      b. CORE: pure image functions (geometry, crop, resize, add canvas,
@@ -50,160 +57,221 @@ How the file is laid out:
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<meta name="theme-color" content="#1F6F8B">
-<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#141312">
+<meta name="color-scheme" content="dark">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-180.png">
 <title>retouch</title>
 <style>
-@font-face{font-family:"Source Sans 3";font-style:normal;font-weight:400;font-display:swap;src:url(vendor/fonts/source-sans-3-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"Barlow Semi Condensed";font-style:normal;font-weight:400;font-display:swap;src:url(vendor/fonts/barlow-semi-condensed-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"Barlow Semi Condensed";font-style:normal;font-weight:600;font-display:swap;src:url(vendor/fonts/barlow-semi-condensed-latin-600-normal.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:400;font-display:swap;src:url(vendor/fonts/ibm-plex-mono-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:500;font-display:swap;src:url(vendor/fonts/ibm-plex-mono-latin-500-normal.woff2) format("woff2")}
 @font-face{font-family:"Source Sans 3";font-style:normal;font-weight:600;font-display:swap;src:url(vendor/fonts/source-sans-3-latin-600-normal.woff2) format("woff2")}
-@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:400;font-display:swap;src:url(vendor/fonts/jetbrains-mono-latin-400-normal.woff2) format("woff2")}
-@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:500;font-display:swap;src:url(vendor/fonts/jetbrains-mono-latin-500-normal.woff2) format("woff2")}
 @font-face{font-family:"Playfair Display";font-style:normal;font-weight:700;font-display:swap;src:url(vendor/fonts/playfair-display-latin-700-normal.woff2) format("woff2")}
 @font-face{font-family:"Bebas Neue";font-style:normal;font-weight:400;font-display:swap;src:url(vendor/fonts/bebas-neue-latin-400-normal.woff2) format("woff2")}
 @font-face{font-family:"Caveat";font-style:normal;font-weight:600;font-display:swap;src:url(vendor/fonts/caveat-latin-600-normal.woff2) format("woff2")}
 
+/* Darkroom tokens. Dark only: the photo is the brightest thing on screen. */
 :root{
-  --paper:#F7F8F6; --paper-raised:#FFFFFF; --line:#DDE3E6; --line-strong:#7A8A94;
-  --ink:#1E2A33; --ink-muted:#5B6B75;
-  --accent:#1F6F8B; --accent-soft:#E3EEF2; --on-accent:#FFFFFF;
-  --accent-2:#7B4B94; --accent-2-soft:#F1E9F5;
-  --accent-3:#A0522D; --accent-3-soft:#F6E7DE;
-  --pass:#2E7D4F; --watch:#B7791F; --fail:#B23A3A;
-  --font-sans:"Source Sans 3",system-ui,sans-serif;
-  --font-mono:"JetBrains Mono",ui-monospace,monospace;
-  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-6:24px; --space-10:40px;
-  --radius-sm:4px; --radius-md:6px;
-  --check-a:#FFFFFF; --check-b:#DDE3E6;
+  color-scheme:dark;
+  --stage:#0B0B0B;        /* surround behind the photo */
+  --chrome:#141312;       /* bars and sheets */
+  --raised:#1D1B19;       /* chips, segments, tiles */
+  --raised-2:#2E2B27;     /* the pressed segment */
+  --line:#2C2925; --line-strong:#3A3631;
+  --ink:#EEE8DE; --ink-2:#D9D2C6; --muted:#A59E92; --faint:#8A8377;
+  --amber:#F2A33A;        /* the safelight: the one accent */
+  --amber-deep:#2A1F10; --on-amber:#1B1205;
+  --pass:#7DBE8A; --watch:#E0A84A; --fail:#E57360;
+  --font-ui:"Barlow Semi Condensed",system-ui,sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,monospace;
+  --check-a:#1D1B19; --check-b:#2C2925;
   --tap:44px;
-}
-@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
-  --paper:#182026; --paper-raised:#222C33; --line:#34414A; --line-strong:#6E7D87;
-  --ink:#E8EDF0; --ink-muted:#9BAAB3;
-  --accent:#66BAD6; --accent-soft:#1E3A45; --on-accent:#0E1B1F;
-  --accent-2:#C49AD8; --accent-2-soft:#36283F;
-  --accent-3:#E09A72; --accent-3-soft:#3F2A1F;
-  --pass:#5BBF85; --watch:#E0A84A; --fail:#E57373;
-  --check-a:#222C33; --check-b:#34414A;
-}}
-:root[data-theme="dark"]{
-  --paper:#182026; --paper-raised:#222C33; --line:#34414A; --line-strong:#6E7D87;
-  --ink:#E8EDF0; --ink-muted:#9BAAB3;
-  --accent:#66BAD6; --accent-soft:#1E3A45; --on-accent:#0E1B1F;
-  --accent-2:#C49AD8; --accent-2-soft:#36283F;
-  --accent-3:#E09A72; --accent-3-soft:#3F2A1F;
-  --pass:#5BBF85; --watch:#E0A84A; --fail:#E57373;
-  --check-a:#222C33; --check-b:#34414A;
 }
 
 *{box-sizing:border-box}
-html,body{margin:0;height:100%;background:var(--paper);color:var(--ink)}
+html,body{margin:0;height:100%;background:var(--stage);color:var(--ink)}
 body{
-  font:15px/22px var(--font-sans);
+  font:15px/20px var(--font-ui);
   display:flex;flex-direction:column;height:100dvh;overflow:hidden;
   overscroll-behavior:none;-webkit-tap-highlight-color:transparent;
   user-select:none;-webkit-user-select:none;
 }
 .mono,input[type=number]{font-family:var(--font-mono);font-variant-ligatures:none;font-variant-numeric:tabular-nums}
-.muted{color:var(--ink-muted)}
-.small{font-size:13px;line-height:18px;color:var(--ink-muted)}
+.edge{font-family:var(--font-mono);font-variant-ligatures:none;font-variant-numeric:tabular-nums;font-size:11px;line-height:16px;letter-spacing:.06em;text-transform:uppercase;color:var(--amber)}
+.muted{color:var(--muted)}
+.small{font-size:13px;line-height:18px;color:var(--muted)}
 [hidden]{display:none !important}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 
 /* Buttons. Every tap target is at least 44 px in both directions. */
 button{font:inherit;color:inherit;cursor:pointer;min-height:var(--tap);min-width:var(--tap);touch-action:manipulation}
-button:disabled{cursor:default;opacity:.4}
-.btn{border:1px solid var(--line-strong);background:var(--paper-raised);color:var(--ink);border-radius:var(--radius-sm);padding:0 var(--space-4);font-weight:600}
-.btn-primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
-.icon-btn{border:1px solid transparent;background:transparent;border-radius:var(--radius-sm);display:inline-flex;align-items:center;justify-content:center;padding:0}
-.icon-btn svg,.tool svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
-.chip{border:1px solid var(--line-strong);background:transparent;color:var(--ink);border-radius:var(--radius-sm);padding:0 var(--space-3);font-family:var(--font-mono);font-variant-ligatures:none;font-size:13.5px;white-space:nowrap;flex:0 0 auto}
-.chip.word{font-family:var(--font-sans);font-size:15px}
-.chip[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);color:var(--ink)}
+button:disabled{cursor:default;opacity:.35}
+.btn{border:1px solid var(--line-strong);background:transparent;color:var(--ink);border-radius:4px;padding:0 16px;font-size:13px;font-weight:600;letter-spacing:.14em;text-transform:uppercase}
+.btn-primary{background:var(--amber);border-color:var(--amber);color:var(--on-amber)}
+.icon-btn{border:0;background:transparent;color:var(--ink);border-radius:8px;display:inline-flex;align-items:center;justify-content:center;padding:0;flex:0 0 auto}
+.icon-btn svg,.tool svg,.tile svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.icon-btn.boxed{background:var(--raised);border-radius:6px;width:48px;height:48px}
+.chip{height:var(--tap);border:1px solid var(--line);background:var(--raised);color:var(--ink-2);border-radius:4px;padding:0 14px;font-family:var(--font-mono);font-variant-ligatures:none;font-size:13px;white-space:nowrap;flex:0 0 auto}
+.chip.word{font-family:var(--font-ui);font-size:12px;font-weight:600;letter-spacing:.12em;text-transform:uppercase}
+.chip[aria-pressed="true"]{border-color:var(--amber);color:var(--amber);background:var(--amber-deep)}
 
-/* Top bar */
-.topbar{display:flex;align-items:center;gap:var(--space-1);padding:var(--space-1) var(--space-2);padding-top:max(var(--space-1),env(safe-area-inset-top));background:var(--paper-raised);border-bottom:1px solid var(--line);flex:0 0 auto}
-.app-name{font-weight:600;font-size:18px;line-height:24px;padding:0 var(--space-2) 0 var(--space-1)}
-.topbar .dims{font-size:12px;color:var(--ink-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.spacer{flex:1}
+/* Segmented control: one choice from a few. */
+.seg{display:flex;gap:2px;padding:2px;background:var(--raised);border-radius:6px;min-width:0}
+.seg > button{flex:1;min-width:0;height:var(--tap);border:0;border-radius:4px;background:transparent;color:var(--muted);padding:0 6px;font-size:12px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center}
+.seg.mono > button{font-family:var(--font-mono);font-size:13px;letter-spacing:.06em;text-transform:none;font-weight:400}
+.seg > button[aria-pressed="true"]{background:var(--raised-2);color:var(--amber)}
+.seg svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}
+
+/* Top bar (main view) */
+.topbar{display:flex;align-items:center;gap:2px;flex:0 0 auto;min-height:64px;padding:0 6px;padding-top:env(safe-area-inset-top);background:var(--chrome);border-bottom:1px solid var(--line)}
+.topbar .meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;padding-left:4px}
+.topbar .meta span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#dims{color:var(--muted)}
+#btn-export{margin-left:6px}
+
+/* Tool strip: replaces the top bar while a tool is open. */
+.strip{display:none;flex:0 0 auto;min-height:34px;align-items:center;flex-wrap:wrap;gap:0 12px;padding:4px 16px;padding-top:max(4px,env(safe-area-inset-top));border-bottom:1px solid var(--raised)}
+.strip .status{margin-left:auto;min-width:0;text-align:right;color:var(--muted)}
+.strip [data-for]{display:none}
+body[data-tool] .topbar{display:none}
+body[data-tool] .strip{display:flex}
+body[data-tool="crop"] .strip [data-for="crop"],body[data-tool="pad"] .strip [data-for="pad"],
+body[data-tool="bg"] .strip [data-for="bg"],body[data-tool="skin"] .strip [data-for="skin"],
+body[data-tool="spot"] .strip [data-for="spot"]{display:inline}
 
 /* Stage: the photo fills everything between the bars. */
-#stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;touch-action:none}
+#stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;touch-action:none;background:var(--stage)}
 #view{position:absolute;inset:0;width:100%;height:100%;display:block}
-.compare-main{position:absolute;right:var(--space-3);bottom:var(--space-3)}
-.busy{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius-md);padding:var(--space-2) var(--space-4);font-family:var(--font-mono);font-size:13.5px}
+.hold-fab{position:absolute;right:14px;bottom:14px;width:52px;height:52px;border-radius:50%;border:1px solid var(--line-strong);background:rgba(20,19,18,.86);color:var(--ink);display:flex;align-items:center;justify-content:center;padding:0;touch-action:none;z-index:3}
+.hold svg,.hold-fab svg{width:24px;height:24px}
+.hold svg .ring,.hold-fab svg .ring{fill:none;stroke:currentColor;stroke-width:1.5}
+.hold svg .half,.hold-fab svg .half{fill:currentColor}
+.hold{touch-action:none}
+.hold[data-active="true"],.hold-fab[data-active="true"]{color:var(--amber);border-color:var(--amber)}
+.busy{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--chrome);border:1px solid var(--line);border-radius:4px;padding:8px 16px;font-family:var(--font-mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--amber)}
+/* Short how-to captions on the photo; they never catch a touch. */
+.hint{position:absolute;left:14px;bottom:14px;max-width:calc(100% - 96px);padding:8px 10px;border-radius:4px;background:rgba(20,19,18,.86);color:var(--ink-2);font-size:11px;line-height:15px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;pointer-events:none;display:none;z-index:2}
+body[data-tool="pad"] .hint[data-for="pad"],body[data-tool="spot"] .hint[data-for="spot"],
+body[data-tool="bg"][data-brush] .hint[data-for="bg"],body[data-tool="skin"][data-brush] .hint[data-for="skin"]{display:block}
 
 /* Notices sit over the top of the stage. */
-#notices{position:absolute;left:var(--space-2);right:var(--space-2);top:var(--space-2);display:flex;flex-direction:column;gap:var(--space-2);z-index:5;pointer-events:none}
-.notice{pointer-events:auto;display:flex;align-items:center;gap:var(--space-2);background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius-md);padding:0 0 0 var(--space-3);font-size:13px;line-height:18px}
-.notice .text{flex:1;padding:var(--space-2) 0}
-.notice .word{font-weight:600}
+#notices{position:absolute;left:8px;right:8px;top:8px;display:flex;flex-direction:column;gap:8px;z-index:5;pointer-events:none}
+.notice{pointer-events:auto;display:flex;align-items:center;gap:8px;background:var(--chrome);border:1px solid var(--line-strong);border-radius:4px;padding:0 0 0 12px;font-size:14px;line-height:19px;color:var(--ink-2)}
+.notice .text{flex:1;padding:10px 0}
+.notice .word{font-weight:600;letter-spacing:.12em;text-transform:uppercase;font-size:12px}
 .notice.pass .word{color:var(--pass)} .notice.watch .word{color:var(--watch)} .notice.fail .word{color:var(--fail)}
-.notice.info{background:var(--accent-soft);border-color:var(--accent)}
-.notice .close{border:0;background:transparent;color:var(--ink-muted);font-size:20px}
+.notice.info{border-color:#5A4422}
+.notice .btn-primary{min-height:36px;margin:4px 0}
+.notice .close{border:0;background:transparent;color:var(--muted);font-size:22px}
 
-/* Empty state: the one title block on graph paper. */
-.title-block{position:absolute;inset:var(--space-4);margin:auto;max-width:420px;height:fit-content;
-  background-color:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius-md);padding:var(--space-6);
-  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:12px 12px}
-.title-block h1{font-size:22px;line-height:28px;font-weight:600;margin:var(--space-1) 0 var(--space-2)}
-.title-block p{margin:0 0 var(--space-4)}
-.title-block .btn-primary{width:100%;min-height:52px;font-size:16px;margin-bottom:var(--space-3)}
-.title-block .btn{width:100%;margin-bottom:var(--space-3)}
-.entry-code{font-family:var(--font-mono);font-variant-ligatures:none;font-size:11px;line-height:16px;color:var(--accent);letter-spacing:.02em}
+/* Empty state: film leader, frame marks, one amber button. */
+.empty{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--stage);z-index:4}
+.band{background:var(--chrome);padding:12px 16px;display:flex;flex-direction:column;gap:10px}
+.band.top{padding-top:max(14px,env(safe-area-inset-top))}
+.band.bottom{padding-bottom:max(16px,env(safe-area-inset-bottom))}
+.band .line{display:flex;justify-content:space-between;gap:12px}
+.sprockets{height:10px;margin:0 -10px;background-image:repeating-linear-gradient(90deg,transparent 0 7px,var(--stage) 7px 16px);background-size:100% 5px;background-position:center;background-repeat:no-repeat}
+.empty-body{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;padding:0 32px;min-height:0}
+.marks{position:relative;width:248px;max-width:100%;aspect-ratio:4/5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;flex:0 1 auto;max-height:44dvh}
+.marks i{position:absolute;width:26px;height:26px;border:0 solid var(--ink)}
+.marks i:nth-child(1){top:0;left:0;border-top-width:2px;border-left-width:2px}
+.marks i:nth-child(2){top:0;right:0;border-top-width:2px;border-right-width:2px}
+.marks i:nth-child(3){bottom:0;left:0;border-bottom-width:2px;border-left-width:2px}
+.marks i:nth-child(4){bottom:0;right:0;border-bottom-width:2px;border-right-width:2px}
+.marks h1{margin:0;font-size:44px;line-height:48px;font-weight:600;letter-spacing:.01em}
+.marks p{margin:0;max-width:190px;text-align:center;color:var(--muted)}
+.empty-actions{width:100%;max-width:380px;display:flex;flex-direction:column;gap:12px}
+.empty-actions .btn-primary{min-height:56px;font-size:15px;letter-spacing:.16em;display:flex;align-items:center;justify-content:center;gap:10px}
+.empty-actions .btn-primary svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.empty-actions .btn{min-height:48px}
+.empty-actions p{margin:4px 0 0;text-align:center;font-size:14px;color:var(--muted)}
+body[data-empty] .topbar,body[data-empty] .toolbar{display:none}
 
-/* Bottom: tool bar, and the sheet that replaces it while a tool is open. */
-.toolbar{display:flex;flex:0 0 auto;background:var(--paper-raised);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
-.tool{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:60px;border:0;background:transparent;color:var(--ink);font-size:13px;line-height:18px}
-.sheet{flex:0 0 auto;background:var(--paper-raised);border-top:1px solid var(--line);padding:var(--space-3) var(--space-3) max(var(--space-3),env(safe-area-inset-bottom));max-height:52dvh;overflow-y:auto}
-.sheet-head{display:flex;align-items:flex-start;gap:var(--space-2);margin-bottom:var(--space-2)}
-.sheet-head .grow{flex:1;min-width:0}
-.sheet-head h2{font-size:18px;line-height:24px;font-weight:600;margin:0}
-.hold{font-weight:400;padding:0 var(--space-3);touch-action:none}
-.hold[data-active="true"]{background:var(--accent-soft);border-color:var(--accent)}
-.row{display:flex;align-items:center;gap:var(--space-2);margin:var(--space-2) 0}
-.row label,.lbl{font-size:13px;color:var(--ink-muted);min-width:64px}
-.scroller{display:flex;gap:var(--space-2);overflow-x:auto;padding-bottom:2px;scrollbar-width:none;touch-action:pan-x}
+/* Tool bar: film edge on top, seven tools. */
+.toolbar{flex:0 0 auto;background:var(--chrome);border-top:1px solid var(--line);padding:0 4px max(8px,env(safe-area-inset-bottom))}
+.toolbar .sprockets{margin:0 2px;height:12px}
+.toolbar .tools{display:flex}
+.tool{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;min-height:62px;border:0;background:transparent;color:var(--ink-2);padding:0;font-size:10.5px;line-height:12px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;white-space:nowrap}
+
+/* Bottom sheet: header row with cancel, title, before and apply. */
+.sheet{flex:0 0 auto;background:var(--chrome);border-top:1px solid var(--line);padding:0 16px max(16px,env(safe-area-inset-bottom));max-height:56dvh;overflow-y:auto;overscroll-behavior:contain}
+.sheet-panel{display:flex;flex-direction:column;gap:12px}
+.sheet-head{position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:0;min-height:56px;margin:0 -6px;background:var(--chrome)}
+.sheet-head h2{flex:1;min-width:0;margin:0;text-align:center;font-size:14px;line-height:20px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sheet-head .gap{width:var(--tap);flex:0 0 auto}
+.apply{width:var(--tap);height:var(--tap);border-radius:50%;border:0;background:var(--amber);color:var(--on-amber);display:inline-flex;align-items:center;justify-content:center;padding:0;flex:0 0 auto}
+.apply svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.row{display:flex;align-items:center;gap:12px;min-height:var(--tap)}
+.row > label,.lbl{flex:0 0 68px;font-size:12px;line-height:16px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.scroller{display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;touch-action:pan-x;margin-right:-16px;padding-right:16px}
 .scroller::-webkit-scrollbar{display:none}
-input[type=range]{flex:1;min-width:0;height:var(--tap);accent-color:var(--accent);margin:0;touch-action:pan-y}
-input[type=number]{width:96px;height:var(--tap);border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink);padding:0 var(--space-2);font-size:15px;text-align:right}
-input[type=color]{width:var(--tap);height:var(--tap);border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:transparent;padding:2px}
-.readout{font-family:var(--font-mono);font-variant-ligatures:none;font-variant-numeric:tabular-nums;font-size:13.5px;min-width:64px;text-align:right}
-.key{color:var(--accent);font-weight:500}
-.swatch{width:var(--tap);height:var(--tap);border:1px solid var(--line-strong);border-radius:var(--radius-sm);padding:0}
-.swatch[aria-pressed="true"]{outline:2px solid var(--accent);outline-offset:2px}
-.sheet-foot{display:flex;gap:var(--space-2);margin-top:var(--space-3)}
-.sheet-foot .btn{flex:1}
-.note{font-size:13px;line-height:18px;background:var(--accent-2-soft);border:1px solid var(--accent-2);border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3);margin:var(--space-2) 0}
-table.lb{width:100%;border-collapse:collapse;font-size:13px;margin:var(--space-2) 0}
-table.lb td{padding:var(--space-2);border-bottom:1px solid var(--line)}
-table.lb td.num{text-align:right;font-family:var(--font-mono);font-variant-ligatures:none;font-variant-numeric:tabular-nums;font-size:13.5px}
-.status-pass{color:var(--pass);font-weight:600} .status-fail{color:var(--fail);font-weight:600}
+.readout{font-family:var(--font-mono);font-variant-ligatures:none;font-variant-numeric:tabular-nums;font-size:13px;color:var(--amber);min-width:56px;text-align:right;white-space:nowrap}
+.warn{margin:0;font-size:13px;line-height:18px;color:var(--watch)}
+.warn:empty{display:none}
+
+/* Sliders: hairline track, amber thumb. */
+input[type=range]{-webkit-appearance:none;appearance:none;flex:1;min-width:0;height:var(--tap);background:transparent;margin:0;touch-action:pan-y}
+input[type=range]::-webkit-slider-runnable-track{height:2px;background:var(--line-strong);border-radius:1px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:20px;height:20px;margin-top:-9px;border-radius:50%;background:var(--amber);border:0;box-shadow:0 0 0 4px var(--chrome)}
+input[type=range]::-moz-range-track{height:2px;background:var(--line-strong)}
+input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:var(--amber);border:0}
+/* Straighten reads as a ruler with an amber needle. */
+#crop-straighten::-webkit-slider-runnable-track{height:14px;background:repeating-linear-gradient(90deg,#4A4640 0 1px,transparent 1px 9px);border-radius:0}
+#crop-straighten::-webkit-slider-thumb{width:3px;height:30px;margin-top:-8px;border-radius:1px;box-shadow:none}
+input[type=number]{width:96px;height:var(--tap);border:1px solid var(--line-strong);border-radius:4px;background:var(--stage);color:var(--ink);padding:0 10px;font-size:14px;text-align:right}
+/* The colour picker wears a spectrum ring so it never looks like a plain swatch. */
+input[type=color]{width:var(--tap);height:var(--tap);border:0;border-radius:50%;background:conic-gradient(#E2556B,#F2C94C,#7DBE8A,#66BAD6,#C49AD8,#E2556B);padding:0;flex:0 0 auto;overflow:hidden}
+input[type=color]::-webkit-color-swatch-wrapper{padding:4px}
+input[type=color]::-webkit-color-swatch{border:0;border-radius:50%}
+.swatch{width:var(--tap);height:var(--tap);border:1px solid var(--line-strong);border-radius:50%;padding:0;flex:0 0 auto}
+.swatch[aria-pressed="true"]{box-shadow:0 0 0 2px var(--chrome),0 0 0 4px var(--amber)}
+.swatches{display:flex;gap:12px;align-items:center;padding:4px 2px}
+
+/* Tiles: one-tap actions with an icon and a word. */
+.tiles{display:flex;gap:8px}
+.tile{flex:1;min-width:0;min-height:60px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;border:0;border-radius:6px;background:var(--raised);color:var(--ink-2);padding:0;font-size:10.5px;line-height:12px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;white-space:nowrap}
+
+/* Readout cells: figures in a row instead of a table. */
+.cells{display:flex;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:4px;overflow:hidden}
+.cell{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;padding:10px 12px;background:var(--stage)}
+.cell .k{font-size:10.5px;line-height:12px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+.cell .v{font-family:var(--font-mono);font-variant-ligatures:none;font-variant-numeric:tabular-nums;font-size:12.5px;line-height:17px;color:var(--ink);overflow-wrap:anywhere}
+.cell .v.key{color:var(--amber)}
+.status-pass{color:var(--pass);font-weight:500} .status-fail{color:var(--fail);font-weight:500}
+.note{font-size:13px;line-height:18px;color:var(--ink-2);background:var(--amber-deep);border-radius:4px;padding:8px 12px;margin:0}
 
 /* Text sheet */
-textarea{flex:1;min-width:0;min-height:var(--tap);max-height:88px;resize:none;border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink);font:16px/22px var(--font-sans);padding:10px var(--space-2);user-select:text;-webkit-user-select:text}
-fieldset{border:0;margin:0;padding:0;min-width:0}
+textarea{flex:1;min-width:0;min-height:var(--tap);max-height:88px;resize:none;border:1px solid var(--line-strong);border-radius:4px;background:var(--stage);color:var(--ink);font:17px/22px var(--font-ui);padding:10px 12px;user-select:text;-webkit-user-select:text}
+textarea::placeholder{color:var(--faint)}
+fieldset{border:0;margin:0;padding:0;min-width:0;display:flex;flex-direction:column;gap:10px}
 fieldset:disabled{opacity:.4}
-.chip.font-sans{font-family:"Source Sans 3",sans-serif;font-weight:600;font-size:16px}
-.chip.font-serif{font-family:"Playfair Display",serif;font-weight:700;font-size:16px}
-.chip.font-bebas{font-family:"Bebas Neue",sans-serif;font-size:19px;letter-spacing:.02em}
-.chip.font-hand{font-family:"Caveat",cursive;font-weight:600;font-size:20px}
-.divider{flex:0 0 1px;align-self:stretch;background:var(--line)}
-.scroller .swatch,.scroller input[type=color]{flex:0 0 auto}
+.tabs{display:flex;border-bottom:1px solid var(--line)}
+.tabs button{flex:1;height:var(--tap);border:0;border-bottom:2px solid transparent;margin-bottom:-1px;background:transparent;color:var(--faint);padding:0;font-size:12px;font-weight:600;letter-spacing:.14em;text-transform:uppercase}
+.tabs button[aria-selected="true"]{color:var(--amber);border-bottom-color:var(--amber)}
+.tab-panel{display:flex;flex-direction:column;gap:10px;min-height:104px;justify-content:center}
+#text-fonts{display:flex;gap:8px}
+#text-fonts .chip{flex:1;min-width:0;height:48px;padding:0;color:var(--ink)}
+#text-fonts .chip[aria-pressed="true"]{color:var(--amber)}
+.chip.font-sans{font-family:"Source Sans 3",sans-serif;font-weight:600;font-size:18px}
+.chip.font-serif{font-family:"Playfair Display",serif;font-weight:700;font-size:18px}
+.chip.font-bebas{font-family:"Bebas Neue",sans-serif;font-size:22px;letter-spacing:.03em}
+.chip.font-hand{font-family:"Caveat",cursive;font-weight:600;font-size:23px}
 .sheet-panel.typing .text-more{display:none}
 </style>
 </head>
-<body>
+<body data-empty>
 
 <header class="topbar">
-  <span class="app-name">retouch</span>
-  <span class="dims mono" id="dims"></span>
-  <span class="spacer"></span>
   <button class="icon-btn" id="btn-open" aria-label="Open photo" title="Open photo">
     <svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="1"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-5 4 4 2.5-2.5L20 17"/></svg>
   </button>
+  <div class="meta">
+    <span class="edge" id="top-code"></span>
+    <span class="edge" id="dims"></span>
+  </div>
   <button class="icon-btn" id="btn-undo" aria-label="Undo" title="Undo" disabled>
     <svg viewBox="0 0 24 24"><path d="M9 7L5 11l4 4"/><path d="M5 11h9a5 5 0 0 1 0 10h-3"/></svg>
   </button>
@@ -213,21 +281,53 @@ fieldset:disabled{opacity:.4}
   <button class="btn btn-primary" id="btn-export" disabled>Export</button>
 </header>
 
+<div class="strip" id="strip">
+  <span class="edge" id="strip-code"></span>
+  <span class="edge status" id="crop-out" data-for="crop"></span>
+  <span class="edge status" id="pad-out" data-for="pad"></span>
+  <span class="edge status" id="bg-out" data-for="bg"></span>
+  <span class="edge status" id="skin-out" data-for="skin"></span>
+  <span class="edge status" id="spot-out" data-for="spot"></span>
+</div>
+
 <main id="stage">
   <canvas id="view" aria-label="Photo"></canvas>
   <div id="notices" aria-live="polite"></div>
 
-  <section class="title-block" id="empty">
-    <div class="entry-code" id="empty-code"></div>
-    <h1>retouch</h1>
-    <p>Edits stay on this phone. Nothing is uploaded.</p>
-    <button class="btn btn-primary" id="btn-open-empty">Open a photo</button>
-    <button class="btn" id="btn-install" hidden>Install app</button>
-    <p class="small">Or share a photo to retouch from Google Photos.</p>
-    <p class="small mono" id="version"></p>
+  <div class="hint" data-for="pad">Drag the photo to move it in the frame</div>
+  <div class="hint" data-for="bg">Red is cut away · 1 finger paints · 2 fingers move</div>
+  <div class="hint" data-for="skin">Blue is smoothed · 1 finger paints · 2 fingers move</div>
+  <div class="hint" data-for="spot">Tap or brush a spot · 2 fingers move · small spots only</div>
+
+  <section class="empty" id="empty">
+    <div class="band top">
+      <div class="line"><span class="edge">retouch ▸ <span id="empty-code"></span></span></div>
+      <div class="sprockets" aria-hidden="true"></div>
+    </div>
+    <div class="empty-body">
+      <div class="marks">
+        <i></i><i></i><i></i><i></i>
+        <svg width="64" height="64" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="22" fill="none" stroke="#F2A33A" stroke-width="2.5"/><path d="M32 10 A22 22 0 0 0 32 54 Z" fill="#F2A33A"/></svg>
+        <h1>retouch</h1>
+        <p>Edits stay on this phone. Nothing is uploaded.</p>
+      </div>
+      <div class="empty-actions">
+        <button class="btn btn-primary" id="btn-open-empty">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="1"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-5 4 4 2.5-2.5L20 17"/></svg>Open a photo
+        </button>
+        <button class="btn" id="btn-install" hidden>Install app</button>
+        <p>Or share a photo to retouch from Google Photos.</p>
+      </div>
+    </div>
+    <div class="band bottom">
+      <div class="sprockets" aria-hidden="true"></div>
+      <div class="line"><span class="edge muted" id="version"></span></div>
+    </div>
   </section>
 
-  <button class="btn hold compare-main" id="hold-main" data-hold hidden>Hold: original</button>
+  <button class="hold-fab" id="hold-main" data-hold aria-label="Hold to see the original" title="Hold to see the original" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg>
+  </button>
   <div class="busy" id="busy" hidden>Working</div>
 </main>
 
@@ -235,8 +335,11 @@ fieldset:disabled{opacity:.4}
 
   <div class="sheet-panel" data-tool="crop" hidden>
     <div class="sheet-head">
-      <div class="grow"><div class="entry-code" data-entry></div><h2>Crop and straighten</h2></div>
-      <button class="btn hold" data-hold>Hold: before</button>
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Crop &amp; straighten</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="scroller" id="crop-ratios" role="group" aria-label="Crop ratio"></div>
     <div class="row">
@@ -244,21 +347,21 @@ fieldset:disabled{opacity:.4}
       <input type="range" id="crop-straighten" min="-45" max="45" step="0.1" value="0">
       <span class="readout" id="crop-angle">0.0°</span>
     </div>
-    <div class="row">
-      <button class="btn" id="crop-rotate">Rotate 90°</button>
-      <button class="btn" id="crop-flip-h">Flip H</button>
-      <button class="btn" id="crop-flip-v">Flip V</button>
-      <span class="spacer"></span>
-      <button class="btn" id="crop-reset">Reset</button>
+    <div class="tiles">
+      <button class="tile" id="crop-rotate"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4h4"/></svg>Rotate 90°</button>
+      <button class="tile" id="crop-flip-h"><svg viewBox="0 0 24 24"><path d="M12 3v18"/><path d="M8 7L3 12l5 5V7z"/><path d="M16 7l5 5-5 5V7z"/></svg>Flip H</button>
+      <button class="tile" id="crop-flip-v"><svg viewBox="0 0 24 24"><path d="M3 12h18"/><path d="M7 8l5-5 5 5H7z"/><path d="M7 16l5 5 5-5H7z"/></svg>Flip V</button>
+      <button class="tile" id="crop-reset"><svg viewBox="0 0 24 24"><path d="M4 4v6h6"/><path d="M20 20v-6h-6"/><path d="M5.6 15A7.5 7.5 0 0 0 18.4 17M18.4 9A7.5 7.5 0 0 0 5.6 7"/></svg>Reset</button>
     </div>
-    <div class="small" id="crop-out"></div>
-    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
   </div>
 
   <div class="sheet-panel" data-tool="resize" hidden>
     <div class="sheet-head">
-      <div class="grow"><div class="entry-code" data-entry></div><h2>Resize</h2></div>
-      <button class="btn hold" data-hold>Hold: before</button>
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Resize</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="scroller" role="group" aria-label="Resize preset">
       <button class="chip word" id="resize-ig" aria-pressed="false">Instagram 1080 wide</button>
@@ -270,17 +373,21 @@ fieldset:disabled{opacity:.4}
       <label for="resize-long">Long edge</label>
       <input type="range" id="resize-slider" min="64" max="1000" step="1" aria-label="Long edge slider">
       <input type="number" id="resize-long" inputmode="numeric" min="16" step="1">
-      <span class="small">px</span>
     </div>
-    <table class="lb"><tr><td>Now</td><td class="num" id="resize-from"></td></tr><tr><td>After</td><td class="num key" id="resize-to"></td></tr></table>
-    <div class="small" id="resize-note"></div>
-    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
+    <div class="cells">
+      <div class="cell"><span class="k">Now</span><span class="v" id="resize-from"></span></div>
+      <div class="cell"><span class="k">After</span><span class="v key" id="resize-to"></span></div>
+    </div>
+    <p class="warn" id="resize-note"></p>
   </div>
 
   <div class="sheet-panel" data-tool="pad" hidden>
     <div class="sheet-head">
-      <div class="grow"><div class="entry-code" data-entry></div><h2>Add canvas</h2></div>
-      <button class="btn hold" data-hold>Hold: before</button>
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Add canvas</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="scroller" id="pad-ratios" role="group" aria-label="Frame ratio"></div>
     <div class="row">
@@ -288,15 +395,18 @@ fieldset:disabled{opacity:.4}
       <input type="range" id="pad-margin" min="0" max="25" step="0.5" value="0">
       <span class="readout" id="pad-margin-out">0 %</span>
     </div>
-    <div class="row scroller" role="group" aria-label="Fill">
-      <button class="chip word" data-fill="colour" aria-pressed="true">Colour</button>
-      <button class="chip word" data-fill="blur" aria-pressed="false">Blur</button>
-      <button class="chip word" data-fill="transparent" aria-pressed="false">Transparent</button>
+    <div class="row">
+      <div class="seg" role="group" aria-label="Fill" style="flex:1">
+        <button data-fill="colour" aria-pressed="true">Colour</button>
+        <button data-fill="blur" aria-pressed="false">Blur</button>
+        <button data-fill="transparent" aria-pressed="false">Transparent</button>
+      </div>
+      <button class="icon-btn boxed" id="pad-centre" aria-label="Centre the photo" title="Centre the photo"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1"/><path d="M12 8v8M8 12h8"/></svg></button>
     </div>
-    <div class="row" id="pad-colour-row">
+    <div class="swatches" id="pad-colour-row">
       <button class="swatch" data-colour="#FFFFFF" style="background:#FFFFFF" aria-label="White" aria-pressed="true"></button>
       <button class="swatch" data-colour="#000000" style="background:#000000" aria-label="Black" aria-pressed="false"></button>
-      <button class="swatch" data-colour="#F7F8F6" style="background:#F7F8F6" aria-label="Paper" aria-pressed="false"></button>
+      <button class="swatch" data-colour="#F7F8F6" style="background:#F7F8F6" aria-label="Off-white" aria-pressed="false"></button>
       <input type="color" id="pad-colour" value="#ffffff" aria-label="Pick colour">
     </div>
     <div class="row" id="pad-blur-row" hidden>
@@ -304,89 +414,104 @@ fieldset:disabled{opacity:.4}
       <input type="range" id="pad-blur" min="0" max="100" step="1" value="50">
       <span class="readout" id="pad-blur-out">50</span>
     </div>
-    <div class="row">
-      <span class="small grow" id="pad-out" style="flex:1"></span>
-      <button class="btn" id="pad-centre">Centre</button>
-    </div>
-    <div class="small">Drag the photo to move it inside the frame.</div>
-    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
   </div>
 
   <div class="sheet-panel" data-tool="text" hidden>
     <div class="sheet-head">
-      <div class="grow"><div class="entry-code" data-entry></div><h2>Text</h2></div>
-      <button class="btn hold" data-hold>Hold: before</button>
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Text</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
-    <div class="row">
+    <div class="row" style="gap:6px">
       <textarea id="text-input" rows="1" aria-label="Text" placeholder="Type here" spellcheck="true"></textarea>
-      <button class="btn" id="text-add">Add</button>
-      <button class="icon-btn" id="text-delete" aria-label="Delete text box" title="Delete text box">
+      <button class="icon-btn boxed" id="text-add" aria-label="Add text box" title="Add text box" style="color:var(--amber)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+      <button class="icon-btn" id="text-delete" aria-label="Delete text box" title="Delete text box" style="color:var(--muted)">
         <svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9 7V4.5h6V7"/><path d="M6.5 7l1 13h9l1-13"/></svg>
       </button>
     </div>
     <fieldset class="text-more" id="text-style">
-      <div class="scroller" id="text-fonts" role="group" aria-label="Font"></div>
-      <div class="row">
-        <label for="text-size">Size</label>
-        <input type="range" id="text-size" min="8" max="400" step="1" value="40">
-        <span class="readout" id="text-size-out"></span>
+      <div class="tabs" role="tablist" aria-label="Text settings">
+        <button role="tab" data-text-tab="font" aria-selected="true">Font</button>
+        <button role="tab" data-text-tab="colour" aria-selected="false">Colour</button>
+        <button role="tab" data-text-tab="style" aria-selected="false">Style</button>
       </div>
-      <div class="row scroller" role="group" aria-label="Colour">
-        <button class="chip word" data-target="fill" aria-pressed="true">Text</button>
-        <button class="chip word" data-target="outline" aria-pressed="false">Outline</button>
-        <span class="divider"></span>
-        <button class="swatch" data-tcolour="#FFFFFF" style="background:#FFFFFF" aria-label="White" aria-pressed="false"></button>
-        <button class="swatch" data-tcolour="#000000" style="background:#000000" aria-label="Black" aria-pressed="false"></button>
-        <button class="swatch" data-tcolour="#F2C94C" style="background:#F2C94C" aria-label="Yellow" aria-pressed="false"></button>
-        <button class="swatch" data-tcolour="#E2556B" style="background:#E2556B" aria-label="Pink" aria-pressed="false"></button>
-        <button class="swatch" data-tcolour="#1F6F8B" style="background:#1F6F8B" aria-label="Teal" aria-pressed="false"></button>
-        <input type="color" id="text-colour" value="#ffffff" aria-label="Pick colour">
+      <div class="tab-panel" data-text-panel="font" role="tabpanel">
+        <div id="text-fonts" role="group" aria-label="Font"></div>
+        <div class="row">
+          <label for="text-size">Size</label>
+          <input type="range" id="text-size" min="8" max="400" step="1" value="40">
+          <span class="readout" id="text-size-out"></span>
+        </div>
       </div>
-      <div class="row">
-        <label for="text-outline">Outline</label>
-        <input type="range" id="text-outline" min="0" max="20" step="1" value="0">
-        <span class="readout" id="text-outline-out">Off</span>
+      <div class="tab-panel" data-text-panel="colour" role="tabpanel" hidden>
+        <div class="seg" role="group" aria-label="Colour for">
+          <button data-target="fill" aria-pressed="true">Text</button>
+          <button data-target="outline" aria-pressed="false">Outline</button>
+        </div>
+        <div class="swatches" role="group" aria-label="Colour">
+          <button class="swatch" data-tcolour="#FFFFFF" style="background:#FFFFFF" aria-label="White" aria-pressed="false"></button>
+          <button class="swatch" data-tcolour="#000000" style="background:#000000" aria-label="Black" aria-pressed="false"></button>
+          <button class="swatch" data-tcolour="#F2C94C" style="background:#F2C94C" aria-label="Yellow" aria-pressed="false"></button>
+          <button class="swatch" data-tcolour="#E2556B" style="background:#E2556B" aria-label="Pink" aria-pressed="false"></button>
+          <button class="swatch" data-tcolour="#1F6F8B" style="background:#1F6F8B" aria-label="Teal" aria-pressed="false"></button>
+          <input type="color" id="text-colour" value="#ffffff" aria-label="Pick colour">
+        </div>
       </div>
-      <div class="row scroller" role="group" aria-label="Alignment and shadow">
-        <button class="chip word" data-align="left" aria-pressed="false">Left</button>
-        <button class="chip word" data-align="center" aria-pressed="true">Centre</button>
-        <button class="chip word" data-align="right" aria-pressed="false">Right</button>
-        <span class="divider"></span>
-        <button class="chip word" data-shadow="none" aria-pressed="false">No shadow</button>
-        <button class="chip word" data-shadow="soft" aria-pressed="true">Soft</button>
-        <button class="chip word" data-shadow="hard" aria-pressed="false">Hard</button>
+      <div class="tab-panel" data-text-panel="style" role="tabpanel" hidden>
+        <div class="row">
+          <label for="text-outline">Outline</label>
+          <input type="range" id="text-outline" min="0" max="20" step="1" value="0">
+          <span class="readout" id="text-outline-out">Off</span>
+        </div>
+        <div class="row" style="gap:8px">
+          <div class="seg" role="group" aria-label="Alignment" style="flex:0 0 132px">
+            <button data-align="left" aria-pressed="false" aria-label="Align left"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h14"/></svg></button>
+            <button data-align="center" aria-pressed="true" aria-label="Align centre"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M5 18h14"/></svg></button>
+            <button data-align="right" aria-pressed="false" aria-label="Align right"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M10 12h10M6 18h14"/></svg></button>
+          </div>
+          <div class="seg" role="group" aria-label="Shadow" style="flex:1">
+            <button data-shadow="none" aria-pressed="false">No shadow</button>
+            <button data-shadow="soft" aria-pressed="true">Soft</button>
+            <button data-shadow="hard" aria-pressed="false">Hard</button>
+          </div>
+        </div>
       </div>
     </fieldset>
-    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
   </div>
 
   <div class="sheet-panel" data-tool="bg" hidden>
     <div class="sheet-head">
-      <div class="grow"><div class="entry-code" data-entry></div><h2>Remove background</h2></div>
-      <button class="btn hold" data-hold>Hold: before</button>
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Cut out</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
-    <div class="row scroller" role="group" aria-label="Brush">
-      <button class="chip word" data-bgmode="view" aria-pressed="true">View</button>
-      <button class="chip word" data-bgmode="keep" aria-pressed="false">Keep</button>
-      <button class="chip word" data-bgmode="erase" aria-pressed="false">Erase</button>
-      <span class="divider"></span>
-      <button class="btn" id="bg-undo-stroke" disabled>Undo stroke</button>
+    <div class="row" style="gap:8px">
+      <div class="seg" role="group" aria-label="Brush" style="flex:1">
+        <button data-bgmode="view" aria-pressed="true">View</button>
+        <button data-bgmode="keep" aria-pressed="false">Keep</button>
+        <button data-bgmode="erase" aria-pressed="false">Erase</button>
+      </div>
+      <button class="icon-btn boxed" id="bg-undo-stroke" aria-label="Undo stroke" title="Undo stroke" disabled><svg viewBox="0 0 24 24"><path d="M9 7L5 11l4 4"/><path d="M5 11h9a5 5 0 0 1 0 10h-3"/></svg></button>
     </div>
-    <div id="bg-view-rows">
+    <div id="bg-view-rows" style="display:flex;flex-direction:column;gap:12px">
       <div class="row">
         <label for="bg-feather">Feather</label>
         <input type="range" id="bg-feather" min="0" max="40" step="1" value="3">
         <span class="readout" id="bg-feather-out"></span>
       </div>
-      <div class="row scroller" role="group" aria-label="Background">
-        <button class="chip word" data-bgfill="transparent" aria-pressed="true">Transparent</button>
-        <button class="chip word" data-bgfill="colour" aria-pressed="false">Colour</button>
-        <button class="chip word" data-bgfill="blur" aria-pressed="false">Blur</button>
+      <div class="seg" role="group" aria-label="Background">
+        <button data-bgfill="transparent" aria-pressed="true">Transparent</button>
+        <button data-bgfill="colour" aria-pressed="false">Colour</button>
+        <button data-bgfill="blur" aria-pressed="false">Blur</button>
       </div>
-      <div class="row" id="bg-colour-row" hidden>
+      <div class="swatches" id="bg-colour-row" hidden>
         <button class="swatch" data-bgcolour="#FFFFFF" style="background:#FFFFFF" aria-label="White" aria-pressed="true"></button>
         <button class="swatch" data-bgcolour="#000000" style="background:#000000" aria-label="Black" aria-pressed="false"></button>
-        <button class="swatch" data-bgcolour="#F7F8F6" style="background:#F7F8F6" aria-label="Paper" aria-pressed="false"></button>
+        <button class="swatch" data-bgcolour="#F7F8F6" style="background:#F7F8F6" aria-label="Off-white" aria-pressed="false"></button>
         <input type="color" id="bg-colour" value="#ffffff" aria-label="Pick colour">
       </div>
       <div class="row" id="bg-blur-row" hidden>
@@ -401,23 +526,24 @@ fieldset:disabled{opacity:.4}
         <input type="range" id="bg-brush" min="10" max="120" step="1" value="40">
         <span class="readout" id="bg-brush-out">40 px</span>
       </div>
-      <div class="small">Red shows what will be cut away. One finger paints; two fingers zoom and move.</div>
     </div>
-    <div class="small" id="bg-out"></div>
-    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
   </div>
 
   <div class="sheet-panel" data-tool="skin" hidden>
     <div class="sheet-head">
-      <div class="grow"><div class="entry-code" data-entry></div><h2>Smooth skin</h2></div>
-      <button class="btn hold" data-hold>Hold: before</button>
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Smooth skin</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
-    <div class="row scroller" role="group" aria-label="Brush">
-      <button class="chip word" data-skinmode="view" aria-pressed="true">View</button>
-      <button class="chip word" data-skinmode="keep" aria-pressed="false">Add</button>
-      <button class="chip word" data-skinmode="erase" aria-pressed="false">Remove</button>
-      <span class="divider"></span>
-      <button class="btn" id="skin-undo-stroke" disabled>Undo stroke</button>
+    <div class="row" style="gap:8px">
+      <div class="seg" role="group" aria-label="Brush" style="flex:1">
+        <button data-skinmode="view" aria-pressed="true">View</button>
+        <button data-skinmode="keep" aria-pressed="false">Add</button>
+        <button data-skinmode="erase" aria-pressed="false">Remove</button>
+      </div>
+      <button class="icon-btn boxed" id="skin-undo-stroke" aria-label="Undo stroke" title="Undo stroke" disabled><svg viewBox="0 0 24 24"><path d="M9 7L5 11l4 4"/><path d="M5 11h9a5 5 0 0 1 0 10h-3"/></svg></button>
     </div>
     <div id="skin-view-rows">
       <div class="row">
@@ -437,81 +563,81 @@ fieldset:disabled{opacity:.4}
         <input type="range" id="skin-brush" min="10" max="120" step="1" value="40">
         <span class="readout" id="skin-brush-out">40 px</span>
       </div>
-      <div class="small">Blue shows where skin will be smoothed. One finger paints; two fingers zoom and move.</div>
     </div>
-    <div class="small" id="skin-out"></div>
-    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
   </div>
 
   <div class="sheet-panel" data-tool="spot" hidden>
     <div class="sheet-head">
-      <div class="grow"><div class="entry-code" data-entry></div><h2>Spot eraser</h2></div>
-      <button class="btn hold" data-hold>Hold: before</button>
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Spot eraser</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see before" title="Hold to see before"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
     </div>
     <div class="row">
       <label for="spot-brush">Brush</label>
       <input type="range" id="spot-brush" min="10" max="80" step="1" value="30">
       <span class="readout" id="spot-brush-out">30 px</span>
+      <button class="icon-btn boxed" id="spot-undo-stroke" aria-label="Undo stroke" title="Undo stroke" disabled><svg viewBox="0 0 24 24"><path d="M9 7L5 11l4 4"/><path d="M5 11h9a5 5 0 0 1 0 10h-3"/></svg></button>
     </div>
-    <div class="row">
-      <span class="small" style="flex:1">Tap or brush over a spot; it is healed from skin nearby when you lift your finger. Two fingers zoom and move. Small spots only.</span>
-      <button class="btn" id="spot-undo-stroke" disabled>Undo stroke</button>
-    </div>
-    <div class="small" id="spot-out"></div>
-    <div class="sheet-foot"><button class="btn" data-cancel>Cancel</button><button class="btn btn-primary" data-apply>Apply</button></div>
   </div>
 
   <div class="sheet-panel" data-tool="export" hidden>
     <div class="sheet-head">
-      <div class="grow"><div class="entry-code" data-entry></div><h2>Export</h2></div>
-      <button class="btn hold" data-hold>Hold: original</button>
+      <button class="icon-btn" data-cancel aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Export</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold to see the original" title="Hold to see the original"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg></button>
+      <span class="gap"></span>
     </div>
-    <div class="scroller" role="group" aria-label="Format">
-      <button class="chip" data-format="jpeg" aria-pressed="true">JPEG</button>
-      <button class="chip" data-format="png" aria-pressed="false">PNG</button>
-      <button class="chip" data-format="webp" aria-pressed="false">WebP</button>
+    <div class="seg mono" role="group" aria-label="Format">
+      <button data-format="jpeg" aria-pressed="true">JPEG</button>
+      <button data-format="png" aria-pressed="false">PNG</button>
+      <button data-format="webp" aria-pressed="false">WebP</button>
     </div>
     <div class="row" id="export-quality-row">
       <label for="export-quality">Quality</label>
       <input type="range" id="export-quality" min="50" max="100" step="1" value="92">
       <span class="readout" id="export-quality-out">92</span>
     </div>
-    <div class="note" id="export-alpha-note" hidden>This image has transparent areas, so it exports as PNG.</div>
-    <table class="lb">
-      <tr><td>Size</td><td class="num" id="export-dims"></td></tr>
-      <tr><td>File</td><td class="num key" id="export-size"></td></tr>
-      <tr><td>Metadata</td><td class="num" id="export-meta"></td></tr>
-    </table>
-    <div class="sheet-foot">
-      <button class="btn" data-cancel>Close</button>
-      <button class="btn" id="export-download" disabled>Download</button>
-      <button class="btn btn-primary" id="export-share" disabled>Share</button>
+    <p class="note" id="export-alpha-note" hidden>This image has transparent areas, so it exports as PNG.</p>
+    <div class="cells">
+      <div class="cell"><span class="k">Size</span><span class="v" id="export-dims"></span></div>
+      <div class="cell"><span class="k">File</span><span class="v key" id="export-size"></span></div>
+      <div class="cell"><span class="k">Metadata</span><span class="v" id="export-meta"></span></div>
+    </div>
+    <div class="tiles" style="gap:10px">
+      <button class="btn" id="export-download" disabled style="flex:1;min-height:54px">Download</button>
+      <button class="btn btn-primary" id="export-share" disabled style="flex:1.3;min-height:54px">Share</button>
     </div>
   </div>
 </section>
 
 <nav class="toolbar" id="toolbar" aria-label="Tools">
-  <button class="tool" data-open-tool="crop" disabled>
-    <svg viewBox="0 0 24 24"><path d="M7 3v14h14"/><path d="M3 7h14v14"/></svg>Crop
-  </button>
-  <button class="tool" data-open-tool="resize" disabled>
-    <svg viewBox="0 0 24 24"><rect x="3.5" y="10.5" width="10" height="10" rx="1"/><path d="M13 4h7v7"/><path d="M20 4l-8 8"/></svg>Resize
-  </button>
-  <button class="tool" data-open-tool="pad" disabled>
-    <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1"/><rect x="7.5" y="8.5" width="9" height="7" rx="0.5"/></svg>Canvas
-  </button>
-  <button class="tool" data-open-tool="text" disabled>
-    <svg viewBox="0 0 24 24"><path d="M5 6.5V4.5h14v2"/><path d="M12 4.5v15"/><path d="M9 19.5h6"/></svg>Text
-  </button>
-  <button class="tool" data-open-tool="bg" disabled>
-    <svg viewBox="0 0 24 24"><circle cx="12" cy="9.5" r="3.5"/><path d="M5.5 20.5c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M3.5 7.5v-4h4M16.5 3.5h4v4M20.5 16.5v4M3.5 16.5v4"/></svg>Cut out
-  </button>
-  <button class="tool" data-open-tool="skin" disabled>
-    <svg viewBox="0 0 24 24"><circle cx="11" cy="13" r="7"/><path d="M8.5 15.5c1.4 1.1 3.6 1.1 5 0"/><path d="M19 2.5v5M16.5 5h5"/></svg>Skin
-  </button>
-  <button class="tool" data-open-tool="spot" disabled>
-    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/></svg>Spot
-  </button>
+  <div class="sprockets" aria-hidden="true"></div>
+  <div class="tools">
+    <button class="tool" data-open-tool="crop" disabled>
+      <svg viewBox="0 0 24 24"><path d="M7 3v14h14"/><path d="M3 7h14v14"/></svg>Crop
+    </button>
+    <button class="tool" data-open-tool="resize" disabled>
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="10.5" width="10" height="10" rx="1"/><path d="M13 4h7v7"/><path d="M20 4l-8 8"/></svg>Resize
+    </button>
+    <button class="tool" data-open-tool="pad" disabled>
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1"/><rect x="7.5" y="8.5" width="9" height="7" rx="0.5"/></svg>Canvas
+    </button>
+    <button class="tool" data-open-tool="text" disabled>
+      <svg viewBox="0 0 24 24"><path d="M5 6.5V4.5h14v2"/><path d="M12 4.5v15"/><path d="M9 19.5h6"/></svg>Text
+    </button>
+    <button class="tool" data-open-tool="bg" disabled>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="9.5" r="3.5"/><path d="M5.5 20.5c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M3.5 7.5v-4h4M16.5 3.5h4v4M20.5 16.5v4M3.5 16.5v4"/></svg>Cut out
+    </button>
+    <button class="tool" data-open-tool="skin" disabled>
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="13" r="7"/><path d="M8.5 15.5c1.4 1.1 3.6 1.1 5 0"/><path d="M19 2.5v5M16.5 5h5"/></svg>Skin
+    </button>
+    <button class="tool" data-open-tool="spot" disabled>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/></svg>Spot
+    </button>
+  </div>
 </nav>
 
 <input type="file" id="file" accept="image/*,.avif,.heic,.heif,.webp" hidden>
@@ -523,7 +649,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.5.2';
+const APP_VERSION = '0.6.0';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -976,7 +1102,7 @@ core.BG_GUIDE_PASSES = 2;       // the second pass starts from the first one's r
 core.BG_EDGE_LO = 0.2;          // the filtered mask is ramped from LO (cut) to HI (kept),
 core.BG_EDGE_HI = 0.8;          // which clears faint haze around the person
 core.BRUSH_SOFT = 0.35;         // the outer share of the brush radius that fades out
-core.BG_VEIL = 'rgba(214,40,90,0.5)';   // brush view: tint over what will be cut away
+core.BG_VEIL = 'rgba(206,34,24,0.46)';   // brush view: darkroom-red tint over what will be cut away
 core.STRIP_PIXELS = 1000000;    // full-size pixels are read and written in strips of about this many
 
 // Person probability from MediaPipe's confidence for class 0 (background).
@@ -2304,10 +2430,13 @@ function afterHistoryChange() {
   for (const b of $$('[data-open-tool]')) b.disabled = !e;
   $('#hold-main').hidden = !e || !!app.tool;
   $('#empty').hidden = !!e;
+  document.body.toggleAttribute('data-empty', !e);
   if (e) {
     const c = e.current;
-    $('#dims').textContent = fmtDims(c.width, c.height);
-  } else $('#dims').textContent = '';
+    $('#dims').textContent = fmtDims(c.width, c.height) + ' · ' + fmtMP(c.width, c.height);
+    const d = new Date();   // short form so it fits beside the buttons: RT-003 ▸ 24/10 1329
+    $('#top-code').textContent = entryCode().split(' · ')[0] + ' ▸ ' + pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + ' ' + pad2(d.getHours()) + pad2(d.getMinutes());
+  } else { $('#dims').textContent = ''; $('#top-code').textContent = ''; }
   view.fitMode = true;
   fitView();
   requestDraw();
@@ -2421,7 +2550,9 @@ function openTool(id) {
   $('#sheet').hidden = false;
   for (const p of $$('.sheet-panel')) p.hidden = p.dataset.tool !== id;
   const panel = $('.sheet-panel[data-tool="' + id + '"]');
-  $('[data-entry]', panel).textContent = entryCode();
+  // The thin strip that stands in for the top bar: edit number and tool name.
+  $('#strip-code').textContent = entryCode().split(' · ')[0] + ' ▸ ' + $('h2', panel).textContent;
+  document.body.dataset.tool = id;
   $('#hold-main').hidden = true;
   t.open();
   viewResize();                     // the stage just got shorter; lay out before the first touch
@@ -2434,6 +2565,8 @@ function closeTool() {
   if (app.preview && app.preview.src) core.release(app.preview.src);
   app.preview = null;
   app.holding = false;
+  delete document.body.dataset.tool;
+  document.body.removeAttribute('data-brush');
   $('#sheet').hidden = true;
   $('#toolbar').hidden = false;
   $('#hold-main').hidden = !app.edits;
@@ -2570,7 +2703,7 @@ tools.crop = {
       ctx.moveTo(tl.x, tl.y + rh * i / 3); ctx.lineTo(tl.x + rw, tl.y + rh * i / 3);
     }
     ctx.stroke();
-    ctx.strokeStyle = '#FFFFFF';
+    ctx.strokeStyle = '#F2A33A';
     ctx.lineWidth = 3;
     const H = Math.min(18, rw / 3, rh / 3);
     ctx.beginPath();
@@ -2976,7 +3109,13 @@ tools.text = {
   input.addEventListener('blur', () => { t.typing(false); viewResize(); });
   // Add and Delete sit beside the text field: tapping them must not take the
   // cursor away, or the style rows reappear and shift the button mid-tap.
-  for (const b of [$('#text-add'), $('#text-delete')]) b.addEventListener('pointerdown', (e) => { if (document.activeElement === input) e.preventDefault(); });
+  // The same holds for the sheet's header (cancel and apply): it sits above the
+  // style rows, so they would push it up under the finger.
+  const keepCursor = (e) => { if (document.activeElement === input) e.preventDefault(); };
+  for (const b of [$('#text-add'), $('#text-delete'), ...$$('.sheet-panel[data-tool="text"] .sheet-head button')]) {
+    b.addEventListener('pointerdown', keepCursor);
+    b.addEventListener('mousedown', keepCursor);
+  }
   $('#text-add').addEventListener('click', () => t.add());
   $('#text-delete').addEventListener('click', () => t.remove());
   $('#text-size').addEventListener('input', (e) => t.update({ size: +e.target.value }));
@@ -2986,6 +3125,11 @@ tools.text = {
   for (const b of $$('[data-tcolour]')) b.addEventListener('click', () => t.setColour(b.dataset.tcolour));
   for (const b of $$('[data-align]')) b.addEventListener('click', () => t.update({ align: b.dataset.align }));
   for (const b of $$('[data-shadow]')) b.addEventListener('click', () => t.update({ shadow: b.dataset.shadow }));
+  // Font, Colour and Style tabs: one group of settings on screen at a time.
+  for (const b of $$('[data-text-tab]')) b.addEventListener('click', () => {
+    for (const x of $$('[data-text-tab]')) x.setAttribute('aria-selected', x === b ? 'true' : 'false');
+    for (const p of $$('[data-text-panel]')) p.hidden = p.dataset.textPanel !== b.dataset.textTab;
+  });
 })();
 
 /* ---------- Tool: remove background ---------- */
@@ -3209,6 +3353,7 @@ tools.bg = {
     setPressed($$('[data-bgcolour]'), (b) => b.dataset.bgcolour.toLowerCase() === s.colour.toLowerCase());
     $('#bg-view-rows').hidden = brush;
     $('#bg-brush-rows').hidden = !brush;
+    document.body.toggleAttribute('data-brush', brush);
     $('#bg-colour-row').hidden = s.fill !== 'colour';
     $('#bg-blur-row').hidden = s.fill !== 'blur';
     $('#bg-colour').value = s.colour.toLowerCase();
@@ -3368,6 +3513,7 @@ tools.skin = {
     setPressed($$('[data-skinmode]'), (b) => b.dataset.skinmode === s.mode);
     $('#skin-view-rows').hidden = brush;
     $('#skin-brush-rows').hidden = !brush;
+    document.body.toggleAttribute('data-brush', brush);
     $('#skin-strength').value = String(s.strength);
     $('#skin-strength-out').textContent = s.strength + ' %';
     $('#skin-texture').value = String(s.texture);

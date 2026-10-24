@@ -912,7 +912,7 @@ test('service worker: offline start, fonts cached', async () => {
   await page.waitForFunction(() => window.retouch && window.retouch.APP_VERSION);
   await page.evaluate(() => document.fonts.ready);
   const fonts = await page.evaluate(() => Array.from(document.fonts).filter((f) => f.status === 'loaded').map((f) => f.family + ' ' + f.weight));
-  assert(fonts.some((f) => /Source Sans 3/.test(f)) && fonts.some((f) => /JetBrains Mono/.test(f)), 'fonts offline: ' + fonts);
+  assert(fonts.some((f) => /Barlow Semi Condensed/.test(f)) && fonts.some((f) => /IBM Plex Mono/.test(f)), 'fonts offline: ' + fonts);
   await load(page, gradient());
   const d = await dims(page);
   assert(d[0] === GW, 'editing works offline');
@@ -997,16 +997,20 @@ async function textBox(page, o = {}) {
   if (o.add) await page.click('#text-add');
   await page.fill('#text-input', o.text || 'HHHH');
   await page.evaluate(() => document.activeElement.blur());
+  await page.click('[data-text-tab="font"]');
   await page.click('#text-fonts [data-font="' + (o.font || 'sans') + '"]');
   await page.fill('#text-size', String(o.size || 40));
   await page.dispatchEvent('#text-size', 'input');
+  await page.click('[data-text-tab="colour"]');
   await page.click('[data-target="fill"]');
   await page.fill('#text-colour', o.colour || '#ff00ff');
+  await page.click('[data-text-tab="style"]');
   await page.fill('#text-outline', String(o.outline || 0));
   await page.dispatchEvent('#text-outline', 'input');
-  if (o.outlineColour) { await page.click('[data-target="outline"]'); await page.fill('#text-colour', o.outlineColour); await page.click('[data-target="fill"]'); }
+  if (o.outlineColour) { await page.click('[data-text-tab="colour"]'); await page.click('[data-target="outline"]'); await page.fill('#text-colour', o.outlineColour); await page.click('[data-target="fill"]'); await page.click('[data-text-tab="style"]'); }
   await page.click('[data-shadow="' + (o.shadow || 'none') + '"]');
   await page.click('[data-align="' + (o.align || 'center') + '"]');
+  await page.click('[data-text-tab="font"]');
   if (o.apply !== false) await applyTool(page, 'text');
 }
 const texts = (page) => page.evaluate(() => retouch.app.edits.texts);
@@ -1495,8 +1499,12 @@ test('text: sheet controls, typing mode and the stage stays usable', async () =>
   const c = await onScreen(page, GW / 2, GH / 2);
   await page.mouse.click(c.x, c.y);
   assert((await page.evaluate(() => retouch.tools.text.s.sel)) === 1, 'tap selects the box');
+  assert(await page.isVisible('#text-fonts') && await page.isHidden('[data-text-panel="colour"]') && await page.isHidden('[data-text-panel="style"]'), 'Font tab shows first, the others wait');
   await page.click('#text-fonts [data-font="hand"]');
+  await page.click('[data-text-tab="style"]');
+  assert(await page.isHidden('#text-fonts') && await page.isVisible('#text-outline'), 'Style tab swaps the settings');
   await page.click('[data-align="right"]');
+  await page.click('[data-text-tab="colour"]');
   await page.click('[data-target="outline"]');
   await page.click('[data-tcolour="#E2556B"]');
   const b = await page.evaluate(() => retouch.tools.text.box());
@@ -1842,7 +1850,7 @@ test('background core: feather, brush strokes and the backdrop fills', async () 
   assert(f.blur[1][3] === 255 && f.blur[1][2] > 150 && f.blur[1][0] < 120, 'blur: cut part is the blurred photo, mostly its blue side ' + f.blur[1]);
   assert(f.blur[2][3] === 255 && f.blur[2][0] > 40, 'blur: next to the kept side, the backdrop carries its colour spread over: ' + f.blur[2]);
   samePx(f.veil[0], [200, 100, 50, 255], 0, 'veil: kept part');
-  samePx(f.veil[1], [117, 40, 155, 255], 3, 'veil: cut part tinted');
+  samePx(f.veil[1], [106, 37, 130, 255], 3, 'veil: cut part tinted (darkroom red, 0.46)');
   samePx(f.half, [228, 178, 153, 255], 2, 'half alpha over white');
   await ctx.close();
 }, { core: true });
@@ -1906,7 +1914,7 @@ test('background: refine brush keeps and erases with one finger; two fingers zoo
   await page.click('[data-bgmode="erase"]');
   assert(await page.isVisible('#bg-brush-rows') && await page.isHidden('#bg-view-rows'), 'brush mode shows the brush rows');
   // The brush view tints what will be cut away, over the photo.
-  samePx(await page.evaluate(() => window.__px(retouch.app.preview.src, 20, 20)), [127, 65, 145, 255], 4, 'sky under the red veil');
+  samePx(await page.evaluate(() => window.__px(retouch.app.preview.src, 20, 20)), [116, 64, 119, 255], 4, 'sky under the red veil');
   samePx(await page.evaluate(() => window.__px(retouch.app.preview.src, 150, 120)), SKIN.concat(255), 1, 'person clear in the brush view');
   await page.fill('#bg-brush', '30');
   await page.dispatchEvent('#bg-brush', 'input');
@@ -1914,7 +1922,7 @@ test('background: refine brush keeps and erases with one finger; two fingers zoo
   let st = await page.evaluate(() => retouch.tools.bg.strokes.map((s) => [s.mode, s.pts.length, +(s.r * retouch.view.scale).toFixed(2)]));
   assert(st.length === 1 && st[0][0] === 'erase' && st[0][1] > 4 && st[0][2] === 15, 'erase stroke ' + JSON.stringify(st));
   assert(await page.isEnabled('#bg-undo-stroke'), 'undo stroke enabled');
-  samePx(await page.evaluate(() => window.__px(retouch.app.preview.src, 150, 120)), [212, 100, 110, 255], 4, 'erased skin shows under the veil in the preview');
+  samePx(await page.evaluate(() => window.__px(retouch.app.preview.src, 150, 120)), [208, 102, 81, 255], 4, 'erased skin shows under the veil in the preview');
   await page.click('[data-bgmode="keep"]');
   await brush(page, [[20, 20], [60, 20]]);
   assert((await page.evaluate(() => retouch.tools.bg.strokes.length)) === 2, 'keep stroke added');
