@@ -180,7 +180,6 @@ bounds: margin ignored ||| return { x0: Math.max(0, x0 - m), y0: ||| return { x0
 smooth: tile margin too small ||| const m = 2 * o.r + o.g, T = core.SKIN_TILE; ||| const m = o.r, T = core.SKIN_TILE;
 smooth: tiles written as they go ||| for (const { img, t, r } of done) ctx.putImageData(img, r.x0, r.y0, t.x0 - r.x0, t.y0 - r.y0, t.x1 - t.x0, t.y1 - t.y0); ||| for (const { img, t, r } of done) ctx.putImageData(img, r.x0, r.y0);
 spot: neighbourhood too small ||| core.SPOT_EPS = 5; ||| core.SPOT_EPS = 1;
-spot: no front ||| for (let i = 0; i < n; i++) if (flag[i] === KNOWN && nb(i).some((j) => flag[j] === INSIDE)) { flag[i] = BAND; push(i, 0); } ||| for (let i = 0; i < n; i++) if (flag[i] === KNOWN && nb(i).some((j) => flag[j] === INSIDE)) { flag[i] = BAND; }
 spot: eikonal one axis only ||| return (a + b + Math.sqrt(2 - (a - b) * (a - b))) / 2; ||| return Math.min(a, b) + 1;
 spot: eikonal step too big ||| if (Math.abs(a - b) >= 1) return Math.min(a, b) + 1; ||| if (Math.abs(a - b) >= 1) return Math.min(a, b) + 2;
 spot: direction ignored ||| const dir = Math.max(1e-6, Math.abs(dx * gx + dy * gy) / len); ||| const dir = 1;
@@ -188,10 +187,15 @@ spot: distance ignored ||| const wt = dir / r2; ||| const wt = dir;
 heap: pops the largest ||| if (l < hi.length && hk[l] < hk[m]) m = l; ||| if (l < hi.length && hk[l] > hk[m]) m = l;
 heap: push never sifts ||| while (c > 0) { const p = (c - 1) >> 1; if (hk[p] <= hk[c]) break; ||| while (c > 0) { const p = (c - 1) >> 1; if (true) break;
 heap: right child never checked ||| if (r < hi.length && hk[r] < hk[m]) m = r; ||| /* removed */
-spot: no slope carried ||| const at = (c) => d[4 * q + c] + slope(q, c, u > 0, u < w - 1, 1) * dx + slope(q, c, v > 0, v < h - 1, w) * dy; ||| const at = (c) => d[4 * q + c];
-spot: slope sign ||| const at = (c) => d[4 * q + c] + slope(q, c, u > 0, u < w - 1, 1) * dx + ||| const at = (c) => d[4 * q + c] - slope(q, c, u > 0, u < w - 1, 1) * dx +
+spot: no front ||| flag[i] = BAND; push(i, 0); ||| flag[i] = BAND;
+spot: no slope carried ||| const at = (c) => d[4 * q + c] + S[6 * q + 2 * c] * dx + S[6 * q + 2 * c + 1] * dy; ||| const at = (c) => d[4 * q + c];
+spot: slope sign ||| const at = (c) => d[4 * q + c] + S[6 * q + 2 * c] * dx + ||| const at = (c) => d[4 * q + c] - S[6 * q + 2 * c] * dx +
+spot: slope not shrunk ||| S[6 * q + j] = m * m * m / (m * m + scatter + 1e-9); ||| S[6 * q + j] = m;
+spot: slope window ignored ||| core.SPOT_SLOPE = 2; ||| core.SPOT_SLOPE = 0;
+spot: filled pixels carry no slope ||| for (let k = 0; k < 6; k++) S[6 * i + k] = sl[k] / ws; ||| /* removed */
+spot: fill not bounded ||| for (let c = 0; c < 3; c++) d[4 * i + c] = Math.min(maxC[c], Math.max(minC[c], v[c])); ||| for (let c = 0; c < 3; c++) d[4 * i + c] = v[c];
+spot: bounds from one pixel ||| for (let c = 0; c < 3; c++) { minC[c] = Math.min(minC[c], d[4 * i + c]); maxC[c] = Math.max(maxC[c], d[4 * i + c]); } ||| for (let c = 0; c < 3; c++) { minC[c] = d[4 * i + c]; maxC[c] = d[4 * i + c]; }
 spot: slope reads the spot ||| const l = lo && flag[q - step] !== INSIDE, r = hiN && flag[q + step] !== INSIDE; ||| const l = lo, r = hiN;
-spot: marked known before filled ||| if (flag[j] === INSIDE) { T[j] = t; fill(j); flag[j] = BAND; push(j, t); } ||| if (flag[j] === INSIDE) { flag[j] = BAND; T[j] = t; fill(j); push(j, t); }
 spot: ring too thin ||| core.SPOT_RING = 4; ||| core.SPOT_RING = 0;
 spot: grain is the mean, not the median ||| return a[a.length >> 1] * 1.4826 * Math.sqrt(9 / 8); ||| return a.reduce((p, q) => p + q, 0) / a.length * 1.4826 * Math.sqrt(9 / 8);
 spot: grain not scaled up ||| return a[a.length >> 1] * 1.4826 * Math.sqrt(9 / 8); ||| return a[a.length >> 1];

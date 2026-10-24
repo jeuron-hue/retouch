@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.5.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.5.1 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -523,7 +523,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '0.5.1';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -1587,14 +1587,19 @@ core.EditHistory = EditHistory;
    is filled from its edge inwards, nearest pixels first, the way a front moves
    through it (T is each pixel's distance from the edge along the way). Each new
    pixel is a weighted average of the known pixels within SPOT_EPS, each carried
-   to the new pixel along its own colour slope: closer ones count more, as do ones
-   in line with the direction the front is moving. (Telea also favours pixels at
+   to the new pixel along its colour slope: closer ones count more, as do ones in
+   line with the direction the front is moving. Slopes are measured once, on the
+   photo's own pixels round the spot; a filled pixel takes the weighted average
+   of the slopes it was built from. (Measuring slopes again on filled pixels lets
+   errors feed on themselves across a large spot until the fill bursts into black
+   and white rays.) (Telea also favours pixels at
    the same distance from the edge; on the test scenes that made fills slightly
    worse, so it is left out.) Then grain measured in a ring just outside the spot
    is added, so the fill is not a smooth patch on textured skin. */
 
 core.SPOT_EPS = 5;              // neighbourhood each filled pixel is averaged from, px
 core.SPOT_RING = 4;             // width of the ring outside the spot where grain is measured, px
+core.SPOT_SLOPE = 2;            // slopes are read from a mean over (2 x this + 1) px square, so grain is not taken for shading
 
 // A binary min-heap of pixel indices, keyed on a number when pushed.
 core.minHeap = () => {
@@ -1636,8 +1641,16 @@ core.inpaint = (d, w, h, mask, eps = core.SPOT_EPS) => {
     if (x > 0) out.push(i - 1); if (x < w - 1) out.push(i + 1); if (y > 0) out.push(i - w); if (y < h - 1) out.push(i + w);
     return out;
   };
-  // The front starts on the known pixels that touch the spot.
-  for (let i = 0; i < n; i++) if (flag[i] === KNOWN && nb(i).some((j) => flag[j] === INSIDE)) { flag[i] = BAND; push(i, 0); }
+  // The front starts on the known pixels that touch the spot. The fill stays within
+  // the range of those pixels: a straight gradient never leaves it, and a fill
+  // going wrong cannot run off to black or white.
+  const minC = [255, 255, 255], maxC = [0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    if (flag[i] === KNOWN && nb(i).some((j) => flag[j] === INSIDE)) {
+      flag[i] = BAND; push(i, 0);
+      for (let c = 0; c < 3; c++) { minC[c] = Math.min(minC[c], d[4 * i + c]); maxC[c] = Math.max(maxC[c], d[4 * i + c]); }
+    }
+  }
   // Arrival distance from the two axes' smaller known neighbours (the eikonal equation, |grad T| = 1).
   const tAt = (i) => (flag[i] === INSIDE ? FAR : T[i]);
   const solve = (i) => {
@@ -1655,7 +1668,13 @@ core.inpaint = (d, w, h, mask, eps = core.SPOT_EPS) => {
     if (l < FAR) return T[i] - l;
     return 0;
   };
-  // Colour slope of channel c at a known pixel q along one axis, from known neighbours only.
+  // Colour slopes (x and y, per channel) at each pixel of the photo, from the
+  // photo's own pixels only. Each is then averaged with its neighbours' over a
+  // small square, and shrunk by how much those neighbours disagree: a straight
+  // gradient (every slope the same) keeps its slope exactly; grain (slopes all
+  // over the place) gets almost none, so it is not carried into the spot as
+  // streaks. Filled pixels get theirs in fill().
+  const raw = new Float32Array(6 * n), S = new Float32Array(6 * n), sr = core.SPOT_SLOPE;
   const slope = (q, c, lo, hiN, step) => {
     const l = lo && flag[q - step] !== INSIDE, r = hiN && flag[q + step] !== INSIDE;
     if (l && r) return (d[4 * (q + step) + c] - d[4 * (q - step) + c]) / 2;
@@ -1663,10 +1682,35 @@ core.inpaint = (d, w, h, mask, eps = core.SPOT_EPS) => {
     if (l) return d[4 * q + c] - d[4 * (q - step) + c];
     return 0;
   };
+  for (let q = 0; q < n; q++) {
+    if (flag[q] === INSIDE) continue;
+    const x = q % w, y = (q - x) / w;
+    for (let c = 0; c < 3; c++) { raw[6 * q + 2 * c] = slope(q, c, x > 0, x < w - 1, 1); raw[6 * q + 2 * c + 1] = slope(q, c, y > 0, y < h - 1, w); }
+  }
+  for (let q = 0; q < n; q++) {
+    if (flag[q] === INSIDE) continue;
+    const x = q % w, y = (q - x) / w;
+    let k = 0;
+    const s1 = new Float64Array(6), s2 = new Float64Array(6);
+    for (let v = Math.max(0, y - sr); v <= Math.min(h - 1, y + sr); v++) {
+      for (let u = Math.max(0, x - sr); u <= Math.min(w - 1, x + sr); u++) {
+        const o = v * w + u;
+        if (flag[o] === INSIDE) continue;
+        for (let j = 0; j < 6; j++) { s1[j] += raw[6 * o + j]; s2[j] += raw[6 * o + j] * raw[6 * o + j]; }
+        k++;
+      }
+    }
+    for (let j = 0; j < 6; j++) {
+      const m = s1[j] / k, scatter = Math.max(0, s2[j] / k - m * m);
+      // m squared against m squared plus the scatter: 1 for a clean slope, near 0 for noise.
+      S[6 * q + j] = m * m * m / (m * m + scatter + 1e-9);
+    }
+  }
   const fill = (i) => {
     const x = i % w, y = (i - x) / w;
     const gx = grad(i, x > 0, x < w - 1, 1), gy = grad(i, y > 0, y < h - 1, w);
     let ws = 0, r = 0, g = 0, b = 0;
+    const sl = new Float64Array(6);
     for (let v = Math.max(0, y - eps); v <= Math.min(h - 1, y + eps); v++) {
       for (let u = Math.max(0, x - eps); u <= Math.min(w - 1, x + eps); u++) {
         const q = v * w + u;
@@ -1677,11 +1721,16 @@ core.inpaint = (d, w, h, mask, eps = core.SPOT_EPS) => {
         const dir = Math.max(1e-6, Math.abs(dx * gx + dy * gy) / len);
         const wt = dir / r2;
         // The known value, carried along its slope (first order) to this pixel.
-        const at = (c) => d[4 * q + c] + slope(q, c, u > 0, u < w - 1, 1) * dx + slope(q, c, v > 0, v < h - 1, w) * dy;
+        const at = (c) => d[4 * q + c] + S[6 * q + 2 * c] * dx + S[6 * q + 2 * c + 1] * dy;
         ws += wt; r += wt * at(0); g += wt * at(1); b += wt * at(2);
+        for (let k = 0; k < 6; k++) sl[k] += wt * S[6 * q + k];
       }
     }
-    if (ws > 0) { d[4 * i] = r / ws; d[4 * i + 1] = g / ws; d[4 * i + 2] = b / ws; }
+    if (ws > 0) {
+      const v = [r / ws, g / ws, b / ws];
+      for (let c = 0; c < 3; c++) d[4 * i + c] = Math.min(maxC[c], Math.max(minC[c], v[c]));
+      for (let k = 0; k < 6; k++) S[6 * i + k] = sl[k] / ws;
+    }
   };
   while (heap.size) {
     const i = heap.pop();
