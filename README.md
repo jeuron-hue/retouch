@@ -24,6 +24,7 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 - Text follows the photo through later crops, resizes and added canvas. A box that ends up outside a crop is removed, and undo brings it back.
 - Remove background (people): finds the person, snaps the cut to the photo's own edges, and puts them on transparency, a colour, or a blurred copy of the photo. Feather softens the edge. A Keep and Erase brush fixes what the model missed (hair, mostly); red shows what will be cut away. Two fingers zoom and move while brushing. Transparent results export as PNG.
 - Smooth skin: the same model finds face and body skin, and an edge-preserving filter evens out tone and small spots there while eyebrows, lashes and lip lines stay sharp. Strength sets how much; Texture puts the skin's fine grain back so it does not look plastic. An Add and Remove brush changes where it applies; blue shows the area. The filter is sized from the face, so a full-length photo is treated like a close-up.
+- Spot eraser: tap a blemish or a dust spot, or brush along a scratch, and it is filled from the pixels around it (fast marching inpainting, written for retouch; no extra library). The skin's grain is added back so the patch does not show. Each spot is filled the moment you lift your finger; Undo stroke takes the last one back.
 - Undo and redo (the last 10 steps; the original is always kept). Hold "before" to compare.
 - Export as JPEG, PNG or WebP. Share straight to another app (Instagram) or download. Anything with transparent areas exports as PNG.
 
@@ -33,6 +34,7 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 - Editing happens in the sRGB colour space.
 - Background removal is trained on people. Other subjects may not be found at all; the Keep brush can still paint them in. Fine hair against a busy background usually needs some brushing.
 - Finding the person or the skin takes a few seconds on the phone, longest the first time after opening the app, while the model loads.
+- The spot eraser is for small spots. Large areas fill with a blur rather than with believable detail, and retouch warns when a stroke is large. Removing whole objects is out of scope.
 - Skin smoothing evens out tone and small marks. Larger spots fade but do not vanish; the skin mask can include the eyes and lips, which the filter mostly leaves alone, and the Remove brush can take them out entirely.
 
 ## Tests
