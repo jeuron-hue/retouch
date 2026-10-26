@@ -135,6 +135,27 @@ guide: coverage is a sum ||| return { ...m, coverage: sum / n, found: hit / n };
 guide: found counts the haze ||| if (p[i] >= core.BG_FOUND) hit++; ||| hit += p[i];
 guide: an even chance not found ||| if (p[i] >= core.BG_FOUND) hit++; ||| if (p[i] > core.BG_FOUND) hit++;
 guide: found threshold lowered ||| core.BG_FOUND = 0.5; ||| core.BG_FOUND = 0.05;
+key: border read at the very edge ||| const r = Math.min(Math.max(2, Math.round(core.KEY_INSET * Math.min(w, h))), ||| const r = Math.min(Math.max(0, Math.round(core.KEY_INSET * Math.min(w, h))),
+key: no second median ||| const rgb = [med(close, 0), med(close, 1), med(close, 2)]; ||| const rgb = [d[close[0]], d[close[0] + 1], d[close[0] + 2]];
+key: busiest bin only ||| core.KEY_BINS = 8; ||| core.KEY_BINS = 1;
+key: flat test too loose ||| core.KEY_FLAT = 8; ||| core.KEY_FLAT = 40;
+key: plain share too low ||| core.KEY_SHARE = 0.6; ||| core.KEY_SHARE = 0.1;
+key: ramp starts at zero ||| core.KEY_IN = 30; ||| core.KEY_IN = 0;
+key: flat fill keeps its holes ||| if (key.flat) for (let i = 0; i < n; i++) if (!seen[i] ||| if (false) for (let i = 0; i < n; i++) if (!seen[i]
+key: walk ignores the bottom row ||| for (let x = 0; x < w; x++) { visit(x); visit((h - 1) * w + x); } ||| for (let x = 0; x < w; x++) { visit(x); }
+key: walk goes through the subject ||| if (s >= limit) return; ||| if (s >= limit * 4) return;
+key: flat walk as loose as a photo's ||| const limit = key.flat ? core.KEY_MATCH : core.KEY_OUT; ||| const limit = core.KEY_OUT;
+key: photo border share as low as a flat fill's ||| core.KEY_SHARE_PHOTO = 0.8; ||| core.KEY_SHARE_PHOTO = 0.6;
+key: empty picture still keyed ||| if (hit / n < core.KEY_MIN_KEEP) return null; ||| if (hit / n < 0) return null;
+head: body skin counts as a head ||| if (conf[1][i] + conf[3][i] >= core.BG_FOUND) k++; ||| if (conf[1][i] + conf[2][i] + conf[3][i] >= core.BG_FOUND) k++;
+head: hair does not count ||| if (conf[1][i] + conf[3][i] >= core.BG_FOUND) k++; ||| if (conf[3][i] >= core.BG_FOUND) k++;
+mark: point is the bare centre ||| if (dd < bd && p.data[y * p.w + x] >= core.BG_FOUND) { bd = dd; ||| if (dd < bd) { bd = dd;
+mark: x and y swapped ||| best = { x: (x + 0.5) / p.w, y: (y + 0.5) / p.h }; ||| best = { x: (y + 0.5) / p.h, y: (x + 0.5) / p.w };
+mark: point off by half a cell ||| best = { x: (x + 0.5) / p.w, y: (y + 0.5) / p.h }; ||| best = { x: x / p.w, y: (y + 0.5) / p.h };
+cut: no unmixing ||| if (al > 0 && al < 1) for (let c = 0; c < 3; c++) out[o + c] = K[c] + (d[o + c] - K[c]) / al; ||| if (false) out[o] = 0;
+cut: blend alpha not projected ||| if (Math.hypot(cr - t * sr, cg - t * sg, cb - t * sb) <= core.KEY_LINE) al = Math.min(1, Math.max(0, t)); ||| if (false) al = t;
+cut: any pixel counts as a blend ||| if (Math.hypot(cr - t * sr, cg - t * sg, cb - t * sb) <= core.KEY_LINE) al ||| if (true) al
+cut: subject colour is the nearest, not the strongest ||| if (dist[j] > dist[best]) best = j; ||| if (dist[j] < dist[best]) best = j;
 apply: half-pixel shift ||| const f = Math.min(m.w - 1, Math.max(0, (x + 0.5) * sx - 0.5)); ||| const f = Math.min(m.w - 1, Math.max(0, x * sx));
 apply: strips overwrite the top ||| out[(y0 + j) * W + x] = core.bgCurve(q); ||| out[j * W + x] = core.bgCurve(q);
 apply: green read as red ||| (ag[i00] * w00 + ag[i01] * w01 + ag[i10] * w10 + ag[i11] * w11) * data[o + 1] + ||| (ag[i00] * w00 + ag[i01] * w01 + ag[i10] * w10 + ag[i11] * w11) * data[o] +

@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.6.2 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.7.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -28,6 +28,7 @@ change the version here in the same commit as the file.
   vendor/mediapipe/vision_wasm_internal.wasm   @mediapipe/tasks-vision 0.10.35, wasm/, Apache-2.0, sha256 6a5c64584c2ab61c763b6e204afbdbc7ce1caf7f5216187322bca8df94f646bc
   vendor/mediapipe/selfie_multiclass_256x256.tflite  MediaPipe selfie multiclass 256x256, float32, model version 1 (model card dated 10/05/23), Apache-2.0, sha256 c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0
   vendor/mediapipe/LICENSE-apache-2.0.txt      Apache License 2.0 text from apache.org, covers the four files above, sha256 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+  vendor/mediapipe/magic_touch.tflite           MediaPipe interactive segmenter MagicTouch, float32, version 1 (point2mask_objects_512x512_2023_04_18; model card dated 13/03/23), Apache-2.0 (licence text above), from the MediaPipe model store (interactive_segmenter/magic_touch/float32/1), downloaded 26/10/26, sha256 e24338a717c1b7ad8d159666677ef400babb7f33b8ad60c4d96db4ecf694cd25
   MediaPipe notes: only the SIMD build is vendored (Chrome on Android has had wasm
   SIMD since version 91). The bundle is the package's vision_bundle.mjs byte for
   byte, saved as .js so any web server sends it with a JavaScript type.
@@ -158,7 +159,8 @@ body[data-tool="spot"] .strip [data-for="spot"]{display:inline}
 /* Short how-to captions on the photo; they never catch a touch. */
 .hint{position:absolute;left:14px;bottom:14px;max-width:calc(100% - 96px);padding:8px 10px;border-radius:4px;background:rgba(20,19,18,.86);color:var(--ink-2);font-size:11px;line-height:15px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;pointer-events:none;display:none;z-index:2}
 body[data-tool="pad"] .hint[data-for="pad"],body[data-tool="spot"] .hint[data-for="spot"],
-body[data-tool="bg"][data-brush] .hint[data-for="bg"],body[data-tool="skin"][data-brush] .hint[data-for="skin"]{display:block}
+body[data-tool="bg"][data-brush] .hint[data-for="bg"],body[data-tool="skin"][data-brush] .hint[data-for="skin"],
+body[data-tool="bg"][data-bg-ready]:not([data-brush]) .hint[data-for="bg-view"]{display:block}
 
 /* Notices sit over the top of the stage. */
 #notices{position:absolute;left:8px;right:8px;top:8px;display:flex;flex-direction:column;gap:8px;z-index:5;pointer-events:none}
@@ -298,6 +300,7 @@ fieldset:disabled{opacity:.4}
 
   <div class="hint" data-for="pad">Drag the photo to move it in the frame</div>
   <div class="hint" data-for="bg">Red is cut away · 1 finger paints · 2 fingers move</div>
+  <div class="hint" data-for="bg-view">Wrong subject? Tap the one to keep</div>
   <div class="hint" data-for="skin">Blue is smoothed · 1 finger paints · 2 fingers move</div>
   <div class="hint" data-for="spot">Tap or brush a spot · 2 fingers move · small spots only</div>
 
@@ -651,7 +654,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.6.2';
+const APP_VERSION = '0.7.0';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -694,8 +697,11 @@ const BG_VENDOR = {
   loader: 'vendor/mediapipe/vision_wasm_internal.js',
   wasm: 'vendor/mediapipe/vision_wasm_internal.wasm',
   model: 'vendor/mediapipe/selfie_multiclass_256x256.tflite',
+  object: 'vendor/mediapipe/magic_touch.tflite',
 };
-// Below this share of the photo, the model has not found a person.
+// The tap-to-select model returns one confidence mask: the picked object (checked 26/10/26).
+const OBJECT_MASK = 0;
+// Below this share of the photo, the model has not found a person (or an object).
 const BG_MIN_PERSON = 0.01;
 // The live preview is drawn at the screen's size, but never smaller than this on
 // its long edge, so hair edges stay readable when zoomed in to brush.
@@ -1108,6 +1114,32 @@ core.BRUSH_SOFT = 0.35;         // the outer share of the brush radius that fade
 core.BG_VEIL = 'rgba(206,34,24,0.46)';   // brush view: darkroom-red tint over what will be cut away
 core.STRIP_PIXELS = 1000000;    // full-size pixels are read and written in strips of about this many
 
+// Share of the picture that is a head: hair or face skin (classes 1 and 3) at an even
+// chance or more. The model also marks a bag as clothes and a cat's fur as body skin,
+// but neither has a head.
+core.headShare = (conf) => {
+  let k = 0;
+  for (let i = 0; i < conf[0].length; i++) if (conf[1][i] + conf[3][i] >= core.BG_FOUND) k++;
+  return k / conf[0].length;
+};
+core.PERSON_MIN_HEAD = 0.0005;  // less head than this share of the photo: not a person
+
+// Where to point the object model at a thing the person model marked (a bag, a
+// cat): the marked pixel nearest the marked area's centre, as x, y from 0 to 1.
+// null when nothing is marked.
+core.markedPoint = (p) => {
+  let n = 0, sx = 0, sy = 0;
+  for (let y = 0; y < p.h; y++) for (let x = 0; x < p.w; x++) if (p.data[y * p.w + x] >= core.BG_FOUND) { n++; sx += x; sy += y; }
+  if (!n) return null;
+  const cx = sx / n, cy = sy / n;
+  let best = null, bd = Infinity;
+  for (let y = 0; y < p.h; y++) for (let x = 0; x < p.w; x++) {
+    const dd = (x - cx) ** 2 + (y - cy) ** 2;
+    if (dd < bd && p.data[y * p.w + x] >= core.BG_FOUND) { bd = dd; best = { x: (x + 0.5) / p.w, y: (y + 0.5) / p.h }; }
+  }
+  return best;
+};
+
 // Person probability from MediaPipe's confidence for class 0 (background).
 core.bgPerson = (bg) => {
   const p = new Float32Array(bg.length);
@@ -1280,6 +1312,180 @@ core.bgGuided = (src, W, H, m) => {
     }
   } finally { core.release(c); }
   return a;
+};
+
+/* Plain backgrounds (banners, logos, screenshots, a product on a sheet of card).
+   When no person is found, the photo's border is checked: if most of it is one
+   colour, that colour is the background. It is taken away by colour, not by a
+   model, so letters and thin lines stay sharp.
+   - The background is taken away from the border inward, through every pixel
+     close to its colour, so the same colour inside the subject (a blue shirt on a
+     blue wall) is kept.
+   - A flat, digital fill (every border pixel nearly the same) also loses any
+     enclosed patch of that exact colour: the holes inside letters.
+   Colour distance is plain RGB distance, 0 to 441. Up to KEY_IN is background,
+   from KEY_OUT it is kept, and in between is the soft, anti-aliased edge. */
+
+core.KEY_MATCH = 40;            // a border pixel this close to the key colour counts as plain
+core.KEY_SHARE = 0.6;           // share of the border that must be plain (a flat fill)
+core.KEY_SHARE_PHOTO = 0.8;     // the same for a photographed backdrop, which is easily confused with a wall
+core.KEY_FLAT = 8;              // a border whose plain pixels are all this close to the key is a flat fill
+core.KEY_IN = 30;               // this close to the key: background (alpha 0)
+core.KEY_OUT = 70;              // this far or more: kept (alpha 1)
+core.KEY_SAMPLES = 4000;        // border pixels looked at, at most
+core.KEY_BINS = 8;              // candidate colours tried
+core.KEY_INSET = 0.01;          // the border is read this far in (a share of the short side, at least
+                                // 2 px), so a thin frame or a screenshot's edge line does not count
+
+core.keyDist = (d, o, k) => Math.hypot(d[o] - k[0], d[o + 1] - k[1], d[o + 2] - k[2]);
+
+// RGBA pixels d of a w x h picture. Returns { rgb, share, flat } for the border's
+// main colour: share is how much of the border ring is within KEY_MATCH of it, and
+// flat says whether those pixels are all within KEY_FLAT (a digital fill, not a photo).
+core.borderKey = (d, w, h) => {
+  const r = Math.min(Math.max(2, Math.round(core.KEY_INSET * Math.min(w, h))), Math.floor((Math.min(w, h) - 1) / 2));
+  const rw = w - 2 * r, rh = h - 2 * r;                      // the ring's own width and height
+  const per = rw > 1 && rh > 1 ? 2 * (rw + rh) - 4 : rw * rh, step = Math.max(1, Math.ceil(per / core.KEY_SAMPLES));
+  const idx = [];
+  for (let i = 0; i < per; i += step) {
+    let x, y;
+    if (rw <= 1 || rh <= 1) { x = i % rw; y = Math.floor(i / rw); }
+    else if (i < rw) { x = i; y = 0; }
+    else if (i < rw + rh - 1) { x = rw - 1; y = i - rw + 1; }
+    else if (i < 2 * rw + rh - 2) { x = rw - 1 - (i - rw - rh + 2); y = rh - 1; }
+    else { x = 0; y = rh - 1 - (i - 2 * rw - rh + 3); }
+    idx.push(((y + r) * w + x + r) * 4);
+  }
+  // A coarse colour grid (16 levels a channel) finds the candidate colours. Grain
+  // spreads one colour over several bins, so the busiest bin is not always the
+  // background: each of the busiest few bins gives a first guess (its median), and
+  // the guess with the most border pixels near it wins.
+  const bins = new Map();
+  for (const o of idx) {
+    const b = (d[o] >> 4) << 8 | (d[o + 1] >> 4) << 4 | (d[o + 2] >> 4);
+    const list = bins.get(b);
+    if (list) list.push(o); else bins.set(b, [o]);
+  }
+  const med = (list, c) => { const v = list.map((o) => d[o + c]).sort((a, b) => a - b); return v[v.length >> 1]; };
+  let close = null;
+  for (const list of Array.from(bins.values()).sort((a, b) => b.length - a.length).slice(0, core.KEY_BINS)) {
+    const guess = [med(list, 0), med(list, 1), med(list, 2)];
+    const near = idx.filter((o) => core.keyDist(d, o, guess) <= core.KEY_MATCH);
+    if (!close || near.length > close.length) close = near;
+  }
+  // The median again, over every border pixel near the winning guess, sets the colour.
+  const rgb = [med(close, 0), med(close, 1), med(close, 2)];
+  let near = 0, far = 0;
+  for (const o of idx) {
+    const s = core.keyDist(d, o, rgb);
+    if (s <= core.KEY_MATCH) { near++; if (s > core.KEY_FLAT) far++; }
+  }
+  return { rgb, share: near / idx.length, flat: near > 0 && far === 0 };
+};
+
+// Alpha (1 kept, 0 taken away) for RGBA pixels d of a w x h picture, against the key.
+core.keyMask = (d, w, h, key) => {
+  const n = w * h, a = new Float32Array(n);
+  const ramp = (s) => Math.min(1, Math.max(0, (s - core.KEY_IN) / (core.KEY_OUT - core.KEY_IN)));
+  // Walk in from the border (4-connected) through every pixel close to the key:
+  // short of KEY_OUT on a photographed backdrop, which shades and varies; short of
+  // KEY_MATCH on a flat fill, so it cannot walk into a pale subject colour (white on
+  // mint). Only pixels reached that way take the ramp; the edge blends past them
+  // are split by keyCut.
+  const limit = key.flat ? core.KEY_MATCH : core.KEY_OUT;
+  a.fill(1);
+  const seen = new Uint8Array(n), queue = new Int32Array(n);
+  let head = 0, tail = 0;
+  const visit = (i) => {
+    if (seen[i]) return;
+    seen[i] = 1;
+    const s = core.keyDist(d, i * 4, key.rgb);
+    if (s >= limit) return;
+    a[i] = ramp(s);
+    queue[tail++] = i;
+  };
+  for (let x = 0; x < w; x++) { visit(x); visit((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { visit(y * w); visit(y * w + w - 1); }
+  while (head < tail) {
+    const i = queue[head++], x = i % w;
+    // The x tests keep a step from running off one row into the next. (Such a step
+    // would land on an edge pixel, which is walked from anyway, so they save work.)
+    if (x > 0) visit(i - 1);
+    if (x < w - 1) visit(i + 1);
+    if (i >= w) visit(i - w);
+    if (i < n - w) visit(i + w);
+  }
+  // A flat fill: enclosed patches of the key colour itself are holes in the subject.
+  if (key.flat) for (let i = 0; i < n; i++) if (!seen[i] && core.keyDist(d, i * 4, key.rgb) <= core.KEY_IN) a[i] = 0;
+  return a;
+};
+
+core.KEY_MIN_KEEP = 0.01;       // a key that would leave less than this share kept is no use
+
+// A guide canvas with a plain border: the cut-out model for its colour key, or null.
+core.keyModel = (guide) => {
+  const w = guide.width, h = guide.height, n = w * h;
+  const d = guide.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  const key = core.borderKey(d, w, h);
+  if (key.share < (key.flat ? core.KEY_SHARE : core.KEY_SHARE_PHOTO)) return null;
+  const a = core.keyMask(d, w, h, key);
+  let sum = 0, hit = 0;
+  for (let i = 0; i < n; i++) { sum += a[i]; if (a[i] >= core.BG_FOUND) hit++; }
+  if (hit / n < core.KEY_MIN_KEEP) return null;
+  return { kind: 'key', rgb: key.rgb, flat: key.flat, coverage: sum / n, found: hit / n };
+};
+
+/* Edges. Where the subject meets a plain background, edge pixels are a blend of
+   the two (anti-aliasing, blur, compression). Kept as they are, they leave a fringe
+   of background colour round everything. So each pixel near the background is split
+   back into its two parts. The pixel nearby that is furthest from the key colour K
+   gives the subject's colour S; how far the pixel sits along the line from K to S
+   gives how much of it is subject (its alpha); and its colour is the blend with K
+   taken out. A pixel well off that line is not a blend of the two and keeps the
+   plain ramp. */
+core.KEY_REACH = 0.004;         // how far an edge pixel looks, as a share of the long edge (at least 3 px)
+core.KEY_LINE = 40;             // a blend of K and S sits within this distance of the line between them
+
+// { a, rgb }: the alpha, and a copy of the RGBA pixels with the key taken out of the edges.
+core.keyCut = (d, w, h, key) => {
+  const n = w * h, K = key.rgb, R = Math.max(3, Math.round(core.KEY_REACH * Math.max(w, h)));
+  const a = core.keyMask(d, w, h, key), out = new Uint8ClampedArray(d);
+  const dist = new Float32Array(n);
+  for (let i = 0; i < n; i++) dist[i] = core.keyDist(d, i * 4, K);
+  // Pixels with background (alpha 0) within R: only these can be edge blends.
+  const near = new Float32Array(n);
+  for (let i = 0; i < n; i++) near[i] = a[i] === 0 ? 1 : 0;
+  core.boxMean(near, w, h, R);
+  for (let i = 0; i < n; i++) {
+    if (near[i] === 0 || a[i] === 0) continue;
+    const o = i * 4, x = i % w, y = (i - x) / w;
+    let best = i;
+    for (let v = Math.max(0, y - R); v <= Math.min(h - 1, y + R); v++) {
+      for (let u = Math.max(0, x - R), j = v * w + u; u <= Math.min(w - 1, x + R); u++, j++) if (dist[j] > dist[best]) best = j;
+    }
+    let al = a[i];
+    if (dist[best] > core.KEY_OUT) {
+      const b = best * 4, sr = d[b] - K[0], sg = d[b + 1] - K[1], sb = d[b + 2] - K[2], ss = sr * sr + sg * sg + sb * sb;
+      const cr = d[o] - K[0], cg = d[o + 1] - K[1], cb = d[o + 2] - K[2];
+      const t = (cr * sr + cg * sg + cb * sb) / ss;
+      if (Math.hypot(cr - t * sr, cg - t * sg, cb - t * sb) <= core.KEY_LINE) al = Math.min(1, Math.max(0, t));
+    }
+    a[i] = al;
+    if (al > 0 && al < 1) for (let c = 0; c < 3; c++) out[o + c] = K[c] + (d[o + c] - K[c]) / al;
+  }
+  return { a, rgb: out };
+};
+
+// The photo drawn at W x H, keyed: { a, canvas } with the edges' colours put right.
+core.keyCutCanvas = (src, W, H, m) => {
+  const c = core.makeCanvas(W, H), ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, 0, 0, W, H);
+  const img = ctx.getImageData(0, 0, W, H);
+  const k = core.keyCut(img.data, W, H, m);
+  img.data.set(k.rgb);
+  ctx.putImageData(img, 0, 0);
+  return { a: k.a, canvas: c };
 };
 
 // Feather: two box passes (close to a Gaussian). f is a fraction of the long edge.
@@ -2281,7 +2487,9 @@ function draw() {
 
 /* ---------- Gestures on the stage: pinch to zoom, drag to pan, double tap ---------- */
 
-const gesture = { pointers: new Map(), start: null, lastTap: 0, lastTapX: 0, lastTapY: 0, toolDrag: false };
+const gesture = { pointers: new Map(), start: null, lastTap: 0, lastTapX: 0, lastTapY: 0, toolDrag: false, down: null, tapTimer: 0 };
+// A tap is a single finger that lifts within this time and this distance of where it landed.
+const TAP_MS = 400, TAP_PX = 10;
 
 function stagePoint(e) {
   const r = view.canvas.getBoundingClientRect();
@@ -2315,6 +2523,7 @@ view.canvas.addEventListener('pointerdown', (e) => {
   try { view.canvas.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
   const p = stagePoint(e);
   gesture.pointers.set(e.pointerId, p);
+  gesture.down = gesture.pointers.size === 1 ? { x: p.x, y: p.y, t: performance.now() } : null;
   if (app.tool && app.tool.touch) { if (!app.holding) app.tool.touch('down', gesture.pointers); return; }
   if (gesture.pointers.size === 1 && app.tool && app.tool.pointerDown && !app.holding) {
     gesture.toolDrag = app.tool.pointerDown(p) === true;
@@ -2375,10 +2584,20 @@ function endPointer(e) {
     const now = performance.now();
     if (now - gesture.lastTap < 300 && Math.hypot(p.x - gesture.lastTapX, p.y - gesture.lastTapY) < 30) {
       // Double tap: toggle between fit and actual pixels.
+      clearTimeout(gesture.tapTimer);
       if (view.fitMode) zoomAbout(p.x, p.y, 1 / view.dpr);
       else { fitView(); requestDraw(); }
       gesture.lastTap = 0;
-    } else { gesture.lastTap = now; gesture.lastTapX = p.x; gesture.lastTapY = p.y; }
+    } else {
+      gesture.lastTap = now; gesture.lastTapX = p.x; gesture.lastTapY = p.y;
+      // A single still tap goes to the tool once a second tap can no longer come.
+      const d = gesture.down, tool = app.tool;
+      if (tool && tool.tap && !app.holding && d && now - d.t < TAP_MS && Math.hypot(p.x - d.x, p.y - d.y) < TAP_PX) {
+        clearTimeout(gesture.tapTimer);
+        const q = { x: (p.x - view.tx) / view.scale, y: (p.y - view.ty) / view.scale };   // fixed now, in image pixels
+        gesture.tapTimer = setTimeout(() => { if (app.tool === tool) tool.tap(q); }, 300);
+      }
+    }
   }
 }
 view.canvas.addEventListener('pointerup', endPointer);
@@ -2574,6 +2793,7 @@ function closeTool() {
   app.holding = false;
   delete document.body.dataset.tool;
   document.body.removeAttribute('data-brush');
+  document.body.removeAttribute('data-bg-ready');
   $('#sheet').hidden = true;
   $('#toolbar').hidden = false;
   $('#hold-main').hidden = !app.edits;
@@ -3146,7 +3366,9 @@ tools.text = {
 const segmenter = {
   promise: null,
   override: null,      // test seams, used instead of the model: (canvas) => { w, h, data } for the
-  skinOverride: null,  // person, and (canvas) => { w, h, data, face } for the skin
+  skinOverride: null,  // person, (canvas) => { w, h, data, face } for the skin, and
+  objectOverride: null, // (canvas, { x, y }) => { w, h, data } for the object at a point
+  objectPromise: null,
   load() {
     if (!this.promise) {
       this.promise = (async () => {
@@ -3170,11 +3392,38 @@ const segmenter = {
       return { w: m[0].width, h: m[0].height, conf: m.map((x) => x.getAsFloat32Array().slice()) };
     } finally { r.close(); }
   },
-  // Person probability: { w, h, data }.
+  // The tap-to-select model (MediaPipe's interactive segmenter, "magic touch"),
+  // loaded the first time an object is picked.
+  loadObject() {
+    if (!this.objectPromise) {
+      this.objectPromise = (async () => {
+        const mp = await import('./vendor/mediapipe/vision_bundle.js');
+        return mp.InteractiveSegmenter.createFromOptions(
+          { wasmLoaderPath: BG_VENDOR.loader, wasmBinaryPath: BG_VENDOR.wasm },
+          { baseOptions: { modelAssetPath: BG_VENDOR.object, delegate: 'CPU' },
+            outputConfidenceMasks: true, outputCategoryMask: false });
+      })();
+      this.objectPromise.catch(() => { this.objectPromise = null; });
+    }
+    return this.objectPromise;
+  },
+  // Probability that each pixel belongs to the object under pt (x, y from 0 to 1): { w, h, data }.
+  async object(canvas, pt) {
+    if (this.objectOverride) return this.objectOverride(canvas, pt);
+    const seg = await this.loadObject();
+    const r = seg.segment(canvas, { keypoint: { x: pt.x, y: pt.y } });
+    try {
+      const m = r.confidenceMasks[OBJECT_MASK];
+      return { w: m.width, h: m.height, data: m.getAsFloat32Array().slice() };
+    } finally { r.close(); }
+  },
+  // Person probability, and the share of the picture that is a head: { w, h, data, head }.
+  // The model also marks things that are not people (a bag on a hook, a cat), so a
+  // person needs a head as well.
   async person(canvas) {
     if (this.override) return this.override(canvas);
     const c = await this.classes(canvas);
-    return { w: c.w, h: c.h, data: core.bgPerson(c.conf[0]) };
+    return { w: c.w, h: c.h, data: core.bgPerson(c.conf[0]), head: core.headShare(c.conf) };
   },
   // Skin probability, and the share of the picture that is face skin: { w, h, data, face }.
   async skin(canvas) {
@@ -3275,23 +3524,32 @@ tools.bg = {
     if (pv) for (const c of [pv.photo, pv.mask, pv.fg, pv.bg]) core.release(c);   // pv.out is app.preview.src
     this.pv = null; this.model = null; this.strokes = []; this.stroke = null; this.cursor = null;
   },
-  // Find the person, fit the edges, and build the preview. Runs once per opening.
+  // Pick the subject, fit the edges, and build the preview. Runs once per opening.
+  // In order: a person (with a head); else a plain border colour (taken away
+  // by colour); else an object: the thing the person model marked if it marked one
+  // (a bag, a coat), or the object at the centre of the photo.
   async prepare(ticket) {
-    busy(true, segmenter.promise || segmenter.override ? 'Finding the person' : 'Loading model');
+    busy(true, segmenter.promise || segmenter.override ? 'Finding the subject' : 'Loading model');
     try {
       await nextFrame();
       const guide = core.bgGuide(app.edits.current);
+      let model;
       try {
         const person = await segmenter.person(guide);
         if (ticket !== this.ticket) return;
         $('#busy').textContent = 'Finding the edges';
         await nextFrame();
-        this.model = core.bgModel(guide, person);
+        model = { ...core.bgModel(guide, person), kind: 'person' };
+        const notPerson = person.head !== undefined && person.head < core.PERSON_MIN_HEAD;
+        if (model.found < BG_MIN_PERSON || notPerson) {
+          const mark = model.found >= BG_MIN_PERSON ? core.markedPoint(person) : null;
+          model = core.keyModel(guide) || await this.objectModel(guide, mark || { x: 0.5, y: 0.5 }, !mark, ticket);
+        }
       } finally { core.release(guide); }
+      if (!model || ticket !== this.ticket) return;
+      this.model = model;
       this.buildPreview();
-      if (this.model.found < BG_MIN_PERSON) {
-        notify('No person found in this photo. Use Keep to paint in what should stay.', 'watch', { id: 'bg-none' });
-      }
+      this.noticeIfEmpty();
       this.sync();
     } catch (err) {
       if (ticket === this.ticket) {
@@ -3299,6 +3557,41 @@ tools.bg = {
         closeTool();
       }
       throw err;
+    } finally { busy(false); }
+  },
+  // The object under pt (0 to 1 across the guide), as a cut-out model.
+  async objectModel(guide, pt, centre, ticket) {
+    $('#busy').textContent = segmenter.objectPromise || segmenter.objectOverride ? 'Picking the object' : 'Loading model';
+    await nextFrame();
+    const obj = await segmenter.object(guide, pt);
+    if (ticket !== this.ticket) return null;
+    $('#busy').textContent = 'Finding the edges';
+    await nextFrame();
+    return { ...core.bgModel(guide, obj), kind: 'object', centre };
+  },
+  noticeIfEmpty() {
+    if (this.model.found < BG_MIN_PERSON) notify('Nothing found to keep here. Tap the subject to pick it.', 'watch', { id: 'bg-none' });
+  },
+  // A tap in view mode (q in image pixels): pick the object under the finger instead.
+  async tap(q) {
+    if (!this.pv || this.s.mode !== 'view' || app.busyCount) return;
+    const src = app.edits.current;
+    if (q.x < 0 || q.y < 0 || q.x >= src.width || q.y >= src.height) return;
+    const ticket = ++this.ticket;
+    busy(true, 'Picking the object');
+    try {
+      const guide = core.bgGuide(src);
+      let model;
+      try { model = await this.objectModel(guide, { x: q.x / src.width, y: q.y / src.height }, false, ticket); }
+      finally { core.release(guide); }
+      if (!model || ticket !== this.ticket) return;
+      for (const c of [this.pv.photo, this.pv.mask, this.pv.fg, this.pv.bg]) core.release(c);
+      this.model = model; this.strokes = [];
+      this.buildPreview();
+      this.noticeIfEmpty();
+      this.sync();
+    } catch (err) {
+      if (ticket === this.ticket) notify('Picking an object did not work: ' + (err && err.message ? err.message : err), 'fail', { id: 'bg-pick' });
     } finally { busy(false); }
   },
   // The preview works at screen size: the guided alpha (q) is kept, so feather
@@ -3311,8 +3604,17 @@ tools.bg = {
     const photo = core.makeCanvas(W, H), pctx = photo.getContext('2d');
     pctx.imageSmoothingQuality = 'high';
     pctx.drawImage(src, 0, 0, W, H);
-    const pv = { k, W, H, photo, q: core.bgGuided(photo, W, H, this.model),
+    let q;
+    if (this.model.kind === 'key') {
+      // A colour key also puts the edge colours right, so the preview shows those.
+      const kc = core.keyCutCanvas(photo, W, H, this.model);
+      pctx.drawImage(kc.canvas, 0, 0);
+      core.release(kc.canvas);
+      q = kc.a;
+    } else q = core.bgGuided(photo, W, H, this.model);
+    const pv = { k, W, H, photo, q,
       mask: core.makeCanvas(W, H), fg: core.makeCanvas(W, H), bg: core.makeCanvas(W, H), out: core.makeCanvas(W, H) };
+    if (app.preview && app.preview.src !== pv.out && this.pv) core.release(app.preview.src);
     this.pv = pv;
     app.preview = { src: pv.out, w: src.width, h: src.height, texts: app.edits.texts };
     this.refreshBackdrop(false);
@@ -3373,9 +3675,13 @@ tools.bg = {
     $('#bg-brush-out').textContent = s.brush + ' px';
     $('#bg-undo-stroke').disabled = !this.strokes.length;
     const n = this.strokes.length;
-    const cov = ready && this.model.found;
-    $('#bg-out').textContent = !ready ? 'Finding the person.' :
-      (cov < BG_MIN_PERSON ? 'No person found' : 'Person found in ' + Math.round(cov * 100) + ' % of the photo') +
+    document.body.toggleAttribute('data-bg-ready', ready);
+    const m = this.model;
+    $('#bg-out').textContent = !ready ? 'Finding the subject.' :
+      (m.found < BG_MIN_PERSON ? 'Nothing picked' :
+        m.kind === 'person' ? 'Person found in ' + Math.round(m.found * 100) + ' % of the photo' :
+        m.kind === 'key' ? 'Plain background removed' :
+        (m.centre ? 'Centre object picked' : 'Object picked')) +
       (n ? ', ' + n + (n > 1 ? ' strokes.' : ' stroke.') : '.');
   },
   async apply() {
@@ -3384,8 +3690,13 @@ tools.bg = {
     const model = this.model, strokes = this.strokes.slice(), feather = this.s.feather * BG_FEATHER_STEP;
     const o = { fill: this.s.fill, colour: this.s.colour, blur: this.s.blur };
     await commit('Remove background', (img) => {
-      const a = core.bgStrokes(core.bgFeather(core.bgGuided(img, W, H, model), W, H, feather), W, H, strokes, 1);
-      return core.renderCutout(img, a, W, H, o);
+      if (model.kind !== 'key') {
+        const a = core.bgStrokes(core.bgFeather(core.bgGuided(img, W, H, model), W, H, feather), W, H, strokes, 1);
+        return core.renderCutout(img, a, W, H, o);
+      }
+      const kc = core.keyCutCanvas(img, W, H, model);
+      try { return core.renderCutout(kc.canvas, core.bgStrokes(core.bgFeather(kc.a, W, H, feather), W, H, strokes, 1), W, H, o); }
+      finally { core.release(kc.canvas); }
     });
   },
 };

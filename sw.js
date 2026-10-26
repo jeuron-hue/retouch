@@ -3,7 +3,7 @@
 // What it does, in plain words:
 // 1. On install it downloads the app shell (the page, manifest, icons, fonts)
 //    into a cache, so the app opens with no network at all. MediaPipe and its
-//    model (about 28 MB) go in a second cache named by their pinned version, so
+//    models (about 34 MB) go in a second cache named by their pinned version, so
 //    an app release does not download them again; only a new pin does.
 // 2. On every request for one of our own files it answers from that cache first.
 //    It never touches any other website: requests to other origins are ignored.
@@ -15,7 +15,7 @@
 // in retouch.html (retouch_checks.cjs fails if they differ). A new version makes
 // the browser install a fresh worker, and the app shows "Update available".
 
-const CACHE_VERSION = '0.6.2';
+const CACHE_VERSION = '0.7.0';
 const CACHE = 'retouch-v' + CACHE_VERSION;
 const SHARE_CACHE = 'retouch-share';
 const SHARE_KEY = 'shared-image';
@@ -47,6 +47,7 @@ const VENDOR = [
   'vendor/mediapipe/vision_wasm_internal.js',
   'vendor/mediapipe/vision_wasm_internal.wasm',
   'vendor/mediapipe/selfie_multiclass_256x256.tflite',
+  'vendor/mediapipe/magic_touch.tflite',
 ];
 
 self.addEventListener('install', (event) => {
