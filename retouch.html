@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.6.1 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.6.2 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -651,7 +651,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.6.1';
+const APP_VERSION = '0.6.2';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -1103,6 +1103,7 @@ core.BG_GUIDE_PASSES = 2;       // the second pass starts from the first one's r
                                 // a mask that sits a few pixels off back onto the edge
 core.BG_EDGE_LO = 0.2;          // the filtered mask is ramped from LO (cut) to HI (kept),
 core.BG_EDGE_HI = 0.8;          // which clears faint haze around the person
+core.BG_FOUND = 0.5;            // a pixel counts as found (person, or skin) at this probability or more
 core.BRUSH_SOFT = 0.35;         // the outer share of the brush radius that fades out
 core.BG_VEIL = 'rgba(206,34,24,0.46)';   // brush view: darkroom-red tint over what will be cut away
 core.STRIP_PIXELS = 1000000;    // full-size pixels are read and written in strips of about this many
@@ -1217,22 +1218,25 @@ core.bgGuide = (src) => {
 };
 
 // person = { w, h, data } from the model, any size. Returns the coefficients on the
-// guide's grid, and the share of the photo the model thinks is a person.
+// guide's grid and two shares of the photo. coverage is the mean probability, used to
+// size the skin filter. found is the share at BG_FOUND or more, which is what the cut
+// keeps: the model never says 0, so a photo with no one in it still averages about
+// 8 % from faint haze everywhere, but none of it is found.
 core.bgModel = (guide, person) => {
   const w = guide.width, h = guide.height, n = w * h;
   const d = guide.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
   const I = new Float32Array(3 * n);
   for (let i = 0; i < n; i++) { I[3 * i] = d[4 * i] / 255; I[3 * i + 1] = d[4 * i + 1] / 255; I[3 * i + 2] = d[4 * i + 2] / 255; }
   let p = person.w === w && person.h === h ? person.data : core.resampleMask(person.data, person.w, person.h, w, h);
-  let sum = 0;
-  for (let i = 0; i < n; i++) sum += p[i];
+  let sum = 0, hit = 0;
+  for (let i = 0; i < n; i++) { sum += p[i]; if (p[i] >= core.BG_FOUND) hit++; }
   const r = Math.max(1, Math.round(core.BG_GUIDE_RADIUS * Math.max(w, h)));
   let m = null;
   for (let k = 0; k < core.BG_GUIDE_PASSES; k++) {
     if (m) { p = new Float32Array(n); core.guidedApply(d, w, h, 0, h, m, p); }
     m = { ...core.guidedCoeffs(I, p, w, h, r, core.BG_GUIDE_EPS), w, h };
   }
-  return { ...m, coverage: sum / n };
+  return { ...m, coverage: sum / n, found: hit / n };
 };
 
 // Alpha for rows y0 to y0 + n of a W x H output, from those rows' RGBA pixels:
@@ -3285,7 +3289,7 @@ tools.bg = {
         this.model = core.bgModel(guide, person);
       } finally { core.release(guide); }
       this.buildPreview();
-      if (this.model.coverage < BG_MIN_PERSON) {
+      if (this.model.found < BG_MIN_PERSON) {
         notify('No person found in this photo. Use Keep to paint in what should stay.', 'watch', { id: 'bg-none' });
       }
       this.sync();
@@ -3369,8 +3373,10 @@ tools.bg = {
     $('#bg-brush-out').textContent = s.brush + ' px';
     $('#bg-undo-stroke').disabled = !this.strokes.length;
     const n = this.strokes.length;
+    const cov = ready && this.model.found;
     $('#bg-out').textContent = !ready ? 'Finding the person.' :
-      'Person found in ' + Math.round(this.model.coverage * 100) + ' % of the photo' + (n ? ', ' + n + (n > 1 ? ' strokes.' : ' stroke.') : '.');
+      (cov < BG_MIN_PERSON ? 'No person found' : 'Person found in ' + Math.round(cov * 100) + ' % of the photo') +
+      (n ? ', ' + n + (n > 1 ? ' strokes.' : ' stroke.') : '.');
   },
   async apply() {
     await this.ready;
@@ -3433,7 +3439,7 @@ tools.skin = {
       await nextFrame();
       if (ticket !== this.ticket) return;
       this.buildPreview();
-      if (this.model.coverage < BG_MIN_PERSON) {
+      if (this.model.found < BG_MIN_PERSON) {
         notify('No skin found in this photo. Use Add to paint where to smooth.', 'watch', { id: 'skin-none' });
       }
       this.sync();
@@ -3525,8 +3531,10 @@ tools.skin = {
     $('#skin-brush-out').textContent = s.brush + ' px';
     $('#skin-undo-stroke').disabled = !this.strokes.length;
     const n = this.strokes.length;
+    const cov = ready && this.model.found;
     $('#skin-out').textContent = !ready ? 'Finding the skin.' :
-      'Skin found in ' + Math.round(this.model.coverage * 100) + ' % of the photo' + (n ? ', ' + n + (n > 1 ? ' strokes.' : ' stroke.') : '.');
+      (cov < BG_MIN_PERSON ? 'No skin found' : 'Skin found in ' + Math.round(cov * 100) + ' % of the photo') +
+      (n ? ', ' + n + (n > 1 ? ' strokes.' : ' stroke.') : '.');
   },
   async apply() {
     await this.ready;

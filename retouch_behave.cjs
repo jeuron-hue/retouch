@@ -1636,6 +1636,13 @@ test('background core: box mean, resample, person probability and edge ramp (ind
     // Share of the photo the model calls a person, from a mask at the guide's size.
     const g = core.makeCanvas(40, 30), gm = new Float32Array(1200).map((_, i) => (i % 40 < 10 ? 1 : 0));
     const coverage = +core.bgModel(g, { w: 40, h: 30, data: gm }).coverage.toFixed(4);
+    const found = +core.bgModel(g, { w: 40, h: 30, data: gm }).found.toFixed(4);
+    // The real model never says 0: on a photo with no one in it, "person" is a faint
+    // 0.08 everywhere. That averages to 8 %, but none of it is found.
+    const hazeModel = core.bgModel(g, { w: 40, h: 30, data: new Float32Array(1200).fill(0.08) });
+    const hazeShares = [+hazeModel.coverage.toFixed(4), +hazeModel.found.toFixed(4)];
+    // An even chance counts as found, just under it does not (a third at each, a third at 0).
+    const edgeFound = +core.bgModel(g, { w: 40, h: 30, data: new Float32Array(1200).map((_, i) => [0.5, 0.49, 0][i % 3]) }).found.toFixed(4);
     // putAlpha over a box writes only that box, from the matching part of the map.
     const pc = core.makeCanvas(30, 20), pctx = pc.getContext('2d', { willReadFrequently: true });
     const amap = new Float32Array(600).map((_, i) => (i % 30) / 29);
@@ -1645,7 +1652,7 @@ test('background core: box mean, resample, person probability and edge ramp (ind
     const pa = (x, y) => pctx.getImageData(x, y, 1, 1).data[3];
     const put = [pa(9, 8), pa(10, 8), pa(24, 14), pa(25, 14), pa(17, 4), pa(17, 5), pa(17, 15), pa(20, 10)];
     const guideDims = [core.bgGuideDims(4080, 3072), core.bgGuideDims(3072, 4080), core.bgGuideDims(300, 200)];
-    return { boxErr, up, ramp, same, uneven, person, curve, lo, hi, guideDims, guideLong: core.BG_GUIDE_LONG, haze, coverage, put };
+    return { boxErr, up, ramp, same, uneven, person, curve, lo, hi, guideDims, guideLong: core.BG_GUIDE_LONG, haze, coverage, found, hazeShares, edgeFound, put };
   });
   assert(r.boxErr < 1e-5, 'box mean differs from a direct sum by ' + r.boxErr);
   assert(r.up.join() === '0,0.25,0.75,1,0,0.25,0.75,1,0,0.25,0.75,1,0,0.25,0.75,1', 'resample 2x2 to 4x4: ' + r.up);
@@ -1658,6 +1665,9 @@ test('background core: box mean, resample, person probability and edge ramp (ind
   assert(r.guideLong === 1024, 'guide long edge ' + r.guideLong);
   assert(r.haze.join() === '0,0.5,1', 'haze cleared, certain kept, centred: ' + r.haze);
   assert(r.coverage === 0.25, 'person share ' + r.coverage);
+  assert(r.found === 0.25, 'person found ' + r.found);
+  assert(r.hazeShares.join() === '0.08,0', 'faint haze averages 8 % but none is found: ' + r.hazeShares);
+  assert(r.edgeFound === 0.3333, 'an even chance is found, 0.49 is not: ' + r.edgeFound);
   assert(r.put.join() === '0,88,211,0,0,149,0,176', 'putAlpha over a box: ' + r.put);
   assert(JSON.stringify(r.guideDims) === '[{"w":1024,"h":771},{"w":771,"h":1024},{"w":300,"h":200}]', 'guide sizes ' + JSON.stringify(r.guideDims));
   await ctx.close();
@@ -1877,6 +1887,32 @@ test('background core: feather, brush strokes and the backdrop fills', async () 
   await ctx.close();
 }, { core: true });
 
+// A photo with no one in it: the real model's answer is a faint haze of about 0.08
+// "person" everywhere (and the same floor for skin). Found 26/10/26 on a logo, where
+// the sheet said 8 % and cut the whole picture away without a word.
+test('background and skin: a photo with no one in it says so, haze is not a person', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  await load(page, personPng());
+  await page.evaluate(() => {
+    const haze = (v) => () => ({ w: 16, h: 12, data: new Float32Array(192).fill(v) });
+    retouch.segmenter.override = haze(0.08);
+    const skin = haze(0.034);
+    retouch.segmenter.skinOverride = () => ({ ...skin(), face: 0.017 });
+  });
+  const notices = () => page.evaluate(() => Array.from(document.querySelectorAll('.notice')).map((n) => n.textContent));
+  await bgReady(page);
+  const bg = await page.evaluate(() => ({ cov: +retouch.tools.bg.model.coverage.toFixed(3), found: retouch.tools.bg.model.found }));
+  assert(bg.cov === 0.08 && bg.found === 0, 'haze: ' + JSON.stringify(bg));
+  assert(await page.textContent('#bg-out') === 'No person found.', 'status line ' + await page.textContent('#bg-out'));
+  assert((await notices()).some((t) => /No person found in this photo/.test(t)), 'no-person notice: ' + await notices());
+  await page.click('.sheet-panel[data-tool="bg"] [data-cancel]');
+  await skinReady(page);
+  assert(await page.textContent('#skin-out') === 'No skin found.', 'skin status ' + await page.textContent('#skin-out'));
+  assert((await notices()).some((t) => /No skin found in this photo/.test(t)), 'no-skin notice: ' + await notices());
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
 test('background: the sheet cuts the person out onto transparent, colour and blur', async () => {
   const { ctx, page } = await newApp({ init: [TEXT_INIT, BG_INIT] });
   await load(page, personPng());
@@ -1974,6 +2010,25 @@ test('background: refine brush keeps and erases with one finger; two fingers zoo
   samePx(got[1], SKIN.concat(255), 1, 'rest of the person kept');
   samePx(got[2], SKY.concat(255), 1, 'sky painted back with keep');
   assert(got[3][3] === 0, 'unpainted sky still cut: ' + got[3]);
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+// A flat graphic like a logo: blue field, an orange block, white bars. The real model
+// must find no one in it, and the sheet must say so.
+const logoPng = () => makePng(480, 120, (x, y) => {
+  if (x >= 30 && x < 110 && y >= 20 && y < 100 && x - 30 > (y - 20) / 3) return [240, 120, 30, 255];
+  if (x >= 140 && x < 450 && ((y >= 30 && y < 55) || (y >= 70 && y < 85))) return [255, 255, 255, 255];
+  return [0, 114, 188, 255];
+});
+test('background: the real model finds no one in a flat graphic', async () => {
+  const { ctx, page } = await newApp();
+  await load(page, logoPng());
+  await bgReady(page);
+  const m = await page.evaluate(() => ({ cov: retouch.tools.bg.model.coverage, found: retouch.tools.bg.model.found }));
+  assert(m.found < 0.01, 'person found in a logo: ' + JSON.stringify(m));
+  assert(await page.textContent('#bg-out') === 'No person found.', 'status line ' + await page.textContent('#bg-out'));
+  console.log('      logo: mean ' + (m.cov * 100).toFixed(1) + ' %, found ' + (m.found * 100).toFixed(1) + ' %');
   assert(page.errors.length === 0, page.errors.join('; '));
   await ctx.close();
 });
@@ -2635,7 +2690,7 @@ test('real-photo tests (reference/test-images)', async () => {
     // Background removal with the real model: these are photos of people, so a person
     // must be found, and the cut-out exports as a clean PNG.
     await bgReady(page);
-    const cov = await page.evaluate(() => retouch.tools.bg.model.coverage);
+    const cov = await page.evaluate(() => retouch.tools.bg.model.found);
     assert(cov > 0.03 && cov < 0.97, f + ': person found in ' + (cov * 100).toFixed(1) + ' % of the photo');
     await applyTool(page, 'bg');
     await page.click('#btn-export');

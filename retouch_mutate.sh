@@ -131,7 +131,10 @@ guide: small photos enlarged ||| const k = Math.min(1, core.BG_GUIDE_LONG / Math
 guide: one pass only ||| core.BG_GUIDE_PASSES = 2; ||| core.BG_GUIDE_PASSES = 1;
 guide: window too small ||| core.BG_GUIDE_RADIUS = 0.024; ||| core.BG_GUIDE_RADIUS = 0.008;
 guide: second pass ignores the first ||| if (m) { p = new Float32Array(n); core.guidedApply(d, w, h, 0, h, m, p); } ||| if (m) { core.guidedApply(d, w, h, 0, h, m, new Float32Array(n)); }
-guide: coverage is a sum ||| return { ...m, coverage: sum / n }; ||| return { ...m, coverage: sum / 1000 };
+guide: coverage is a sum ||| return { ...m, coverage: sum / n, found: hit / n }; ||| return { ...m, coverage: sum / 1000, found: hit / n };
+guide: found counts the haze ||| if (p[i] >= core.BG_FOUND) hit++; ||| hit += p[i];
+guide: an even chance not found ||| if (p[i] >= core.BG_FOUND) hit++; ||| if (p[i] > core.BG_FOUND) hit++;
+guide: found threshold lowered ||| core.BG_FOUND = 0.5; ||| core.BG_FOUND = 0.05;
 apply: half-pixel shift ||| const f = Math.min(m.w - 1, Math.max(0, (x + 0.5) * sx - 0.5)); ||| const f = Math.min(m.w - 1, Math.max(0, x * sx));
 apply: strips overwrite the top ||| out[(y0 + j) * W + x] = core.bgCurve(q); ||| out[j * W + x] = core.bgCurve(q);
 apply: green read as red ||| (ag[i00] * w00 + ag[i01] * w01 + ag[i10] * w10 + ag[i11] * w11) * data[o + 1] + ||| (ag[i00] * w00 + ag[i01] * w01 + ag[i10] * w10 + ag[i11] * w11) * data[o] +
