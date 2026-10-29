@@ -47,7 +47,14 @@ retouch has its own darkroom style. It does not use Lab Book (Gary's general des
 Known limitation to state in the README: Pixel photos are Ultra HDR JPEGs; re-encoding drops the HDR gain map, so exports look slightly flatter on HDR screens.
 
 ## Out of scope for v1
-Video, object removal, any AI feature needing a network call, HEIC/RAW export, preserving Ultra HDR, batch editing, layers beyond text.
+Video (now planned as phases V1 to V4 below), object removal, any AI feature needing a network call, HEIC/RAW export, preserving Ultra HDR, batch editing, layers beyond text. Sorting photos and videos into folders is a separate app, not part of retouch (agreed 29/10/26).
+
+## Video (planned 29/10/26)
+Same rules as photos: on the phone, offline, nothing uploaded. Route: Chrome's WebCodecs (VideoDecoder, VideoEncoder, AudioDecoder, AudioEncoder) for decode and encode, with small MP4 demux and mux libraries vendored in vendor/ and pinned in the build notes like MediaPipe. Not ffmpeg.wasm (about 30 MB, slow on a phone, and its threads need headers GitHub Pages cannot send). Phases, easiest first, each with the usual gate:
+- V1: open and play a video, time crop (trim), audio removal. Trim and audio removal avoid re-encoding where they can (cut on keyframes, copy the streams), so they are fast and lossless. First job of V1: find out whether Chrome on the Pixel can encode AAC audio; if not, decide Opus or no audio for re-encoded clips, and write the answer here.
+- V2: cut and combine clips. Clips that differ in size or frame rate are re-encoded to match, so the encode pipeline is built here.
+- V3: resolution and frame rate resampling, and canvas resize (the photo Add canvas tool, frame by frame). Reuses V2's encoder.
+- V4: face smoothing. The skin model runs on every frame (about 1800 a minute at 30 fps), and the mask is steadied across frames so the skin does not flicker. Hardest, so last.
 
 ## Build order
 Phase 1: shell, PWA install, share target, open/export, metadata strip, crop/transform, resize, add canvas.
@@ -62,6 +69,7 @@ After Phase 5: the darkroom UI redesign (v0.6.0, 24/10/26). Gary then uses retou
 ## Testing
 - retouch_checks.cjs (static): CSP present, no external origins anywhere in the source, no CDN URLs, required files present, vendored versions recorded.
 - retouch_behave.cjs (behavioural): real Chromium via Playwright, since canvas and wasm need a real browser. Use synthetic fixtures generated in the test (gradients, shapes, a fake "spot") so results can be asserted numerically: crop dimensions, padding ratios, metadata absence, undo/redo, inpainting fills the spot within a colour tolerance.
+- Video tests build their own synthetic clips in the test (coloured frames and a tone, encoded with WebCodecs), so durations, frame counts, sizes and the absence of an audio track can be asserted as numbers.
 - Segmentation and smoothing tests run against reference/test-images/ when present and skip otherwise. Pictures without people (logos, banners, objects, pets) for trying the cut-out can be tested in a cloud session; photos of people cannot.
 - retouch_mutate.sh: mutation runner over the core image functions. Survivors mean the fixtures get tightened.
 - Everything green before any commit.
