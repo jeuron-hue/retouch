@@ -5,6 +5,8 @@
 // browser, so this suite serves the repo on localhost and drives the app.
 // Every fixture is synthetic and built here (gradients, flat colours, files
 // with planted EXIF/XMP/IPTC/GPS), so results can be checked as numbers.
+// Video tests build their clips in the page with WebCodecs (coloured frames and a
+// tone) and read the exports back with the MP4 reader in retouch_checks.cjs.
 // Tests that need a real person (phase 3 onwards) read reference/test-images/
 // and skip cleanly when it is absent. The background tests swap the model for a
 // stand-in that marks pixels of a known colour, so the rest of the pipeline can be
@@ -20,7 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const zlib = require('zlib');
-const { findImageMetadata, imageFormat } = require('./retouch_checks.cjs');
+const { findImageMetadata, imageFormat, parseMp4, findVideoMetadata } = require('./retouch_checks.cjs');
 
 const ROOT = __dirname;
 const PAGE_FILE = process.env.RETOUCH_HTML ? path.resolve(process.env.RETOUCH_HTML) : path.join(ROOT, 'retouch.html');
@@ -823,7 +825,8 @@ test('before / after hold on the main view and on every tool', async () => {
   }
   await page.click('#btn-export');
   await hold('.sheet-panel[data-tool="export"] [data-hold]');
-  const panels = await page.$$eval('.sheet-panel', (ps) => ps.map((p) => [p.dataset.tool, !!p.querySelector('[data-hold]')]));
+  // The video check edits nothing, so it alone has no before to hold.
+  const panels = await page.$$eval('.sheet-panel', (ps) => ps.map((p) => [p.dataset.tool, !!p.querySelector('[data-hold]') || (p.dataset.tool === 'vcheck' && p.hasAttribute('data-no-hold'))]));
   assert(panels.every(([, h]) => h), 'every tool needs a hold button: ' + JSON.stringify(panels));
   await ctx.close();
 });
@@ -2903,6 +2906,623 @@ test('spot: a tap fills a spot, a stroke fills a scratch; undo stroke; two finge
   await page.click('.sheet-panel[data-tool="spot"] [data-cancel]');
   assert((await page.evaluate(() => retouch.app.edits.stack.length)) === 3, 'cancel keeps nothing');
   assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+/* ---------- Video phase V1: check, open, trim, sound, export ---------- */
+
+// In the page: build a synthetic clip with WebCodecs and the app's own Mediabunny.
+// Frame i is a flat colour whose red level says which frame it is (20 + 2i), so a
+// decoded frame can be traced back. The sound is a tone rising from 440 Hz (so no two
+// packets are alike and each can be traced too), in Opus (Chromium on
+// Linux has no AAC encoder; the copying code does not care which codec it is).
+// The file is written with the index (moov) last, so a test can add boxes to it.
+const VIDEO_INIT = () => {
+  window.__makeClip = async (o = {}) => {
+    const { w = 320, h = 240, fps = 30, frames = 90, gop = 30, audio = true, rotation = 0, colorSpace = null } = o;
+    const MB = await retouch.loadMediabunny();
+    const target = new MB.BufferTarget();
+    const out = new MB.Output({ format: new MB.Mp4OutputFormat({ fastStart: false }), target });
+    const vs = new MB.EncodedVideoPacketSource('avc');
+    out.addVideoTrack(vs, { rotation });
+    let as = null;
+    if (audio) { as = new MB.EncodedAudioPacketSource('opus'); out.addAudioTrack(as); }
+    await out.start();
+    const vc = [];
+    const enc = new VideoEncoder({ output: (c, m) => vc.push([c, m]), error: (e) => { throw e; } });
+    enc.configure({ codec: 'avc1.42001f', width: w, height: h, framerate: fps, bitrate: 1e6 });
+    const cv = new OffscreenCanvas(w, h), cx = cv.getContext('2d');
+    for (let i = 0; i < frames; i++) {
+      cx.fillStyle = 'rgb(' + (20 + 2 * i) + ',128,64)'; cx.fillRect(0, 0, w, h);
+      const f = new VideoFrame(cv, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
+      enc.encode(f, { keyFrame: i % gop === 0 }); f.close();
+    }
+    await enc.flush(); enc.close();
+    const ac = [];
+    if (audio) {
+      const ae = new AudioEncoder({ output: (c, m) => ac.push([c, m]), error: (e) => { throw e; } });
+      ae.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1, bitrate: 48000 });
+      const n = 960, total = Math.round(48000 * frames / fps);
+      for (let s = 0; s < total; s += n) {
+        const d = new Float32Array(n);
+        for (let k = 0; k < n; k++) { const tau = (s + k) / 48000; d[k] = 0.3 * Math.sin(2 * Math.PI * (440 * tau + 150 * tau * tau)); }
+        const a = new AudioData({ format: 'f32', sampleRate: 48000, numberOfFrames: n, numberOfChannels: 1, timestamp: Math.round(s * 1e6 / 48000), data: d });
+        ae.encode(a); a.close();
+      }
+      await ae.flush(); ae.close();
+    }
+    let i = 0, j = 0;
+    while (i < vc.length || j < ac.length) {
+      if (j >= ac.length || (i < vc.length && vc[i][0].timestamp <= ac[j][0].timestamp)) {
+        const [c, m] = vc[i++];
+        if (m && m.decoderConfig && colorSpace) m.decoderConfig.colorSpace = colorSpace;
+        await vs.add(MB.EncodedPacket.fromEncodedChunk(c), m);
+      } else { const [c, m] = ac[j++]; await as.add(MB.EncodedPacket.fromEncodedChunk(c), m); }
+    }
+    await out.finalize();
+    return Array.from(new Uint8Array(target.buffer));
+  };
+  // Decode samples (bytes found by the test's own MP4 reader) and return each frame's
+  // mean colour at the centre.
+  window.__decode = async (codec, description, samples) => {
+    const got = [];
+    const dec = new VideoDecoder({
+      output: (f) => {
+        const c = new OffscreenCanvas(8, 8), x = c.getContext('2d');
+        x.drawImage(f, f.displayWidth / 2 - 4, f.displayHeight / 2 - 4, 8, 8, 0, 0, 8, 8);
+        const d = x.getImageData(0, 0, 8, 8).data;
+        got.push([d[0], d[1], d[2]]); f.close();
+      },
+      error: (e) => { got.push('error ' + e.message); },
+    });
+    dec.configure({ codec, description: new Uint8Array(description) });
+    samples.forEach((s, i) => dec.decode(new EncodedVideoChunk({ type: s.key ? 'key' : 'delta', timestamp: i * 33333, data: new Uint8Array(s.data) })));
+    await dec.flush();
+    return got;
+  };
+  window.__csp = [];
+  document.addEventListener('securitypolicyviolation', (e) => window.__csp.push(e.violatedDirective + ' ' + e.blockedURI));
+};
+
+async function makeClip(page, opts = {}) {
+  await page.evaluate(VIDEO_INIT);
+  return Buffer.from(await page.evaluate((o) => window.__makeClip(o), opts));
+}
+async function loadVideo(page, buffer, name = 'PXL_20261029_test.mp4') {
+  await page.evaluate(() => { window.__beforeClip = window.retouch.app.video; });
+  await page.setInputFiles('#file', { name, mimeType: 'video/mp4', buffer });
+  await page.waitForFunction(() => window.retouch.app.video && window.retouch.app.video !== window.__beforeClip && window.retouch.app.busyCount === 0);
+}
+// Open the video export sheet, wait for the copy, download it, return the bytes.
+async function exportVideo(page) {
+  await page.click('#btn-export');
+  await page.waitForFunction(() => !document.querySelector('#vexport-download').disabled || /Fail/.test(document.querySelector('#vexport-meta').textContent), null, { timeout: 30000 });
+  const meta = await page.textContent('#vexport-meta');
+  assert(!/Fail/.test(meta), 'export failed: ' + meta);
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#vexport-download')]);
+  const bytes = fs.readFileSync(await dl.path());
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  return { bytes, name: dl.suggestedFilename() };
+}
+const vtrack = (m) => m.tracks.find((t) => t.handler === 'vide');
+const strack = (m) => m.tracks.find((t) => t.handler === 'soun');
+const seconds = (t) => t.mediaDuration / t.mdhd.timescale;
+// avc1.PPCCLL from the avcC box, as WebCodecs wants it.
+const avcCodec = (avcC) => 'avc1.' + Array.from(avcC.subarray(1, 4)).map((x) => x.toString(16).padStart(2, '0')).join('');
+async function decodeTrack(page, t, from = 0, count = t.sampleCount) {
+  const sync = new Set(t.sync || []);
+  const samples = [];
+  for (let k = from; k < from + count; k++) samples.push({ key: t.sync ? sync.has(k) : true, data: Array.from(t.sample(k)) });
+  return page.evaluate(([c, d, s]) => window.__decode(c, d, s), [avcCodec(t.entryChild('avcC')), Array.from(t.entryChild('avcC')), samples]);
+}
+
+// Add what a phone camera writes: a GPS position, make and model, and an XMP packet.
+const mp4Box = (type, body) => { const h = Buffer.alloc(8); h.writeUInt32BE(8 + body.length); h.write(type, 4, 'latin1'); return Buffer.concat([h, body]); };
+function plantVideoMetadata(clip) {
+  const b = Buffer.from(clip);
+  let i = 0, moov = null;
+  while (i + 8 <= b.length) { const size = b.readUInt32BE(i); if (b.toString('latin1', i + 4, i + 8) === 'moov') moov = { start: i, end: i + size }; i += size; }
+  assert(moov && moov.end === b.length, 'the fixture needs its moov box last');
+  const tag = (type, text) => { const t = Buffer.from(text); const len = Buffer.alloc(4); len.writeUInt16BE(t.length, 0); len.writeUInt16BE(0x15C7, 2); return mp4Box(type, Buffer.concat([len, t])); };
+  const udta = mp4Box('udta', Buffer.concat([tag('\xA9xyz', '+01.2897+103.8501/'), tag('\xA9mak', 'Google'), tag('\xA9mod', 'Pixel 9 Pro XL'),
+    mp4Box('meta', Buffer.concat([Buffer.alloc(4), mp4Box('hdlr', Buffer.concat([Buffer.alloc(8), Buffer.from('mdta'), Buffer.alloc(13)]))]))]));
+  const newMoov = mp4Box('moov', Buffer.concat([b.subarray(moov.start + 8, moov.end), udta]));
+  const xmp = mp4Box('uuid', Buffer.concat([Buffer.from('be7acfcb97a942e89c71999491e3afac', 'hex'), Buffer.from(XMP_PACKET)]));
+  return Buffer.concat([b.subarray(0, moov.start), xmp, newMoov]);
+}
+
+test('video core: trim plans, keyframes, sound and write order (independent check)', async () => {
+  const { ctx, page } = await newApp();
+  // A 30 fps clip, keyframes every 10 frames, no B-frames.
+  const P = (n, gop = 10, fps = 30) => Array.from({ length: n }, (_, i) => ({ ts: i / fps, dur: 1 / fps, key: i % gop === 0, seq: i }));
+  // B-frames, decode order I0 P3 B1 B2 P6 B4 B5 I9 ... (presentation times in frames).
+  const B = (() => {
+    const order = [0, 3, 1, 2, 6, 4, 5, 9, 7, 8, 12, 10, 11];
+    return order.map((f, i) => ({ ts: f / 30, dur: 1 / 30, key: f % 9 === 0, seq: i }));
+  })();
+  // An open GOP: the keyframe at frame 6 is followed in decode order by frames 4 and 5,
+  // which need the frames before it.
+  const OPEN = [0, 1, 2, 3, 6, 4, 5, 7, 8].map((f, i) => ({ ts: f / 30, dur: 1 / 30, key: f === 0 || f === 6, seq: i }));
+  const r = await page.evaluate(([P10, B, OPEN]) => {
+    const v = retouch.core.video;
+    const keys = v.keyTimes(P10);
+    return {
+      keys: keys.length, keyEvery: v.keyEvery(keys), keyEvery1: v.keyEvery([2]), keyEveryOdd: v.keyEvery([0, 1, 2, 2.5, 3.5, 4.5]),
+      noKeys: v.planTrim(P10.map((p) => ({ ...p, key: false })), 0, 1),
+      kb: [v.keyBefore(keys, 0.5), v.keyBefore(keys, 1 / 3), v.keyBefore(keys, 1 / 3 - 1e-9), v.keyBefore(keys, 1 / 3 - 1e-4), v.keyBefore(keys, -1), v.keyBefore(keys, 99)],
+      mid: v.planTrim(P10, 0.5, 1.5), exact: v.planTrim(P10, 1 / 3, 1), whole: v.planTrim(P10, 0, 2), tail: v.planTrim(P10, 1.9, 2),
+      b: v.planTrim(B, 0.05, 0.2), bEnd: v.planTrim(B, 0, 4.5 / 30),
+      open: v.planTrim(OPEN, 7 / 30, 9 / 30),
+      snap: [v.snapToFrame([0, 0.1, 0.2], 0.3, 0.12), v.snapToFrame([0, 0.1, 0.2], 0.3, 0.29), v.snapToFrame([0, 0.1, 0.2], 0.3, 0.16)],
+      inter: v.interleave([0, 0.1, 0.2], [0.05, 0.1, 0.3]),
+    };
+  }, [P(60), B, OPEN]);
+  assert(r.keys === 6 && Math.abs(r.keyEvery - 1 / 3) < 1e-9 && r.keyEvery1 === null && r.keyEveryOdd === 1, 'keyframes ' + JSON.stringify([r.keys, r.keyEvery, r.keyEvery1, r.keyEveryOdd]));
+  assert(r.noKeys === null, 'no keyframes, no plan');
+  const t = (x) => Math.round(x * 30 * 1000) / 1000;   // seconds to frames
+  assert(JSON.stringify(r.kb.map(t)) === JSON.stringify([10, 10, 10, 0, 0, 50]), 'keyBefore ' + JSON.stringify(r.kb.map(t)));
+  // From 0.5 s (frame 15) to 1.5 s: starts at the keyframe at frame 10, ends after frame 44.
+  assert(t(r.mid.from) === 10 && t(r.mid.to) === 45 && r.mid.moved && !r.mid.whole, 'mid ' + JSON.stringify(r.mid));
+  assert(r.mid.keep.length === 35 && r.mid.keep[0] === 10 && r.mid.keep[34] === 44, 'mid keep ' + r.mid.keep);
+  assert(!r.exact.moved && t(r.exact.from) === 10 && t(r.exact.to) === 30 && r.exact.keep.length === 20, 'start on a keyframe does not move ' + JSON.stringify(r.exact));
+  assert(r.whole.whole && r.whole.keep.length === 60 && t(r.whole.to) === 60, 'whole ' + JSON.stringify(r.whole));
+  assert(t(r.tail.from) === 50 && r.tail.keep.length === 10, 'tail ' + JSON.stringify(r.tail));
+  // B-frames, from frame 1.5 to frame 6: starts at I0. Frame 6 is past the end, but B4
+  // and B5 are shown and are built from P6, so P6 comes too and the clip runs to frame 7.
+  assert(t(r.b.from) === 0 && JSON.stringify(r.b.keep) === JSON.stringify([0, 1, 2, 3, 4, 5, 6]) && t(r.b.to) === 7, 'B-frames ' + JSON.stringify(r.b));
+  // End at 4.5 frames: frame 4 is the last shown, and it is built from P6, which comes too.
+  assert(JSON.stringify(r.bEnd.keep) === JSON.stringify([0, 1, 2, 3, 4, 5]) && t(r.bEnd.to) === 7, 'B end ' + JSON.stringify(r.bEnd));
+  // Open GOP: frames 4 and 5 sit after the keyframe at 6 in decode order but need what was cut.
+  assert(t(r.open.from) === 6 && JSON.stringify(r.open.keep) === JSON.stringify([4, 7, 8]) && t(r.open.to) === 9, 'open GOP ' + JSON.stringify(r.open));
+  assert(JSON.stringify(r.snap) === JSON.stringify([0.1, 0.3, 0.2]), 'snap ' + JSON.stringify(r.snap));
+  assert(JSON.stringify(r.inter) === JSON.stringify([[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]]), 'interleave ' + JSON.stringify(r.inter));
+  // Sound: 20 ms packets from -20 ms (the encoder's run-in) to 2 s.
+  const A = Array.from({ length: 101 }, (_, i) => ({ ts: -0.02 + i * 0.02, dur: 0.02, key: true, seq: i }));
+  const s = await page.evaluate(([A, P10]) => {
+    const v = retouch.core.video;
+    return { mid: v.planAudio(A, v.planTrim(P10, 0.5, 1.5)), whole: v.planAudio(A, v.planTrim(P10, 0, 1)), odd: v.planAudio(A, { from: 0.335, to: 0.5, whole: false }) };
+  }, [A, P(60)]);
+  // From 1/3 s to 1.5 s: the packet that sounds at 1/3 s (0.32 to 0.34) through the one ending at 1.5 s.
+  assert(s.mid[0] === 17 && s.mid[s.mid.length - 1] === 75 && s.mid.length === 59, 'sound for a trim ' + [s.mid[0], s.mid[s.mid.length - 1], s.mid.length]);
+  assert(s.whole[0] === 0 && s.whole.length === 51, 'untrimmed start keeps the run-in ' + [s.whole[0], s.whole.length]);
+  assert(s.odd[0] === 17 && s.odd[s.odd.length - 1] === 25, 'a packet that ends after the start comes too ' + s.odd);
+  const f = await page.evaluate(() => {
+    const v = retouch.core.video;
+    return {
+      depth: ['avc1.640028', 'avc1.6E0033', 'avc1.7A0033', 'avc1.F40033', 'avc1.42001f', 'hvc1.1.6.L153.B0', 'hvc1.2.4.L153.B0', 'hev1.A2.4.L120.B0', 'hvc1.4.10.L120.9D.08', 'vp09.02.10.10.01.09.16.09', 'vp09.00.10.08', 'av01.0.04M.10', 'av01.0.08M.08', 'vp8', 'mp4a.40.2', ''].map(v.bitDepth),
+      hdr: [v.hdrName({ transfer: 'pq' }), v.hdrName({ transfer: 'hlg' }), v.hdrName({ transfer: 'bt709' }), v.hdrName(null)],
+      time: [0, 1.006, 59.994, 61.5, 3599.999, 3723.45, -2].map(v.fmtTime),
+      isv: [['a.mp4', ''], ['A.MOV', ''], ['clip', 'video/mp4'], ['x.webm', ''], ['photo.jpg', 'image/jpeg'], ['x.mp4.jpg', ''], ['x.m4v', ''], ['x.3gp', 'video/3gpp']].map(([n, ty]) => v.isVideoFile(n, ty)),
+      desc: v.describe({ codec: 'hevc', width: 3840, height: 2160, fps: 59.94, bitDepth: 10, colorSpace: { transfer: 'hlg' }, duration: 12.4, keyEvery: 1, audio: { codec: 'aac', sampleRate: 48000, channels: 2 } }),
+      desc2: v.describe({ codec: 'avc', width: 1080, height: 1920, fps: 30, bitDepth: 8, colorSpace: { transfer: 'bt709' }, duration: 3, keyEvery: null, audio: null }),
+      names: [v.codecName('avc'), v.codecName('aac'), v.codecName('xyz'), v.codecName(null)],
+    };
+  });
+  assert(JSON.stringify(f.depth) === JSON.stringify([8, 10, 10, 10, 8, 8, 10, 10, null, 10, 8, 10, 8, 8, null, null]), 'bit depth ' + JSON.stringify(f.depth));
+  assert(JSON.stringify(f.hdr) === JSON.stringify(['PQ', 'HLG', null, null]), 'hdr ' + JSON.stringify(f.hdr));
+  assert(JSON.stringify(f.time) === JSON.stringify(['0:00.00', '0:01.01', '0:59.99', '1:01.50', '1:00:00.00', '1:02:03.45', '0:00.00']), 'fmtTime ' + JSON.stringify(f.time));
+  assert(JSON.stringify(f.isv) === JSON.stringify([true, true, true, true, false, false, true, true]), 'isVideoFile ' + JSON.stringify(f.isv));
+  assert(f.desc === 'HEVC 3840 × 2160 · 59.94 fps · 10-bit HDR HLG · 0:12.40 · sound AAC 48 kHz 2 ch · keyframe every 1.00 s', 'describe: ' + f.desc);
+  assert(f.desc2 === 'H.264 1080 × 1920 · 30 fps · 8-bit SDR · 0:03.00 · no sound', 'describe: ' + f.desc2);
+  assert(JSON.stringify(f.names) === JSON.stringify(['H.264', 'AAC', 'XYZ', 'unknown']), 'names ' + JSON.stringify(f.names));
+  await ctx.close();
+}, { core: true });
+
+test('video core: edit history, MP4 dates and metadata finder, check report (independent check)', async () => {
+  const { ctx, page } = await newApp();
+  const h = await page.evaluate(() => {
+    const c = new retouch.core.ClipHistory({ start: 0, end: 3, audio: true });
+    const log = [];
+    const snap = () => log.push([c.index, c.current.start, c.current.end, c.current.audio, c.current.label, c.canUndo, c.canRedo]);
+    snap();
+    c.push({ start: 1, end: 2.5 }, 'Trim'); snap();
+    c.push({ audio: false }, 'Remove sound'); snap();
+    c.undo(); snap();
+    c.push({ start: 2 }, 'Trim'); snap();
+    c.undo(); c.undo(); snap(); c.undo(); snap();
+    c.redo(); c.redo(); c.redo(); snap();
+    return { log, len: c.stack.length, orig: c.original };
+  });
+  assert(JSON.stringify(h.log) === JSON.stringify([
+    [0, 0, 3, true, 'Original', false, false],
+    [1, 1, 2.5, true, 'Trim', true, false],
+    [2, 1, 2.5, false, 'Remove sound', true, false],
+    [1, 1, 2.5, true, 'Trim', true, true],
+    [2, 2, 2.5, true, 'Trim', true, false],
+    [0, 0, 3, true, 'Original', false, true],
+    [0, 0, 3, true, 'Original', false, true],
+    [2, 2, 2.5, true, 'Trim', true, false]]), 'history ' + JSON.stringify(h.log));
+  assert(h.len === 3 && h.orig.start === 0 && h.orig.end === 3, 'redo tail dropped, original kept');
+  // A moov with a version 0 mvhd, a version 1 tkhd and a version 0 mdhd, all dated.
+  const full = (type, v, body) => mp4Box(type, Buffer.concat([Buffer.from([v, 0, 0, 0]), body]));
+  const dated = (v) => { const b = Buffer.alloc(v ? 16 : 8); for (let i = 0; i < b.length; i++) b[i] = 0x11 + i; return b; };
+  const rest = (n) => Buffer.alloc(n, 0x7F);
+  const moov = mp4Box('moov', Buffer.concat([full('mvhd', 0, Buffer.concat([dated(0), rest(88)])),
+    mp4Box('trak', Buffer.concat([full('tkhd', 1, Buffer.concat([dated(1), rest(68)])), mp4Box('mdia', full('mdhd', 0, Buffer.concat([dated(0), rest(12)])))]))]));
+  const m = await page.evaluate((arr) => {
+    const v = retouch.core.video, b = new Uint8Array(arr);
+    const before = v.findMeta(['ftyp', 'mdat', 'moov'], b);
+    const n = v.zeroDates(b);
+    const after = v.findMeta(['ftyp', 'mdat', 'moov'], b);
+    const top = v.findMeta(['ftyp', 'uuid', 'mdat', 'moov'], b);
+    return { before, n, after, top, bytes: Array.from(b) };
+  }, Array.from(moov));
+  assert(JSON.stringify(m.before) === JSON.stringify(['date in mvhd', 'date in tkhd', 'date in mdhd']), 'dates found ' + JSON.stringify(m.before));
+  assert(m.n === 3 && m.after.length === 0, 'dates zeroed ' + m.n + ' ' + JSON.stringify(m.after));
+  assert(JSON.stringify(m.top) === JSON.stringify(['top-level uuid']), 'top-level box ' + JSON.stringify(m.top));
+  // Only the dates changed: the rest of every header is as it was.
+  const got = Buffer.from(m.bytes);
+  const want = Buffer.from(moov);
+  for (const [at, n] of [[20, 8], [8 + 8 + 100 + 8 + 8 + 4, 16]]) want.fill(0, at, at + n);
+  const mdhdAt = want.indexOf(Buffer.from('mdhd')) + 8; want.fill(0, mdhdAt, mdhdAt + 8);
+  assert(got.equals(want), 'zeroDates changed more than the dates');
+  // Planted metadata in a real clip is found by the app's finder too.
+  await page.evaluate(VIDEO_INIT);
+  const clip = plantVideoMetadata(Buffer.from(await page.evaluate(() => window.__makeClip({ frames: 6, audio: false }))));
+  const found = await page.evaluate((arr) => {
+    const v = retouch.core.video, b = new Uint8Array(arr), top = v.boxes(b);
+    const mv = top.find((x) => x.type === 'moov');
+    return v.findMeta(top.map((x) => x.type), b.subarray(mv.start, mv.end));
+  }, Array.from(clip));
+  for (const w of ['top-level uuid', 'udta box', 'GPS location', 'date in mvhd']) assert(found.includes(w), 'finder missed ' + w + ': ' + JSON.stringify(found));
+  // The report.
+  const rep = await page.evaluate(() => {
+    const v = retouch.core.video;
+    const res = { 'h264-1080p30': { supported: true, ran: { frames: 30, fps: 61.4 }, error: null }, aac: { supported: false, ran: null, error: null },
+      opus: { supported: true, ran: null, error: 'EncodingError: boom' }, 'aac-dec': { supported: true, ran: null, error: null },
+      'hevc-dec': { supported: false, ran: null, error: 'TypeError: bad' }, 'h264-1080p60': { supported: true, ran: { seconds: 1, chunks: 47 }, error: null } };
+    return { text: v.report(res, { version: '9.9.9', when: '29/10/26 · 1630 hrs', browser: 'Chrome 141, Android 15, Pixel 9 Pro XL', hdrScreen: true, clip: null }),
+      verdicts: Object.values(res).map(v.verdict), ids: v.CHECKS.map((c) => c.id), labels: v.CHECKS.map((c) => c.label), configs: v.CHECKS.map((c) => c.config) };
+  });
+  assert(rep.text === ['retouch 9.9.9 video check, 29/10/26 · 1630 hrs', 'Browser: Chrome 141, Android 15, Pixel 9 Pro XL', 'HDR screen: yes',
+    'PASS H.264 encode 1080p 30 fps: works, 30 frames at 61 fps', 'PASS H.264 encode 1080p 60 fps: works, 1 s of tone in 47 packets',
+    'FAIL AAC encode 48 kHz stereo: not supported', 'WATCH Opus encode 48 kHz stereo: says yes, but the trial failed: EncodingError: boom',
+    'FAIL HEVC decode 4K 60 fps: not supported (TypeError: bad)', 'PASS AAC decode 48 kHz stereo: supported', 'Open clip: none'].join('\n'), 'report:\n' + rep.text);
+  assert(JSON.stringify(rep.verdicts) === JSON.stringify(['pass', 'fail', 'watch', 'pass', 'fail', 'pass']), 'verdicts ' + rep.verdicts);
+  // What the brief asks the check to cover: H.264 at the Pixel's sizes and rates, and AAC.
+  const need = { 'H.264 encode 1080p 30 fps': [1920, 1080, 30], 'H.264 encode 1080p 60 fps': [1920, 1080, 60], 'H.264 encode 4K 30 fps': [3840, 2160, 30], 'H.264 encode 4K 60 fps': [3840, 2160, 60] };
+  for (const [label, [w, hh, fr]] of Object.entries(need)) {
+    const c = rep.configs[rep.labels.indexOf(label)];
+    assert(c && /^avc1\.64/.test(c.codec) && c.width === w && c.height === hh && c.framerate === fr, label + ': ' + JSON.stringify(c));
+  }
+  const aac = rep.configs[rep.ids.indexOf('aac')];
+  assert(aac && aac.codec === 'mp4a.40.2' && aac.sampleRate === 48000 && aac.numberOfChannels === 2, 'AAC check ' + JSON.stringify(aac));
+  // H.264 levels: 4.0, 4.2, 5.1, 5.2 (the last two hex digits).
+  assert(JSON.stringify(rep.configs.slice(0, 4).map((c) => c.codec.slice(-2).toUpperCase())) === JSON.stringify(['28', '2A', '33', '34']), 'H.264 levels');
+  await ctx.close();
+}, { core: true });
+
+test('video check: opens from the empty screen, runs every check, copies a plain report', async () => {
+  const { ctx, page } = await newApp();
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
+  assert(await page.isVisible('#btn-check-empty'), 'Video check button on the empty screen');
+  await page.click('#btn-check-empty');
+  await page.waitForFunction(() => retouch.app.check && retouch.app.check.done, null, { timeout: 120000 });
+  const rows = await page.$$eval('#vcheck-list .check-row', (rs) => rs.map((r) => [r.dataset.check, r.querySelector('.v').className, r.textContent]));
+  const ids = await page.evaluate(() => retouch.core.video.CHECKS.map((c) => c.id));
+  assert(rows.length === ids.length && rows.every((r, i) => r[0] === ids[i]), 'one row per check');
+  // Each verdict agrees with what WebCodecs itself says here.
+  const direct = await page.evaluate(async () => {
+    const out = {};
+    for (const c of retouch.core.video.CHECKS) {
+      const api = { 'video-encode': VideoEncoder, 'audio-encode': AudioEncoder, 'video-decode': VideoDecoder, 'audio-decode': AudioDecoder }[c.kind];
+      out[c.id] = (await api.isConfigSupported(c.config)).supported;
+    }
+    return out;
+  });
+  for (const [id, cls, text] of rows) {
+    if (direct[id]) assert(/pass|watch/.test(cls) && /works|supported|says yes/.test(text), id + ' says yes here, row: ' + text);
+    else assert(/fail/.test(cls) && /not supported/.test(text), id + ' says no here, row: ' + text);
+  }
+  assert(/works, 30 frames at \d+ fps/.test(rows[0][2]), 'H.264 1080p 30 trial ran: ' + rows[0][2]);
+  await page.click('#vcheck-copy');
+  await page.waitForSelector('.notice[data-id="vcheck"]');
+  const clip = await page.evaluate(() => navigator.clipboard.readText());
+  const shown = await page.textContent('#vcheck-report');
+  assert(clip === shown && /^retouch \d+\.\d+\.\d+ video check, \d\d\/\d\d\/\d\d/.test(clip), 'copied report: ' + clip.slice(0, 80));
+  for (const l of ['H.264 encode 1080p 30 fps', 'H.264 encode 1080p 60 fps', 'H.264 encode 4K 30 fps', 'H.264 encode 4K 60 fps', 'AAC encode 48 kHz stereo', 'HDR screen:', 'Open clip: none']) assert(clip.includes(l), 'report lacks ' + l);
+  assert(!clip.includes('—'), 'no em dashes');
+  const strip = await page.textContent('#vcheck-out');
+  assert(/working/.test(strip), 'status strip: ' + strip);
+  // With a clip open, the report names it.
+  await page.click('.sheet-panel[data-tool="vcheck"] [data-cancel]');
+  await loadVideo(page, await makeClip(page));
+  await page.click('[data-open-tool="vcheck"]');
+  const rep2 = await page.textContent('#vcheck-report');
+  assert(/Open clip: H\.264 320 × 240 · 30 fps · 8-bit SDR · 0:03\.00 · sound Opus 48 kHz 1 ch · keyframe every 1\.00 s \(avc1\./.test(rep2), 'clip line: ' + rep2.split('\n').pop());
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video: opens from the picker, shows its facts, plays; photo tools give way to video tools', async () => {
+  const { ctx, page } = await newApp();
+  await load(page, gradient());
+  await loadVideo(page, await makeClip(page));
+  const r = await page.evaluate(() => {
+    const v = retouch.app.video;
+    return { edits: retouch.app.edits, info: v.info, frames: v.vpk.length, keys: v.keys, audio: v.apk.length, first: v.first, end: v.end, mode: document.body.dataset.mode,
+      toolsShown: Array.from(document.querySelectorAll('.tool')).filter((b) => b.offsetParent).map((b) => b.dataset.openTool),
+      canvas: getComputedStyle(document.querySelector('#view')).display, player: getComputedStyle(document.querySelector('#player')).display };
+  });
+  assert(r.edits === null, 'the photo is closed');
+  assert(r.mode === 'video' && r.canvas === 'none' && r.player === 'block', 'video mode ' + JSON.stringify([r.mode, r.canvas, r.player]));
+  assert(JSON.stringify(r.toolsShown) === JSON.stringify(['trim', 'sound', 'vcheck']), 'tools ' + r.toolsShown);
+  assert(r.frames === 90 && r.keys.length === 3 && Math.abs(r.keys[1] - 1) < 1e-6 && r.audio >= 149, 'index ' + JSON.stringify([r.frames, r.keys, r.audio]));
+  assert(Math.abs(r.first) < 1e-6 && Math.abs(r.end - 3) < 1e-3, 'length ' + [r.first, r.end]);
+  assert(r.info.width === 320 && r.info.height === 240 && Math.abs(r.info.fps - 30) < 0.01 && r.info.codec === 'avc' && r.info.audio.codec === 'opus', 'facts ' + JSON.stringify(r.info));
+  assert((await page.textContent('#dims')) === '320 × 240 · 0:03.00', 'top bar: ' + await page.textContent('#dims'));
+  assert(/^0 edit ▸ /.test(await page.textContent('#top-code')), 'edit counter');
+  await page.waitForFunction(() => retouch.player.readyState >= 2, null, { timeout: 10000 });
+  await page.click('#play');
+  await page.waitForFunction(() => retouch.player.currentTime > 0.3, null, { timeout: 10000 });
+  assert(await page.evaluate(() => document.querySelector('#play').hasAttribute('data-playing')), 'play button shows pause');
+  await page.click('#play');
+  assert(/^0:00\.\d\d \/ 0:03\.00$/.test(await page.textContent('#clock')), 'clock ' + await page.textContent('#clock'));
+  // A photo opened after a video closes the video.
+  await load(page, gradient());
+  assert(await page.evaluate(() => retouch.app.video === null && !document.body.dataset.mode && !retouch.player.getAttribute('src')), 'video closed for the photo');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video: trim between keyframes copies the packets unchanged; frames, length and sound check out', async () => {
+  const { ctx, page } = await newApp();
+  const src = await makeClip(page);
+  await loadVideo(page, src);
+  await page.waitForFunction(() => retouch.player.readyState >= 1);
+  await page.click('[data-open-tool="trim"]');
+  assert(await page.isVisible('.hint[data-for="trim"]'), 'the keyframe caption shows');
+  // Playhead to 1.2 s, Start here: it snaps back to the keyframe at 1.0 s and says so.
+  await page.evaluate(() => { retouch.player.currentTime = 1.2; });
+  await page.waitForFunction(() => Math.abs(retouch.player.currentTime - 1.2) < 0.01);
+  await page.click('#trim-set-start');
+  const note = await page.textContent('#trim-note');
+  assert(/Start moved back to 0:01\.00, the keyframe before 0:01\.20/.test(note) && await page.isVisible('#trim-note'), 'note: ' + note);
+  // Playhead on frame 74 (2.467 s), End here: the end goes to the edge after it, 2.5 s.
+  await page.evaluate(() => { retouch.player.currentTime = 74 / 30 + 0.005; });
+  await page.waitForFunction(() => Math.abs(retouch.player.currentTime - 74 / 30 - 0.005) < 0.01);
+  await page.click('#trim-set-end');
+  const cells = [await page.textContent('#trim-from'), await page.textContent('#trim-to'), await page.textContent('#trim-len')];
+  assert(JSON.stringify(cells) === JSON.stringify(['0:01.00', '0:02.50', '0:01.50']), 'cells ' + cells);
+  await applyTool(page, 'trim');
+  assert((await page.textContent('#dims')) === '320 × 240 · 0:01.50' && /^1 edit ▸ /.test(await page.textContent('#top-code')), 'after trim: ' + await page.textContent('#dims'));
+  const t0 = Date.now();
+  const { bytes, name } = await exportVideo(page);
+  assert(/^retouch-\d{6}-\d{4}\.mp4$/.test(name), 'file name ' + name);
+  const n = await page.textContent('.notice[data-id="export"]');
+  assert(/Saved retouch-.*\.mp4, 0:01\.50, 320 × 240, .*Copied without re-encoding\. Metadata stripped: no location, dates or camera details\./.test(n), 'confirmation: ' + n);
+  const a = parseMp4(src), b = parseMp4(bytes);
+  const av = vtrack(a), bv = vtrack(b);
+  assert(bv.sampleCount === 45, 'frames ' + bv.sampleCount);
+  near(seconds(bv), 1.5, 0.002, 'video length');
+  assert(JSON.stringify(bv.sync) === JSON.stringify([0, 30]), 'keyframes in the trimmed clip ' + JSON.stringify(bv.sync));
+  // Lossless: every kept frame is the same bytes as frame 30 onwards of the source.
+  for (let k = 0; k < 45; k++) assert(bv.sample(k).equals(av.sample(30 + k)), 'frame ' + k + ' differs from source frame ' + (30 + k));
+  assert(bv.entryChild('avcC').equals(av.entryChild('avcC')), 'codec setup copied as it was');
+  const bs = strack(b), as_ = strack(a);
+  assert(bs && bs.codec === 'Opus', 'sound track kept');
+  near(seconds(bs), 1.5, 0.025, 'sound length');
+  const firstSound = as_.offsets.findIndex((o, k) => as_.sample(k).equals(bs.sample(0)));
+  assert(firstSound === 50, 'sound starts with the packet that plays at 1.0 s, source packet ' + firstSound);
+  for (let k = 0; k < bs.sampleCount; k++) assert(bs.sample(k).equals(as_.sample(firstSound + k)), 'sound packet ' + k + ' changed');
+  // The first frame decodes, and it is source frame 30 (red 80); the last is frame 74 (red 168).
+  const cols = await decodeTrack(page, bv);
+  assert(cols.length === 45 && typeof cols[0] !== 'string', 'all frames decode: ' + cols.length + ' ' + cols[0]);
+  near(cols[0][0], 80, 6, 'first frame is source frame 30');
+  near(cols[44][0], 168, 6, 'last frame is source frame 74');
+  assert(findVideoMetadata(bytes).length === 0, 'metadata: ' + findVideoMetadata(bytes));
+  assert(!(await page.evaluate(() => window.__csp.length)), 'CSP violations: ' + await page.evaluate(() => window.__csp));
+  console.log('      45 frames copied in ' + (Date.now() - t0) + ' ms');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+}, { core: true });
+
+test('video: remove sound keeps every frame byte for byte and leaves no sound track', async () => {
+  const { ctx, page } = await newApp();
+  const src = await makeClip(page);
+  await loadVideo(page, src);
+  await page.click('[data-open-tool="sound"]');
+  assert((await page.textContent('#sound-what')) === 'Opus · 48 kHz · 1 ch', 'sound facts ' + await page.textContent('#sound-what'));
+  await page.click('[data-sound="remove"]');
+  assert(await page.evaluate(() => retouch.player.muted), 'the preview is silent');
+  assert((await page.textContent('#sound-result')) === 'picture only', 'result cell');
+  await applyTool(page, 'sound');
+  assert(/0:03\.00 · no sound$/.test(await page.textContent('#dims')), 'top bar ' + await page.textContent('#dims'));
+  const { bytes } = await exportVideo(page);
+  const b = parseMp4(bytes), a = parseMp4(src);
+  assert(b.tracks.length === 1 && b.tracks[0].handler === 'vide' && !strack(b), 'tracks ' + b.tracks.map((t) => t.handler));
+  const av = vtrack(a), bv = vtrack(b);
+  assert(bv.sampleCount === 90, 'frames ' + bv.sampleCount);
+  near(seconds(bv), 3, 0.002, 'length');
+  for (let k = 0; k < 90; k++) assert(bv.sample(k).equals(av.sample(k)), 'frame ' + k + ' changed');
+  assert(JSON.stringify(bv.sync) === JSON.stringify([0, 30, 60]), 'keyframes ' + bv.sync);
+  assert(!bytes.includes(Buffer.from('Opus')) && !bytes.includes(Buffer.from('soun')), 'no trace of the sound track');
+  assert(findVideoMetadata(bytes).length === 0, 'metadata: ' + findVideoMetadata(bytes));
+  // A clip with no sound: the Sound tool is off, and export works.
+  await loadVideo(page, await makeClip(page, { audio: false, frames: 30 }), 'silent.mp4');
+  assert(await page.isDisabled('[data-open-tool="sound"]'), 'Sound tool off for a silent clip');
+  const silent = parseMp4((await exportVideo(page)).bytes);
+  assert(silent.tracks.length === 1 && vtrack(silent).sampleCount === 30, 'silent export');
+  assert((await page.evaluate(() => retouch.tools.vexport.result.where)) === 'storage', 'written to private storage');
+  // Without private storage the file is built in memory, the same bytes.
+  await page.evaluate(() => { navigator.storage.getDirectory = () => Promise.reject(new Error('no storage here')); });
+  const mem = (await exportVideo(page)).bytes;
+  assert((await page.evaluate(() => retouch.tools.vexport.result.where)) === 'memory', 'memory fallback used');
+  const mv = vtrack(parseMp4(mem));
+  assert(mv.sampleCount === 30 && findVideoMetadata(mem).length === 0, 'memory export');
+  for (let k = 0; k < 30; k++) assert(mv.sample(k).equals(vtrack(silent).sample(k)), 'memory export frame ' + k + ' differs');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video: location, camera, XMP and dates never reach the export', async () => {
+  const { ctx, page } = await newApp();
+  const src = plantVideoMetadata(await makeClip(page, { frames: 30 }));
+  const before = findVideoMetadata(src);
+  for (const w of ['GPS location (\xA9xyz)', 'camera make', 'camera model', 'XMP packet', 'top-level uuid box', 'udta box in moov', 'date in mvhd']) assert(before.includes(w), 'fixture should carry ' + w + ': ' + before);
+  await loadVideo(page, src);
+  const { bytes } = await exportVideo(page);
+  assert(findVideoMetadata(bytes).length === 0, 'export carries ' + findVideoMetadata(bytes));
+  const m = parseMp4(bytes);
+  assert(m.mvhd.ctime === 0 && m.mvhd.mtime === 0 && m.tracks.every((t) => !t.tkhd.ctime && !t.mdhd.ctime), 'dates zeroed');
+  assert(JSON.stringify(m.top) === JSON.stringify(['ftyp', 'mdat', 'moov']), 'boxes ' + m.top);
+  assert(vtrack(m).sampleCount === 30 && strack(m), 'picture and sound still there');
+  assert((await page.textContent('#vexport-meta').catch(() => '')) !== null, 'meta cell');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video: HDR colour tags and rotation come through the copy', async () => {
+  const { ctx, page } = await newApp();
+  // A phone records portrait video as landscape frames with a 90 degree turn in the file.
+  const hlg = { primaries: 'bt2020', transfer: 'hlg', matrix: 'bt2020-ncl', fullRange: false };
+  const src = await makeClip(page, { rotation: 90, colorSpace: hlg, frames: 60 });
+  await loadVideo(page, src);
+  const info = await page.evaluate(() => retouch.app.video.info);
+  assert(info.width === 240 && info.height === 320, 'displayed upright ' + info.width + ' x ' + info.height);
+  assert(info.colorSpace.transfer === 'hlg' && info.colorSpace.primaries === 'bt2020', 'colour ' + JSON.stringify(info.colorSpace));
+  assert(/8-bit HDR HLG/.test(await page.evaluate(() => retouch.core.video.describe(retouch.app.video.info))), 'facts say HDR HLG');
+  await page.click('[data-open-tool="trim"]');
+  await page.evaluate(() => { retouch.tools.trim.setStart(1.1, false); retouch.tools.trim.setEnd(1.8); });
+  await applyTool(page, 'trim');
+  const { bytes } = await exportVideo(page);
+  const s = vtrack(parseMp4(src)), v = vtrack(parseMp4(bytes));
+  // nclx codes: primaries 9 = BT.2020, transfer 18 = HLG, matrix 9 = BT.2020 non-constant.
+  assert(JSON.stringify(v.colr) === JSON.stringify({ primaries: 9, transfer: 18, matrix: 9, fullRange: false }), 'colr ' + JSON.stringify(v.colr));
+  assert(JSON.stringify(v.colr) === JSON.stringify(s.colr), 'colr as recorded');
+  // 90 degrees clockwise: a = 0, b = 1, c = -1, d = 0 in 16.16.
+  assert(JSON.stringify(v.matrix.slice(0, 5)) === JSON.stringify([0, 65536, 0, -65536, 0]), 'rotation matrix ' + v.matrix);
+  assert(v.codedWidth === 320 && v.codedHeight === 240 && v.sampleCount === 24, 'frames as stored ' + [v.codedWidth, v.codedHeight, v.sampleCount]);
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video: drag the trim handles; undo, redo, edit counter, hold for the original', async () => {
+  const { ctx, page } = await newApp();
+  await loadVideo(page, await makeClip(page, { frames: 150, gop: 15 }));
+  await page.waitForFunction(() => retouch.player.readyState >= 1);
+  await page.click('[data-open-tool="trim"]');
+  const line = await page.locator('#trim-line').boundingBox();
+  const drag = async (sel, toFrac) => {
+    const h = await page.locator(sel).boundingBox();
+    await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(line.x + toFrac * line.width, h.y + h.height / 2, { steps: 6 });
+    await page.mouse.up();
+  };
+  await drag('#trim-start', 0.33);        // 1.65 s: snaps back to the keyframe at 1.5 s
+  await drag('#trim-end', 0.71);          // 3.55 s: the nearest frame edge
+  const d = await page.evaluate(() => retouch.tools.trim.d);
+  near(d.start, 1.5, 1e-6, 'start on a keyframe');
+  assert(Math.abs(d.end * 30 - Math.round(d.end * 30)) < 1e-3 && Math.abs(d.end - 3.55) < 0.05, 'end on a frame edge: ' + d.end);
+  // The handle cannot pass the end.
+  await drag('#trim-start', 0.99);
+  const d2 = await page.evaluate(() => retouch.tools.trim.d);
+  assert(d2.start < d2.end && Math.abs(d2.start * 2 - Math.round(d2.start * 2)) < 1e-6, 'start stays a keyframe before the end: ' + JSON.stringify(d2));
+  await page.click('#trim-reset');
+  await drag('#trim-start', 0.33);
+  await drag('#trim-end', 0.71);
+  // Cancel keeps nothing.
+  await page.click('.sheet-panel[data-tool="trim"] [data-cancel]');
+  assert((await page.evaluate(() => retouch.app.video.history.index)) === 0, 'cancel adds no step');
+  await page.click('[data-open-tool="trim"]');
+  await drag('#trim-start', 0.33);
+  await drag('#trim-end', 0.71);
+  await applyTool(page, 'trim');
+  await page.click('[data-open-tool="sound"]');
+  await page.click('[data-sound="remove"]');
+  await applyTool(page, 'sound');
+  const top = () => page.textContent('#top-code');
+  assert(/^2 edits ▸ /.test(await top()), 'two edits: ' + await top());
+  // Hold: the original, with sound, from its start.
+  await page.evaluate(() => { retouch.player.currentTime = 0.2; });
+  const hold = await page.locator('#hold-main').isVisible();
+  assert(!hold, 'the photo hold button stays hidden for video');
+  await page.click('#btn-export');
+  const hb = await page.locator('.sheet-panel[data-tool="vexport"] [data-hold]').boundingBox();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.mouse.down();
+  const held = await page.evaluate(() => ({ muted: retouch.player.muted, t: retouch.player.currentTime }));
+  await page.mouse.up();
+  const after = await page.evaluate(() => ({ muted: retouch.player.muted, t: retouch.player.currentTime }));
+  assert(!held.muted && after.muted && after.t >= 1.5 - 0.01, 'hold plays the original: ' + JSON.stringify([held, after]));
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  await page.click('#btn-undo');
+  assert(/^1 edit ▸ /.test(await top()) && !/no sound/.test(await page.textContent('#dims')), 'undo the sound: ' + await page.textContent('#dims'));
+  await page.click('#btn-undo');
+  assert(/^0 edit ▸ /.test(await top()) && (await page.textContent('#dims')) === '320 × 240 · 0:05.00', 'undo the trim: ' + await page.textContent('#dims'));
+  assert(await page.isDisabled('#btn-undo') && !(await page.isDisabled('#btn-redo')), 'undo and redo buttons');
+  await page.click('#btn-redo'); await page.click('#btn-redo');
+  assert(/^2 edits ▸ /.test(await top()) && /no sound$/.test(await page.textContent('#dims')), 'redo both');
+  const m = parseMp4((await exportVideo(page)).bytes);
+  assert(m.tracks.length === 1 && vtrack(m).sampleCount === Math.round((d.end - 1.5) * 30), 'export follows the recipe: ' + vtrack(m).sampleCount);
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video: a broken or unknown video says so plainly and keeps what was open', async () => {
+  const { ctx, page } = await newApp();
+  await loadVideo(page, await makeClip(page, { frames: 30 }));
+  const junk = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(3000, 9)]);
+  await page.setInputFiles('#file', { name: 'broken.mp4', mimeType: 'video/mp4', buffer: junk });
+  await page.waitForSelector('.notice.fail[data-id="open"]');
+  const t = await page.textContent('.notice.fail[data-id="open"]');
+  assert(/This video could not be opened: .*retouch opens MP4, MOV and WebM videos\./.test(t), 'message: ' + t);
+  assert(await page.evaluate(() => retouch.app.video && retouch.app.video.vpk.length === 30), 'the open clip stays');
+  await page.setInputFiles('#file', { name: 'notes.mov', mimeType: 'video/quicktime', buffer: Buffer.from('not a video at all') });
+  await page.waitForFunction(() => /could not be opened/.test(document.querySelector('.notice[data-id="open"]')?.textContent || '') && retouch.app.busyCount === 0);
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video: phone layout, tap targets at least 44 px in every video sheet', async () => {
+  const { ctx, page } = await newApp();
+  const small = () => page.$$eval('button, input, select, a', (els) => els.filter((e) => {
+    const r = e.getBoundingClientRect();
+    if (!r.width || !r.height || e.closest('[hidden]') || getComputedStyle(e).visibility === 'hidden' || getComputedStyle(e).display === 'none') return false;
+    return r.width < 43.5 || r.height < 43.5;
+  }).map((e) => (e.id || e.className || e.tagName) + ' ' + Math.round(e.getBoundingClientRect().width) + 'x' + Math.round(e.getBoundingClientRect().height)));
+  const wide = () => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+  await loadVideo(page, await makeClip(page, { frames: 30 }));
+  let s = await small(); assert(!s.length && await wide(), 'video view: ' + s);
+  for (const t of ['trim', 'sound', 'vcheck']) {
+    await page.click('[data-open-tool="' + t + '"]');
+    s = await small(); assert(!s.length && await wide(), t + ': ' + s);
+    const stage = await page.locator('#stage').boundingBox();
+    assert(stage.height > (t === 'vcheck' ? 150 : 400), t + ': video area ' + stage.height + ' px');
+    await page.click('.sheet-panel[data-tool="' + t + '"] [data-cancel]');
+  }
+  await page.click('#btn-export');
+  await page.waitForFunction(() => !document.querySelector('#vexport-download').disabled);
+  s = await small(); assert(!s.length && await wide(), 'video export: ' + s);
+  await ctx.close();
+});
+
+test('service worker: a video shared from another app opens, offline too', async () => {
+  const { ctx, page } = await newApp({ sw: true });
+  await page.waitForFunction(() => navigator.serviceWorker.controller, null, { timeout: 15000 });
+  const clip = await makeClip(page, { frames: 30 });
+  const cached = await page.evaluate(async () => !!(await caches.match('vendor/mediabunny/mediabunny.js')));
+  assert(cached, 'Mediabunny cached for offline');
+  await ctx.setOffline(true);
+  await page.reload();
+  await page.waitForFunction(() => window.retouch && window.retouch.app);
+  for (const field of ['media', 'image']) {     // 'image' is what an installed app with the old manifest sends
+    await page.evaluate(([arr, field]) => {
+      const f = new File([new Uint8Array(arr)], 'PXL_shared.mp4', { type: 'video/mp4' });
+      const form = document.createElement('form');
+      form.method = 'POST'; form.action = 'share-target'; form.enctype = 'multipart/form-data';
+      const input = document.createElement('input'); input.type = 'file'; input.name = field;
+      const dt = new DataTransfer(); dt.items.add(f); input.files = dt.files;
+      form.append(input); document.body.append(form); form.submit();
+    }, [Array.from(clip), field]);
+    await page.waitForURL(/retouch\.html$/);
+    await page.waitForFunction(() => window.retouch && window.retouch.app.video && window.retouch.app.busyCount === 0, null, { timeout: 15000 });
+    assert(await page.evaluate(() => retouch.app.video.vpk.length === 30 && retouch.app.fileName === 'PXL_shared.mp4'), field + ': shared video opened');
+  }
+  const m = parseMp4((await exportVideo(page)).bytes);
+  assert(vtrack(m).sampleCount === 30, 'exports offline');
+  await ctx.setOffline(false);
   await ctx.close();
 });
 

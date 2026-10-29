@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.7.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.8.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -29,6 +29,17 @@ change the version here in the same commit as the file.
   vendor/mediapipe/selfie_multiclass_256x256.tflite  MediaPipe selfie multiclass 256x256, float32, model version 1 (model card dated 10/05/23), Apache-2.0, sha256 c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0
   vendor/mediapipe/LICENSE-apache-2.0.txt      Apache License 2.0 text from apache.org, covers the four files above, sha256 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
   vendor/mediapipe/magic_touch.tflite           MediaPipe interactive segmenter MagicTouch, float32, version 1 (point2mask_objects_512x512_2023_04_18; model card dated 13/03/23), Apache-2.0 (licence text above), from the MediaPipe model store (interactive_segmenter/magic_touch/float32/1), downloaded 26/10/26, sha256 e24338a717c1b7ad8d159666677ef400babb7f33b8ad60c4d96db4ecf694cd25
+  vendor/mediabunny/mediabunny.js             mediabunny 1.61.6 (16/10/26), dist/bundles/mediabunny.min.mjs, MPL-2.0, sha256 cc6f1f3d5e09758eafc15f7c2712439be3f2e25c301d096b11405a2f78a96e8f
+  vendor/mediabunny/LICENSE-mpl-2.0.txt       Mozilla Public License 2.0 text from the mediabunny 1.61.6 package, sha256 3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04
+  Mediabunny notes: reads and writes MP4, MOV and WebM in the browser (video phase V1
+  onwards). The file is the package's minified ES module byte for byte, saved as .js
+  like MediaPipe. Its source is in the same npm package (src/) and in the GitHub
+  repository Vanilagy/mediabunny at tag v1.61.6, as MPL-2.0 asks. Chosen over
+  mp4box.js plus mp4-muxer because mp4-muxer is deprecated by its author in favour of
+  Mediabunny, and Mediabunny alone reads and writes, keeps rotation and HDR colour
+  tags, and copies encoded packets without decoding. It carries a URL reader and an
+  HLS reader that can fetch; retouch never creates either (retouch_checks.cjs makes
+  sure), and the CSP would block them anyway. Pinned two weeks after release.
   MediaPipe notes: only the SIMD build is vendored (Chrome on Android has had wasm
   SIMD since version 91). The bundle is the package's vision_bundle.mjs byte for
   byte, saved as .js so any web server sends it with a JavaScript type.
@@ -49,9 +60,12 @@ How the file is laid out:
      a. Constants (working-size ceiling, history depth, ratios).
      b. CORE: pure image functions (geometry, crop, resize, add canvas,
         text layout and drawing, background mask refinement, brush and
-        cut-out, skin smoothing, spot healing and inpainting, metadata strip, edit history). Tests and the mutation runner
-        target this block. MediaPipe itself sits outside it, in the app.
-     c. App: view (zoom, pan), tools, open, export, service worker.
+        cut-out, skin smoothing, spot healing and inpainting, metadata strip, edit history),
+        and for video: which packets a trim copies, clip facts, video edit history,
+        MP4 dates and metadata, the video check list. Tests and the mutation runner
+        target this block. MediaPipe and Mediabunny sit outside it, in the app.
+     c. App: view (zoom, pan), tools, open, export, video (check, player, trim,
+        sound, export), service worker.
 -->
 <html lang="en">
 <head>
@@ -141,7 +155,9 @@ body[data-tool] .topbar{display:none}
 body[data-tool] .strip{display:flex}
 body[data-tool="crop"] .strip [data-for="crop"],body[data-tool="pad"] .strip [data-for="pad"],
 body[data-tool="bg"] .strip [data-for="bg"],body[data-tool="skin"] .strip [data-for="skin"],
-body[data-tool="spot"] .strip [data-for="spot"]{display:inline}
+body[data-tool="spot"] .strip [data-for="spot"],body[data-tool="trim"] .strip [data-for="trim"],
+body[data-tool="sound"] .strip [data-for="sound"],body[data-tool="vexport"] .strip [data-for="vexport"],
+body[data-tool="vcheck"] .strip [data-for="vcheck"]{display:inline}
 
 /* Stage: the photo fills everything between the bars. */
 #stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;touch-action:none;background:var(--stage)}
@@ -160,7 +176,37 @@ body[data-tool="spot"] .strip [data-for="spot"]{display:inline}
 .hint{position:absolute;left:14px;bottom:14px;max-width:calc(100% - 96px);padding:8px 10px;border-radius:4px;background:rgba(20,19,18,.86);color:var(--ink-2);font-size:11px;line-height:15px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;pointer-events:none;display:none;z-index:2}
 body[data-tool="pad"] .hint[data-for="pad"],body[data-tool="spot"] .hint[data-for="spot"],
 body[data-tool="bg"][data-brush] .hint[data-for="bg"],body[data-tool="skin"][data-brush] .hint[data-for="skin"],
-body[data-tool="bg"][data-bg-ready]:not([data-brush]) .hint[data-for="bg-view"]{display:block}
+body[data-tool="bg"][data-bg-ready]:not([data-brush]) .hint[data-for="bg-view"],body[data-tool="trim"] .hint[data-for="trim"]{display:block}
+
+/* Video mode: the player stands in for the photo canvas, with a play bar over its foot. */
+#player{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:var(--stage);display:none}
+body[data-mode="video"] #player{display:block}
+body[data-mode="video"] #view{display:none}
+.transport{position:absolute;left:8px;right:8px;bottom:8px;display:none;align-items:center;gap:8px;padding:0 10px 0 2px;border-radius:6px;background:rgba(20,19,18,.86);z-index:3}
+body[data-mode="video"]:not([data-tool]) .transport{display:flex}
+.transport .readout{min-width:0}
+.icon-btn .pause{display:none}
+.icon-btn[data-playing] .play{display:none}
+.icon-btn[data-playing] .pause{display:inline}
+body[data-mode="video"] .tool[data-mode="photo"],body:not([data-mode="video"]) .tool[data-mode="video"]{display:none}
+/* Trim: the whole clip as a bar, keyframes as ticks, the kept part in amber. */
+.timeline{position:relative;height:56px;margin:0 6px;touch-action:none}
+.tl-track{position:absolute;left:0;right:0;top:12px;height:32px;border-radius:3px;background:var(--raised);overflow:hidden}
+.tl-ticks{position:absolute;inset:0;width:100%;height:100%}
+.tl-range{position:absolute;top:0;bottom:0;background:rgba(242,163,58,.18);border-left:2px solid var(--amber);border-right:2px solid var(--amber)}
+.tl-head{position:absolute;top:-4px;bottom:-4px;width:2px;margin-left:-1px;background:var(--ink)}
+.tl-handle{position:absolute;top:0;width:44px;height:56px;margin-left:-22px;border:0;background:transparent;padding:0;display:flex;justify-content:center;align-items:center}
+.tl-handle::before{content:"";width:12px;height:40px;border-radius:3px;background:var(--amber);box-shadow:0 0 0 2px var(--chrome)}
+/* Video check: one line per codec, verdict in its colour. */
+.checks{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:4px;overflow:hidden}
+.check-row{display:flex;gap:10px;align-items:baseline;padding:8px 12px;border-top:1px solid var(--line);background:var(--stage)}
+.check-row:first-child{border-top:0}
+.check-row .k{flex:1;min-width:0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.check-row .v{flex:0 0 auto;max-width:48%;text-align:right;font-family:var(--font-mono);font-size:12px;line-height:17px;color:var(--muted)}
+.check-row .v b{font-weight:500;letter-spacing:.06em}
+.check-row .v.pass b{color:var(--pass)} .check-row .v.watch b{color:var(--watch)} .check-row .v.fail b{color:var(--fail)}
+.report{margin:0;padding:10px 12px;border:1px solid var(--line);border-radius:4px;background:var(--stage);color:var(--ink-2);font:12px/17px var(--font-mono);white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text}
+.sheet[data-tall]{max-height:78dvh}
 
 /* Notices sit over the top of the stage. */
 #notices{position:absolute;left:8px;right:8px;top:8px;display:flex;flex-direction:column;gap:8px;z-index:5;pointer-events:none}
@@ -269,7 +315,7 @@ fieldset:disabled{opacity:.4}
 <body data-empty>
 
 <header class="topbar">
-  <button class="icon-btn" id="btn-open" aria-label="Open photo" title="Open photo">
+  <button class="icon-btn" id="btn-open" aria-label="Open photo or video" title="Open photo or video">
     <svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="1"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-5 4 4 2.5-2.5L20 17"/></svg>
   </button>
   <div class="meta">
@@ -292,10 +338,20 @@ fieldset:disabled{opacity:.4}
   <span class="edge status" id="bg-out" data-for="bg"></span>
   <span class="edge status" id="skin-out" data-for="skin"></span>
   <span class="edge status" id="spot-out" data-for="spot"></span>
+  <span class="edge status" id="trim-out" data-for="trim"></span>
+  <span class="edge status" id="sound-out" data-for="sound"></span>
+  <span class="edge status" id="vexport-out" data-for="vexport"></span>
+  <span class="edge status" id="vcheck-out" data-for="vcheck"></span>
 </div>
 
 <main id="stage">
   <canvas id="view" aria-label="Photo"></canvas>
+  <video id="player" playsinline preload="auto" aria-label="Video"></video>
+  <div class="transport" id="transport">
+    <button class="icon-btn" id="play" aria-label="Play" title="Play"><svg viewBox="0 0 24 24"><path class="play" d="M8 5.5v13l10-6.5z"/><path class="pause" d="M8.5 5.5v13M15.5 5.5v13"/></svg></button>
+    <input type="range" id="seek" min="0" max="1000" step="1" value="0" aria-label="Position">
+    <span class="readout" id="clock">0:00.00</span>
+  </div>
   <div id="notices" aria-live="polite"></div>
 
   <div class="hint" data-for="pad">Drag the photo to move it in the frame</div>
@@ -303,6 +359,7 @@ fieldset:disabled{opacity:.4}
   <div class="hint" data-for="bg-view">Wrong subject? Tap the one to keep</div>
   <div class="hint" data-for="skin">Blue is smoothed · 1 finger paints · 2 fingers move</div>
   <div class="hint" data-for="spot">Tap or brush a spot · 2 fingers move · small spots only</div>
+  <div class="hint" data-for="trim">Start snaps back to a keyframe · nothing is re-encoded</div>
 
   <section class="empty" id="empty">
     <div class="band top">
@@ -318,8 +375,9 @@ fieldset:disabled{opacity:.4}
       </div>
       <div class="empty-actions">
         <button class="btn btn-primary" id="btn-open-empty">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="1"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-5 4 4 2.5-2.5L20 17"/></svg>Open a photo
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="1"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-5 4 4 2.5-2.5L20 17"/></svg>Open photo or video
         </button>
+        <button class="btn" id="btn-check-empty">Video check</button>
         <button class="btn" id="btn-install" hidden>Install app</button>
       </div>
     </div>
@@ -616,36 +674,133 @@ fieldset:disabled{opacity:.4}
       <button class="btn btn-primary" id="export-share" disabled style="flex:1.3;min-height:54px">Share</button>
     </div>
   </div>
+
+  <div class="sheet-panel" data-tool="trim" hidden>
+    <div class="sheet-head">
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Trim</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold for the original" title="Hold for the original"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+    </div>
+    <div class="timeline" id="trim-line" role="group" aria-label="Clip">
+      <div class="tl-track"><canvas class="tl-ticks" id="trim-ticks"></canvas><div class="tl-range" id="trim-range"></div><div class="tl-head" id="trim-head"></div></div>
+      <button class="tl-handle" id="trim-start" aria-label="Start"></button>
+      <button class="tl-handle" id="trim-end" aria-label="End"></button>
+    </div>
+    <div class="cells">
+      <div class="cell"><span class="k">Start</span><span class="v" id="trim-from"></span></div>
+      <div class="cell"><span class="k">End</span><span class="v" id="trim-to"></span></div>
+      <div class="cell"><span class="k">Length</span><span class="v key" id="trim-len"></span></div>
+    </div>
+    <p class="note" id="trim-note" hidden></p>
+    <div class="tiles">
+      <button class="tile" id="trim-play"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5z"/></svg>Play</button>
+      <button class="tile" id="trim-set-start"><svg viewBox="0 0 24 24"><path d="M6 4v16"/><path d="M10 12h10M14 8l-4 4 4 4"/></svg>Start here</button>
+      <button class="tile" id="trim-set-end"><svg viewBox="0 0 24 24"><path d="M18 4v16"/><path d="M4 12h10M10 8l4 4-4 4"/></svg>End here</button>
+      <button class="tile" id="trim-reset"><svg viewBox="0 0 24 24"><path d="M4 4v6h6"/><path d="M20 20v-6h-6"/><path d="M5.6 15A7.5 7.5 0 0 0 18.4 17M18.4 9A7.5 7.5 0 0 0 5.6 7"/></svg>Reset</button>
+    </div>
+  </div>
+
+  <div class="sheet-panel" data-tool="sound" hidden>
+    <div class="sheet-head">
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Sound</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold for the original" title="Hold for the original"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+    </div>
+    <div class="seg" role="group" aria-label="Sound">
+      <button data-sound="keep" aria-pressed="true">Keep sound</button>
+      <button data-sound="remove" aria-pressed="false">Remove sound</button>
+    </div>
+    <div class="cells">
+      <div class="cell"><span class="k">Sound track</span><span class="v" id="sound-what"></span></div>
+      <div class="cell"><span class="k">Export</span><span class="v key" id="sound-result"></span></div>
+    </div>
+    <p class="small" style="margin:0">The picture is copied as it is; only the sound track is left out.</p>
+  </div>
+
+  <div class="sheet-panel" data-tool="vexport" hidden>
+    <div class="sheet-head">
+      <button class="icon-btn" data-cancel aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Export video</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold for the original" title="Hold for the original"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
+      <span class="gap"></span>
+    </div>
+    <div class="cells">
+      <div class="cell"><span class="k">Length</span><span class="v" id="vexport-len"></span></div>
+      <div class="cell"><span class="k">Size</span><span class="v" id="vexport-dims"></span></div>
+      <div class="cell"><span class="k">File</span><span class="v key" id="vexport-size"></span></div>
+    </div>
+    <div class="cells">
+      <div class="cell"><span class="k">Sound</span><span class="v" id="vexport-sound"></span></div>
+      <div class="cell"><span class="k">Picture</span><span class="v" id="vexport-copy"></span></div>
+      <div class="cell"><span class="k">Metadata</span><span class="v" id="vexport-meta"></span></div>
+    </div>
+    <p class="note" id="vexport-note" hidden></p>
+    <div class="tiles" style="gap:10px">
+      <button class="btn" id="vexport-download" disabled style="flex:1;min-height:54px">Download</button>
+      <button class="btn btn-primary" id="vexport-share" disabled style="flex:1.3;min-height:54px">Share</button>
+    </div>
+  </div>
+
+  <div class="sheet-panel" data-tool="vcheck" data-no-hold hidden>
+    <div class="sheet-head">
+      <button class="icon-btn" data-cancel aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Video check</h2>
+      <span class="gap"></span>
+      <span class="gap"></span>
+    </div>
+    <p class="small" style="margin:0">What Chrome on this phone can encode and decode, for the later video phases. Each encoder that says yes also gets a short trial run.</p>
+    <div class="checks" id="vcheck-list"></div>
+    <div class="tiles" style="gap:10px">
+      <button class="btn" id="vcheck-run" style="flex:1;min-height:54px">Run again</button>
+      <button class="btn btn-primary" id="vcheck-copy" style="flex:1.3;min-height:54px">Copy report</button>
+    </div>
+    <pre class="report" id="vcheck-report"></pre>
+  </div>
 </section>
 
 <nav class="toolbar" id="toolbar" aria-label="Tools">
   <div class="sprockets" aria-hidden="true"></div>
   <div class="tools">
-    <button class="tool" data-open-tool="crop" disabled>
+    <button class="tool" data-mode="photo" data-open-tool="crop" disabled>
       <svg viewBox="0 0 24 24"><path d="M7 3v14h14"/><path d="M3 7h14v14"/></svg>Crop
     </button>
-    <button class="tool" data-open-tool="resize" disabled>
+    <button class="tool" data-mode="photo" data-open-tool="resize" disabled>
       <svg viewBox="0 0 24 24"><rect x="3.5" y="10.5" width="10" height="10" rx="1"/><path d="M13 4h7v7"/><path d="M20 4l-8 8"/></svg>Resize
     </button>
-    <button class="tool" data-open-tool="pad" disabled>
+    <button class="tool" data-mode="photo" data-open-tool="pad" disabled>
       <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1"/><rect x="7.5" y="8.5" width="9" height="7" rx="0.5"/></svg>Canvas
     </button>
-    <button class="tool" data-open-tool="text" disabled>
+    <button class="tool" data-mode="photo" data-open-tool="text" disabled>
       <svg viewBox="0 0 24 24"><path d="M5 6.5V4.5h14v2"/><path d="M12 4.5v15"/><path d="M9 19.5h6"/></svg>Text
     </button>
-    <button class="tool" data-open-tool="bg" disabled>
+    <button class="tool" data-mode="photo" data-open-tool="bg" disabled>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="9.5" r="3.5"/><path d="M5.5 20.5c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M3.5 7.5v-4h4M16.5 3.5h4v4M20.5 16.5v4M3.5 16.5v4"/></svg>Cut out
     </button>
-    <button class="tool" data-open-tool="skin" disabled>
+    <button class="tool" data-mode="photo" data-open-tool="skin" disabled>
       <svg viewBox="0 0 24 24"><circle cx="11" cy="13" r="7"/><path d="M8.5 15.5c1.4 1.1 3.6 1.1 5 0"/><path d="M19 2.5v5M16.5 5h5"/></svg>Skin
     </button>
-    <button class="tool" data-open-tool="spot" disabled>
+    <button class="tool" data-mode="photo" data-open-tool="spot" disabled>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/></svg>Spot
+    </button>
+    <button class="tool" data-mode="video" data-open-tool="trim" disabled>
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="7.5" width="17" height="9" rx="1"/><path d="M8 4.5v15M16 4.5v15"/></svg>Trim
+    </button>
+    <button class="tool" data-mode="video" data-open-tool="sound" disabled>
+      <svg viewBox="0 0 24 24"><path d="M4 9.5h4l5-4v13l-5-4H4z"/><path d="M16.5 9a4 4 0 0 1 0 6M19 6.5a7.5 7.5 0 0 1 0 11"/></svg>Sound
+    </button>
+    <button class="tool" data-mode="video" data-open-tool="vcheck">
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="1"/><path d="M7.5 12.5l2.5 2.5 6-6"/></svg>Check
     </button>
   </div>
 </nav>
 
-<input type="file" id="file" accept="image/*,.avif,.heic,.heif,.webp" hidden>
+<input type="file" id="file" accept="image/*,video/*,.avif,.heic,.heif,.webp,.mp4,.mov,.m4v,.webm" hidden>
 
 <script>
 'use strict';
@@ -654,7 +809,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.8.0';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -2303,6 +2458,267 @@ core.fixSpot = (ctx, st, W, H) => {
   ctx.putImageData(img, x0, y0, ux0 - x0, uy0 - y0, ux1 - ux0, uy1 - uy0);
   return { x: ux0, y: uy0, img: before, healed: !!src };
 };
+/* Video (phase V1). A video file holds its pictures and sound as encoded packets:
+   a keyframe is a whole picture, and the frames after it store only what changed,
+   so a frame can be decoded only from the keyframe before it. Trim and sound
+   removal never decode anything: they copy the packets as they are, so they are
+   fast and lose nothing. The price is that a copied clip must start on a keyframe.
+   The functions below decide which packets to copy and in what order, describe a
+   clip in plain words, and check the MP4 that comes out. The app reads and writes
+   the packets with Mediabunny (vendored), outside this block.
+   A packet here is { ts, dur, key, seq }: presentation time and length in seconds,
+   whether it is a keyframe, and its place in decode order. */
+core.video = {};
+core.video.EPS = 1e-6;            // timestamps are seconds in floating point; this absorbs rounding
+
+// Keyframe times, earliest first.
+core.video.keyTimes = (packets) => packets.filter((p) => p.key).map((p) => p.ts).sort((a, b) => a - b);
+
+// The last keyframe at or before t; the first keyframe when t comes before them all.
+core.video.keyBefore = (keys, t) => {
+  let k = keys[0];
+  for (const x of keys) { if (x <= t + core.video.EPS) k = x; else break; }
+  return k;
+};
+
+// The usual gap between keyframes (the median), or null with fewer than two.
+core.video.keyEvery = (keys) => {
+  if (keys.length < 2) return null;
+  const gaps = keys.slice(1).map((x, i) => x - keys[i]).sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)];
+};
+
+// The frame edge nearest t: a frame's start, or the end of the last frame.
+// starts is every frame's start time, earliest first.
+core.video.snapToFrame = (starts, end, t) => {
+  let best = end, gap = Math.abs(end - t);
+  for (const s of starts) { const g = Math.abs(s - t); if (g < gap) { best = s; gap = g; } }
+  return best;
+};
+
+// Which video packets a trim from start to end copies. Returns
+// { from, to, keep, moved, whole }: the clip really runs from `from` (the keyframe
+// at or before start) to `to`; keep lists packet indices in decode order; moved says
+// the start went back to reach a keyframe; whole says nothing was cut at the front.
+core.video.planTrim = (packets, start, end) => {
+  const E = core.video.EPS;
+  const keys = core.video.keyTimes(packets);
+  if (!keys.length) return null;
+  const from = core.video.keyBefore(keys, start);
+  const k = packets.findIndex((p) => p.key && Math.abs(p.ts - from) <= E);
+  // The last packet, in decode order, that is shown before the end. Packets in
+  // between that are shown later still go in: later frames are built from them.
+  let last = -1;
+  for (let i = k; i < packets.length; i++) if (packets[i].ts < end - E) last = i;
+  const keep = [];
+  let to = from;
+  for (let i = k; i <= last; i++) {
+    const p = packets[i];
+    if (p.ts < from - E) continue;           // shown before the keyframe: it needs frames that were cut off
+    keep.push(i);
+    to = Math.max(to, p.ts + p.dur);
+  }
+  return { from, to, keep, moved: from < start - E, whole: from <= keys[0] + E };
+};
+
+// Which sound packets go with the trimmed video: every packet that sounds between
+// from and to. With nothing cut at the front, the packets before the first frame go
+// too (the encoder's run-in, which the start of the sound is decoded from).
+core.video.planAudio = (packets, plan) => {
+  const E = core.video.EPS;
+  const keep = [];
+  for (let i = 0; i < packets.length; i++) {
+    const p = packets[i];
+    if (p.ts >= plan.to - E) continue;
+    if (!plan.whole && p.ts + p.dur <= plan.from + E) continue;
+    keep.push(i);
+  }
+  return keep;
+};
+
+// Write order for two tracks: always the packet that plays first, so the file can
+// be written as it goes instead of held in memory. a and b are times; returns
+// [track, index] pairs, track 0 for a and 1 for b.
+core.video.interleave = (a, b) => {
+  const out = [];
+  let i = 0, j = 0;
+  while (i < a.length || j < b.length) {
+    if (j >= b.length || (i < a.length && a[i] <= b[j])) out.push([0, i++]);
+    else out.push([1, j++]);
+  }
+  return out;
+};
+
+// Bits per colour sample, read from a WebCodecs codec string; null if it does not say.
+core.video.bitDepth = (codec) => {
+  const c = String(codec || '');
+  const f = c.split('.');
+  if (/^avc[13]$/.test(f[0]) && f[1]) {
+    const profile = parseInt(f[1].slice(0, 2), 16);  // High 10, High 4:2:2 and High 4:4:4 carry 10 bits
+    return [110, 122, 244].includes(profile) ? 10 : 8;
+  }
+  if (/^(hvc1|hev1)$/.test(f[0]) && f[1]) {
+    const profile = parseInt(f[1].replace(/^[A-C]/, ''), 10);
+    return profile === 1 ? 8 : profile === 2 ? 10 : null;   // Main, Main 10
+  }
+  if (f[0] === 'vp09' && f[3]) return parseInt(f[3], 10);
+  if (f[0] === 'av01' && f[3]) return parseInt(f[3], 10);
+  if (f[0] === 'vp8' || f[0] === 'vp08') return 8;
+  return null;
+};
+
+// HDR is a matter of the transfer curve: PQ (HDR10) or HLG.
+core.video.hdrName = (cs) => (cs && cs.transfer === 'pq' ? 'PQ' : cs && cs.transfer === 'hlg' ? 'HLG' : null);
+
+core.video.CODEC_NAMES = { avc: 'H.264', hevc: 'HEVC', vp9: 'VP9', av1: 'AV1', vp8: 'VP8', aac: 'AAC', opus: 'Opus', mp3: 'MP3', flac: 'FLAC', ac3: 'AC-3', eac3: 'E-AC-3', vorbis: 'Vorbis' };
+core.video.codecName = (c) => core.video.CODEC_NAMES[c] || (c ? String(c).toUpperCase() : 'unknown');
+
+// Time as m:ss.cc (h:mm:ss.cc from an hour), rounded to a hundredth of a second.
+core.video.fmtTime = (s) => {
+  const cs = Math.max(0, Math.round(s * 100));
+  const h = Math.floor(cs / 360000), m = Math.floor(cs / 6000) % 60, sec = Math.floor(cs / 100) % 60, f = cs % 100;
+  const two = (n) => String(n).padStart(2, '0');
+  return (h ? h + ':' + two(m) : String(m)) + ':' + two(sec) + '.' + two(f);
+};
+
+core.video.VIDEO_EXT = /\.(mp4|m4v|mov|3gp|3g2|webm|mkv)$/i;
+core.video.isVideoFile = (name, type) => /^video\//i.test(type || '') || core.video.VIDEO_EXT.test(name || '');
+
+// One plain line about a clip, for the status strip and the check report.
+// info: { codec, codecString, width, height, fps, bitDepth, colorSpace, duration, keyEvery, audio: { codec, sampleRate, channels } | null }
+core.video.describe = (info) => {
+  const parts = [core.video.codecName(info.codec) + ' ' + info.width + ' × ' + info.height];
+  if (info.fps) parts.push((Math.round(info.fps * 100) / 100) + ' fps');
+  const hdr = core.video.hdrName(info.colorSpace);
+  parts.push((info.bitDepth ? info.bitDepth + '-bit ' : '') + (hdr ? 'HDR ' + hdr : 'SDR'));
+  if (info.duration !== undefined) parts.push(core.video.fmtTime(info.duration));
+  parts.push(info.audio ? 'sound ' + core.video.codecName(info.audio.codec) + ' ' + Math.round(info.audio.sampleRate / 1000) + ' kHz ' + info.audio.channels + ' ch' : 'no sound');
+  if (info.keyEvery) parts.push('keyframe every ' + info.keyEvery.toFixed(2) + ' s');
+  return parts.join(' · ');
+};
+
+/* Video edits: each step is the whole recipe { start, end, audio } (times in the
+   source clip, audio true to keep the sound). Nothing is rendered until export, so
+   a step costs nothing to keep. */
+class ClipHistory {
+  constructor(recipe) {
+    this.stack = [{ ...recipe, label: 'Original' }];
+    this.index = 0;
+  }
+  get current() { return this.stack[this.index]; }
+  get original() { return this.stack[0]; }
+  get canUndo() { return this.index > 0; }
+  get canRedo() { return this.index < this.stack.length - 1; }
+  push(recipe, label) {
+    this.stack.splice(this.index + 1);
+    this.stack.push({ ...this.current, ...recipe, label });
+    this.index = this.stack.length - 1;
+  }
+  undo() { if (this.canUndo) this.index--; return this.current; }
+  redo() { if (this.canRedo) this.index++; return this.current; }
+}
+core.ClipHistory = ClipHistory;
+
+/* MP4 boxes. An MP4 file is a tree of boxes: 4 bytes of size, 4 letters of type,
+   then the contents, which may be more boxes. */
+core.video.CONTAINERS = ['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'dinf', 'mvex'];
+core.video.boxes = (b, from = 0, to = b.length) => {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const out = [];
+  for (let i = from; i + 8 <= to;) {
+    let size = dv.getUint32(i), body = i + 8;
+    if (size === 1) { size = Number(dv.getBigUint64(i + 8)); body = i + 16; }
+    else if (size === 0) size = to - i;
+    if (size < 8) break;
+    out.push({ type: String.fromCharCode(b[i + 4], b[i + 5], b[i + 6], b[i + 7]), start: i, body, end: Math.min(to, i + size) });
+    i += size;
+  }
+  return out;
+};
+
+// The movie, track and media headers each carry a creation and a change date. The
+// muxer writes the export time there; retouch keeps no dates, so they become 0
+// ("unknown"). b holds the moov box; it is changed in place. Returns how many headers.
+core.video.zeroDates = (b) => {
+  let n = 0;
+  const walk = (from, to) => {
+    for (const x of core.video.boxes(b, from, to)) {
+      if (x.type === 'mvhd' || x.type === 'tkhd' || x.type === 'mdhd') {
+        const wide = b[x.body] === 1;                         // version 1: 64-bit dates
+        b.fill(0, x.body + 4, x.body + 4 + (wide ? 16 : 8));
+        n++;
+      } else if (core.video.CONTAINERS.includes(x.type)) walk(x.body, x.end);   // the headers sit inside moov, trak and mdia
+    }
+  };
+  walk(0, b.length);
+  return n;
+};
+
+// What in an exported MP4 could say where, when or on what it was made. top lists
+// the top-level box types; moov holds the moov box. Returns a list; empty is clean.
+core.video.findMeta = (top, moov) => {
+  const found = top.filter((t) => !['ftyp', 'moov', 'mdat', 'free', 'skip'].includes(t)).map((t) => 'top-level ' + t);
+  const walk = (from, to) => {
+    for (const x of core.video.boxes(moov, from, to)) {
+      if (['udta', 'meta', 'uuid', 'ilst'].includes(x.type)) found.push(x.type + ' box');
+      else if (x.type === 'mvhd' || x.type === 'tkhd' || x.type === 'mdhd') {
+        const wide = moov[x.body] === 1;
+        if (moov.subarray(x.body + 4, x.body + 4 + (wide ? 16 : 8)).some((v) => v)) found.push('date in ' + x.type);
+      } else if (core.video.CONTAINERS.includes(x.type)) walk(x.body, x.end);
+    }
+  };
+  walk(0, moov.length);
+  const text = new TextDecoder('latin1').decode(moov);   // one character per byte; © is 0xA9
+  if (text.includes('\xA9xyz')) found.push('GPS location');
+  if (text.includes('<x:xmpmeta')) found.push('XMP packet');
+  return found;
+};
+
+/* The video check: what this phone's Chrome can encode and decode with WebCodecs.
+   Sizes and rates are the ones a Pixel 9 Pro XL records. Each encoder that says
+   yes is also run on a few frames (or a second of tone), because a yes on paper
+   does not always mean it works. The codec strings name the profile and level the
+   size needs: H.264 High at level 4.0 (1080p 30), 4.2 (1080p 60), 5.1 (4K 30) and
+   5.2 (4K 60); HEVC Main and Main 10 at level 5.1. */
+core.video.CHECKS = [
+  { id: 'h264-1080p30', kind: 'video-encode', label: 'H.264 encode 1080p 30 fps', config: { codec: 'avc1.640028', width: 1920, height: 1080, framerate: 30, bitrate: 16e6 } },
+  { id: 'h264-1080p60', kind: 'video-encode', label: 'H.264 encode 1080p 60 fps', config: { codec: 'avc1.64002A', width: 1920, height: 1080, framerate: 60, bitrate: 24e6 } },
+  { id: 'h264-2160p30', kind: 'video-encode', label: 'H.264 encode 4K 30 fps', config: { codec: 'avc1.640033', width: 3840, height: 2160, framerate: 30, bitrate: 40e6 } },
+  { id: 'h264-2160p60', kind: 'video-encode', label: 'H.264 encode 4K 60 fps', config: { codec: 'avc1.640034', width: 3840, height: 2160, framerate: 60, bitrate: 60e6 } },
+  { id: 'aac', kind: 'audio-encode', label: 'AAC encode 48 kHz stereo', config: { codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 192000 } },
+  { id: 'opus', kind: 'audio-encode', label: 'Opus encode 48 kHz stereo', config: { codec: 'opus', sampleRate: 48000, numberOfChannels: 2, bitrate: 128000 } },
+  { id: 'hevc-2160p30', kind: 'video-encode', label: 'HEVC encode 4K 30 fps', config: { codec: 'hvc1.1.6.L153.B0', width: 3840, height: 2160, framerate: 30, bitrate: 40e6 } },
+  { id: 'hevc10-2160p30', kind: 'video-encode', label: 'HEVC 10-bit encode 4K 30 fps', config: { codec: 'hvc1.2.4.L153.B0', width: 3840, height: 2160, framerate: 30, bitrate: 40e6 } },
+  { id: 'h264-dec', kind: 'video-decode', label: 'H.264 decode 4K 60 fps', config: { codec: 'avc1.640034', codedWidth: 3840, codedHeight: 2160 } },
+  { id: 'hevc-dec', kind: 'video-decode', label: 'HEVC decode 4K 60 fps', config: { codec: 'hvc1.1.6.L153.B0', codedWidth: 3840, codedHeight: 2160 } },
+  { id: 'hevc10-dec', kind: 'video-decode', label: 'HEVC 10-bit decode 4K 60 fps', config: { codec: 'hvc1.2.4.L153.B0', codedWidth: 3840, codedHeight: 2160 } },
+  { id: 'aac-dec', kind: 'audio-decode', label: 'AAC decode 48 kHz stereo', config: { codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2 } },
+];
+
+// One result: { supported, ran, error }. ran is { frames, fps } or { seconds, chunks } when a trial ran.
+// pass: supported (and the trial worked, if one ran); watch: supported on paper, but
+// the trial failed; fail: not supported.
+core.video.verdict = (r) => (!r.supported ? 'fail' : r.error ? 'watch' : 'pass');
+
+core.video.resultText = (r) => {
+  if (!r.supported) return 'not supported' + (r.error ? ' (' + r.error + ')' : '');
+  if (r.error) return 'says yes, but the trial failed: ' + r.error;
+  if (r.ran && r.ran.frames) return 'works, ' + r.ran.frames + ' frames at ' + Math.round(r.ran.fps) + ' fps';
+  if (r.ran && r.ran.chunks) return 'works, ' + r.ran.seconds + ' s of tone in ' + r.ran.chunks + ' packets';
+  return 'supported';
+};
+
+// The plain text Gary copies back. env: { version, when, browser, hdrScreen, clip }.
+core.video.report = (results, env) => {
+  const lines = ['retouch ' + env.version + ' video check, ' + env.when, 'Browser: ' + env.browser, 'HDR screen: ' + (env.hdrScreen ? 'yes' : 'no')];
+  for (const c of core.video.CHECKS) {
+    const r = results[c.id];
+    if (!r) continue;
+    lines.push(core.video.verdict(r).toUpperCase() + ' ' + c.label + ': ' + core.video.resultText(r));
+  }
+  lines.push('Open clip: ' + (env.clip || 'none'));
+  return lines.join('\n');
+};
 // CORE:END
 
 /* ============================================================
@@ -2314,6 +2730,7 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 const app = {
   edits: null,         // EditHistory once a photo is open
+  video: null,         // the open clip (see openVideo); a photo and a video are never open together
   fileName: '',
   tool: null,          // the open tool, or null
   preview: null,       // { src, w, h, texts } a tool's live preview, drawn instead of the current image
@@ -2330,7 +2747,8 @@ function stamp(d = new Date()) {
 }
 // Edits applied so far: "0 edit", "1 edit", "2 edits" (a step back with undo counts down).
 function editCount() {
-  const n = app.edits ? app.edits.index : 0;
+  const h = app.edits || (app.video && app.video.history);
+  const n = h ? h.index : 0;
   return n + (n >= 2 ? ' edits' : ' edit');
 }
 const fmtDims = (w, h) => w + ' × ' + h;
@@ -2613,8 +3031,8 @@ view.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 /* ---------- Before / after hold buttons ---------- */
 
 for (const b of $$('[data-hold]')) {
-  const on = (e) => { e.preventDefault(); app.holding = true; b.dataset.active = 'true'; requestDraw(); };
-  const off = () => { if (!app.holding) return; app.holding = false; b.dataset.active = 'false'; requestDraw(); };
+  const on = (e) => { e.preventDefault(); app.holding = true; b.dataset.active = 'true'; requestDraw(); if (app.video) playerRule(); };
+  const off = () => { if (!app.holding) return; app.holding = false; b.dataset.active = 'false'; requestDraw(); if (app.video) playerRule(); };
   b.addEventListener('pointerdown', on);
   b.addEventListener('pointerup', off);
   b.addEventListener('pointercancel', off);
@@ -2649,14 +3067,23 @@ async function commit(label, produce, moveTexts = null) {
 }
 
 function afterHistoryChange() {
-  const e = app.edits;
-  $('#btn-undo').disabled = !e || !e.canUndo;
-  $('#btn-redo').disabled = !e || !e.canRedo;
-  $('#btn-export').disabled = !e;
-  for (const b of $$('[data-open-tool]')) b.disabled = !e;
+  const e = app.edits, v = app.video, h = e || (v && v.history);
+  $('#btn-undo').disabled = !h || !h.canUndo;
+  $('#btn-redo').disabled = !h || !h.canRedo;
+  $('#btn-export').disabled = !h;
+  for (const b of $$('[data-open-tool]')) b.disabled = b.dataset.mode === 'video' ? !v : !e;
+  if (v && !v.at) $('[data-open-tool="sound"]').disabled = true;
   $('#hold-main').hidden = !e || !!app.tool;
-  $('#empty').hidden = !!e;
-  document.body.toggleAttribute('data-empty', !e);
+  $('#empty').hidden = !!h;
+  document.body.toggleAttribute('data-empty', !h);
+  if (v) document.body.dataset.mode = 'video'; else delete document.body.dataset.mode;
+  if (v) {
+    const r = v.history.current, plan = core.video.planTrim(v.vpk, r.start, r.end), d = new Date();
+    $('#dims').textContent = fmtDims(v.info.width, v.info.height) + ' · ' + core.video.fmtTime(plan.to - plan.from) + (r.audio && v.at ? '' : ' · no sound');
+    $('#top-code').textContent = editCount() + ' ▸ ' + pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + ' ' + pad2(d.getHours()) + pad2(d.getMinutes());
+    playerRule();
+    return;
+  }
   if (e) {
     const c = e.current;
     $('#dims').textContent = fmtDims(c.width, c.height) + ' · ' + fmtMP(c.width, c.height);
@@ -2674,8 +3101,16 @@ function commitTexts(label, texts) {
   afterHistoryChange();
 }
 
-function undo() { if (app.tool || !app.edits || !app.edits.canUndo) return; app.edits.undo(); afterHistoryChange(); }
-function redo() { if (app.tool || !app.edits || !app.edits.canRedo) return; app.edits.redo(); afterHistoryChange(); }
+function undo() {
+  const h = app.edits || (app.video && app.video.history);
+  if (app.tool || !h || !h.canUndo) return;
+  h.undo(); afterHistoryChange();
+}
+function redo() {
+  const h = app.edits || (app.video && app.video.history);
+  if (app.tool || !h || !h.canRedo) return;
+  h.redo(); afterHistoryChange();
+}
 $('#btn-undo').addEventListener('click', undo);
 $('#btn-redo').addEventListener('click', redo);
 document.addEventListener('keydown', (e) => {
@@ -2691,9 +3126,10 @@ const RAW_EXT = /\.(dng|cr2|cr3|nef|arw|orf|rw2|raf|srw|pef|raw)$/i;
 
 async function openFile(file) {
   if (!file) return false;
+  if (core.video.isVideoFile(file.name, file.type)) return openVideo(file);
   if (app.tool) closeTool();
   if (RAW_EXT.test(file.name || '')) {
-    notify('RAW files are not supported. Open a JPEG, PNG, WebP or AVIF instead.', 'fail', { sticky: true, id: 'open' });
+    notify('RAW files are not supported. Open a JPEG, PNG, WebP or AVIF photo, or an MP4, MOV or WebM video, instead.', 'fail', { sticky: true, id: 'open' });
     return false;
   }
   busy(true);
@@ -2719,6 +3155,7 @@ async function openFile(file) {
       const old = document.querySelector('.notice[data-id="downscale"]'); if (old) old.remove();
     }
     const oldOpen = document.querySelector('.notice[data-id="open"]'); if (oldOpen) oldOpen.remove();
+    closeVideo();
     if (app.edits) app.edits.dispose();
     app.edits = new EditHistory(bmp, HISTORY_DEPTH);
     app.fileName = file.name || 'photo';
@@ -2749,14 +3186,14 @@ async function receiveShared() {
   if (!q.has('shared')) return;
   window.history.replaceState(null, '', location.pathname);
   if (q.get('shared') !== '1' || !('caches' in window)) {
-    notify('The shared photo did not arrive. Open it from the Open button instead.', 'fail', { sticky: true });
+    notify('The shared file did not arrive. Open it from the Open button instead.', 'fail', { sticky: true });
     return;
   }
   const cache = await caches.open(SHARE_CACHE);
   const key = new URL(SHARE_KEY, location.href).href;
   const res = await cache.match(key);
   await cache.delete(key);
-  if (!res) { notify('The shared photo did not arrive. Open it from the Open button instead.', 'fail', { sticky: true }); return; }
+  if (!res) { notify('The shared file did not arrive. Open it from the Open button instead.', 'fail', { sticky: true }); return; }
   const blob = await res.blob();
   const name = decodeURIComponent(res.headers.get('x-filename') || 'shared');
   await openFile(new File([blob], name, { type: blob.type }));
@@ -2767,9 +3204,10 @@ async function receiveShared() {
 const tools = {};
 
 function openTool(id) {
-  if (!app.edits || app.busyCount > 0) return;
-  if (app.tool) closeTool();
   const t = tools[id];
+  if (!t || app.busyCount > 0) return;
+  if (!t.always && !(t.video ? app.video : app.edits)) return;
+  if (app.tool) closeTool();
   app.tool = t;
   app.preview = null;
   $('#toolbar').hidden = true;
@@ -2779,6 +3217,7 @@ function openTool(id) {
   // The thin strip that stands in for the top bar: edit number and tool name.
   $('#strip-code').textContent = editCount() + ' ▸ ' + $('h2', panel).textContent;
   document.body.dataset.tool = id;
+  $('#sheet').toggleAttribute('data-tall', !!t.tall);
   $('#hold-main').hidden = true;
   t.open();
   viewResize();                     // the stage just got shorter; lay out before the first touch
@@ -2791,12 +3230,14 @@ function closeTool() {
   if (app.preview && app.preview.src) core.release(app.preview.src);
   app.preview = null;
   app.holding = false;
+  app.vpreview = null;
   delete document.body.dataset.tool;
   document.body.removeAttribute('data-brush');
   document.body.removeAttribute('data-bg-ready');
   $('#sheet').hidden = true;
   $('#toolbar').hidden = false;
   $('#hold-main').hidden = !app.edits;
+  if (app.video) playerRule();
   view.fitMode = true;
   viewResize();
 }
@@ -4070,7 +4511,627 @@ $('#export-quality').addEventListener('change', (e) => { tools.export.s.quality 
 $('#export-quality').addEventListener('input', (e) => { $('#export-quality-out').textContent = e.target.value; });
 $('#export-download').addEventListener('click', () => tools.export.download());
 $('#export-share').addEventListener('click', () => tools.export.share());
-$('#btn-export').addEventListener('click', () => openTool('export'));
+$('#btn-export').addEventListener('click', () => openTool(app.video ? 'vexport' : 'export'));
+
+/* ---------- Video ---------- */
+
+/* How video works here, in plain words. Opening a clip reads its index: the time
+   of every packet (an encoded frame or a slice of sound) and which ones are
+   keyframes, but no picture data. Chrome's own player shows it. Edits are only a
+   recipe (start, end, keep sound or not), so they cost nothing until export.
+   Export copies the chosen packets into a new MP4 without decoding them, so it is
+   fast and the picture and sound are exactly as recorded. Mediabunny (vendored)
+   reads and writes the files; the core functions above choose the packets. */
+
+const VIDEO_EXPORT_TEMP = 'retouch-export.mp4';   // scratch file in the browser's private storage for the clip being written
+
+let mediabunny = null;
+function loadMediabunny() {
+  if (!mediabunny) {
+    mediabunny = import('./vendor/mediabunny/mediabunny.js');
+    mediabunny.catch(() => { mediabunny = null; });      // a failed load can be tried again
+  }
+  return mediabunny;
+}
+// Only file formats read from the one file in hand: nothing that names other files.
+const videoFormats = (MB) => [MB.MP4, MB.QTFF, MB.WEBM, MB.MATROSKA];
+
+const player = $('#player');
+
+function shortError(err) {
+  const m = err && err.message ? err.message : String(err);
+  return (err && err.name && err.name !== 'Error' && !m.startsWith(err.name) ? err.name + ': ' : '') + m.slice(0, 120);
+}
+
+// Read a clip's index and plain facts. No picture data is read here.
+async function readClip(file) {
+  const MB = await loadMediabunny();
+  const input = new MB.Input({ source: new MB.BlobSource(file), formats: videoFormats(MB) });
+  const vt = await input.getPrimaryVideoTrack();
+  if (!vt) throw new Error('it has no picture track');
+  if (!vt.codec) throw new Error('its picture is in a format retouch does not know');
+  let at = await input.getPrimaryAudioTrack();
+  let note = null;
+  if (at && !at.codec) { note = 'The sound is in a format retouch cannot copy, so exports leave it out.'; at = null; }
+  const index = async (track) => {
+    const out = [];
+    for await (const p of new MB.EncodedPacketSink(track).packets(undefined, undefined, { metadataOnly: true })) {
+      out.push({ ts: p.timestamp, dur: p.duration, key: p.type === 'key', seq: p.sequenceNumber });
+    }
+    return out;
+  };
+  const vpk = await index(vt);
+  if (!vpk.length) throw new Error('it has no frames');
+  const apk = at ? await index(at) : [];
+  const starts = vpk.map((p) => p.ts).sort((a, b) => a - b);
+  const first = starts[0];
+  const end = vpk.reduce((m, p) => Math.max(m, p.ts + p.dur), -Infinity);
+  const keys = core.video.keyTimes(vpk);
+  const codecString = await vt.getCodecParameterString();
+  const info = {
+    codec: vt.codec, codecString, width: vt.displayWidth, height: vt.displayHeight,
+    fps: vpk.length / (end - first), bitDepth: core.video.bitDepth(codecString),
+    colorSpace: await vt.getColorSpace(), duration: end - first, keyEvery: core.video.keyEvery(keys),
+    audio: at ? { codec: at.codec, sampleRate: at.sampleRate, channels: at.numberOfChannels } : null,
+  };
+  return { file, input, vt, at, vpk, apk, starts, first, end, keys, info, note, url: null,
+    history: new core.ClipHistory({ start: first, end, audio: !!at }) };
+}
+
+async function openVideo(file) {
+  if (app.tool) closeTool();
+  busy(true, 'Reading');
+  try {
+    await nextFrame();
+    let clip;
+    try { clip = await readClip(file); } catch (err) {
+      const why = /unsupported|unrecogni[sz]able/i.test(err && err.message) ? 'Chrome cannot read this kind of file' : shortError(err);
+      notify('This video could not be opened: ' + why + '. retouch opens MP4, MOV and WebM videos.', 'fail', { sticky: true, id: 'open' });
+      return false;
+    }
+    for (const id of ['open', 'downscale', 'video-note']) { const n = document.querySelector('.notice[data-id="' + id + '"]'); if (n) n.remove(); }
+    closeVideo();
+    if (app.edits) { app.edits.dispose(); app.edits = null; }
+    app.video = clip;
+    app.fileName = file.name || 'video';
+    clip.url = URL.createObjectURL(file);
+    player.src = clip.url;
+    if (clip.note) notify(clip.note, 'watch', { id: 'video-note', sticky: true });
+    afterHistoryChange();
+    return true;
+  } finally { busy(false); }
+}
+
+function closeVideo() {
+  const v = app.video;
+  if (!v) return;
+  app.video = null;
+  player.pause();
+  player.removeAttribute('src');
+  player.load();
+  if (v.url) URL.revokeObjectURL(v.url);
+  try { v.input.dispose(); } catch (err) { /* already gone */ }
+  for (const id of ['player', 'video-note']) { const n = document.querySelector('.notice[data-id="' + id + '"]'); if (n) n.remove(); }
+}
+
+player.addEventListener('error', () => {
+  if (!app.video || !player.getAttribute('src')) return;
+  notify('Chrome on this phone cannot play this ' + core.video.codecName(app.video.info.codec) + ' video, so there is no picture. Trim and Sound still work by the numbers, and export copies it as it is.', 'watch', { sticky: true, id: 'player' });
+});
+
+/* The player follows the recipe: what a sheet is editing, else the current step.
+   While HOLD is pressed it plays the original clip, sound included. */
+function playerRecipe() {
+  const v = app.video;
+  if (!v) return null;
+  if (app.holding) return v.history.original;
+  return app.vpreview || v.history.current;
+}
+
+function playerRule() {
+  const v = app.video, r = playerRecipe();
+  if (!r) return;
+  player.muted = !(r.audio && v.at);
+  const t = player.currentTime;
+  if (t < r.start - 0.01 || t > r.end) player.currentTime = r.start;
+  showClock();
+}
+
+function showClock() {
+  const r = playerRecipe();
+  if (!r) return;
+  const len = Math.max(1e-6, r.end - r.start), at = Math.min(len, Math.max(0, player.currentTime - r.start));
+  $('#clock').textContent = core.video.fmtTime(at) + ' / ' + core.video.fmtTime(len);
+  $('#seek').value = String(Math.round(at / len * 1000));
+  if (app.tool === tools.trim) tools.trim.showHead();
+}
+
+// While playing, stop at the end of the kept part (checked every screen frame).
+function watchPlay() {
+  if (player.paused || !app.video) return;
+  const r = playerRecipe();
+  if (r && player.currentTime >= r.end - 0.005) { player.pause(); player.currentTime = r.start; }
+  showClock();
+  requestAnimationFrame(watchPlay);
+}
+player.addEventListener('play', () => {
+  const r = playerRecipe();
+  if (r && (player.currentTime < r.start - 0.01 || player.currentTime >= r.end - 0.02)) player.currentTime = r.start;
+  $('#play').toggleAttribute('data-playing', true);
+  requestAnimationFrame(watchPlay);
+});
+player.addEventListener('pause', () => { $('#play').removeAttribute('data-playing'); showClock(); });
+player.addEventListener('seeked', showClock);
+player.addEventListener('loadedmetadata', playerRule);
+const togglePlay = () => { if (!app.video) return; if (player.paused) player.play().catch(() => {}); else player.pause(); };
+$('#play').addEventListener('click', togglePlay);
+player.addEventListener('click', togglePlay);
+$('#seek').addEventListener('input', (e) => {
+  const r = playerRecipe();
+  if (!r) return;
+  player.pause();
+  player.currentTime = Math.min(r.end - 0.001, r.start + (+e.target.value / 1000) * (r.end - r.start));
+});
+
+// The start of the last frame that begins before t (frame start times, earliest first).
+function frameBefore(starts, t) {
+  let lo = 0, hi = starts.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (starts[m] < t - core.video.EPS) lo = m; else hi = m - 1; }
+  return starts[lo];
+}
+
+/* ---------- Tool: trim ---------- */
+
+tools.trim = {
+  video: true,
+  open() {
+    const v = app.video;
+    this.d = { ...v.history.current };
+    app.vpreview = this.d;
+    this.picked = null;
+    player.pause();
+    $('#trim-out').textContent = v.keys.length > 1 ? 'keyframe every ' + v.info.keyEvery.toFixed(2) + ' s' : 'one keyframe: the start cannot move';
+    requestAnimationFrame(() => { this.drawTicks(); this.sync(); });
+    this.sync();
+  },
+  frac(t) { const v = app.video; return (t - v.first) / Math.max(1e-6, v.end - v.first); },
+  timeAt(clientX) {
+    const v = app.video, r = $('#trim-line').getBoundingClientRect();
+    return v.first + Math.min(1, Math.max(0, (clientX - r.left) / r.width)) * (v.end - v.first);
+  },
+  drawTicks() {
+    const c = $('#trim-ticks'), r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    c.width = Math.max(1, Math.round(r.width * dpr)); c.height = Math.max(1, Math.round(r.height * dpr));
+    const x = c.getContext('2d');
+    x.fillStyle = '#4A4640';
+    for (const k of app.video.keys) x.fillRect(Math.round(this.frac(k) * (c.width - 1)), 0, Math.max(1, Math.round(dpr)), c.height);
+  },
+  // Start: the keyframe at or before t, and always before the end.
+  setStart(t, fromPlayhead) {
+    const v = app.video, E = core.video.EPS;
+    let k = core.video.keyBefore(v.keys, t);
+    if (k >= this.d.end - E) k = core.video.keyBefore(v.keys, frameBefore(v.starts, this.d.end));
+    this.picked = fromPlayhead && k < t - 0.005 ? t : null;
+    this.d.start = k;
+    this.preview(k);
+  },
+  // End: a frame edge, at least one frame after the start.
+  setEnd(t) {
+    const v = app.video, E = core.video.EPS;
+    let e = core.video.snapToFrame(v.starts, v.end, t);
+    if (e <= this.d.start + E) e = v.starts.find((s) => s > this.d.start + E) ?? v.end;
+    this.d.end = e;
+    this.picked = null;
+    this.preview(frameBefore(v.starts, e));
+  },
+  preview(t) { player.pause(); player.currentTime = t; this.sync(); },
+  showHead() { $('#trim-head').style.left = (this.frac(player.currentTime) * 100) + '%'; },
+  sync() {
+    const v = app.video, d = this.d;
+    const a = this.frac(d.start) * 100, b = this.frac(d.end) * 100;
+    $('#trim-range').style.left = a + '%'; $('#trim-range').style.width = (b - a) + '%';
+    $('#trim-start').style.left = a + '%'; $('#trim-end').style.left = b + '%';
+    this.showHead();
+    $('#trim-from').textContent = core.video.fmtTime(d.start - v.first);
+    $('#trim-to').textContent = core.video.fmtTime(d.end - v.first);
+    $('#trim-len').textContent = core.video.fmtTime(d.end - d.start);
+    const note = $('#trim-note');
+    note.hidden = this.picked === null;
+    if (this.picked !== null) note.textContent = 'Start moved back to ' + core.video.fmtTime(d.start - v.first) + ', the keyframe before ' + core.video.fmtTime(this.picked - v.first) + ', so the clip is copied without re-encoding.';
+    showClock();
+  },
+  apply() {
+    const v = app.video, c = v.history.current;
+    if (this.d.start === c.start && this.d.end === c.end) return;
+    v.history.push({ start: this.d.start, end: this.d.end }, 'Trim');
+    afterHistoryChange();
+  },
+};
+{
+  const line = $('#trim-line');
+  const t = tools.trim;
+  line.addEventListener('pointerdown', (e) => {
+    if (app.tool !== t) return;
+    e.preventDefault();
+    try { line.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
+    const r = line.getBoundingClientRect();
+    const xs = { start: r.left + t.frac(t.d.start) * r.width, end: r.left + t.frac(t.d.end) * r.width };
+    const ds = Math.abs(e.clientX - xs.start), de = Math.abs(e.clientX - xs.end);
+    // The nearer handle, if the finger is on it; otherwise move the playhead.
+    t.drag = Math.min(ds, de) <= 28 ? (de < ds || (de === ds && e.clientX > xs.end) ? 'end' : 'start') : 'head';
+    t.dragTo(e.clientX);
+  });
+  line.addEventListener('pointermove', (e) => { if (t.drag) t.dragTo(e.clientX); });
+  const up = () => { t.drag = null; };
+  line.addEventListener('pointerup', up);
+  line.addEventListener('pointercancel', up);
+  t.dragTo = (x) => {
+    const time = t.timeAt(x);
+    if (t.drag === 'start') t.setStart(time, false);
+    else if (t.drag === 'end') t.setEnd(time);
+    else { player.pause(); player.currentTime = time; t.showHead(); }
+  };
+  $('#trim-play').addEventListener('click', () => { player.currentTime = t.d.start; player.play().catch(() => {}); });
+  $('#trim-set-start').addEventListener('click', () => t.setStart(player.currentTime, true));
+  $('#trim-set-end').addEventListener('click', () => {
+    // Keep the frame on screen: the end goes to the edge after it.
+    const v = app.video, cur = frameBefore(v.starts, player.currentTime + 0.0005);
+    t.setEnd(v.starts.find((s) => s > cur + core.video.EPS) ?? v.end);
+  });
+  $('#trim-reset').addEventListener('click', () => { const v = app.video; t.d.start = v.first; t.d.end = v.end; t.picked = null; t.preview(v.first); });
+}
+
+/* ---------- Tool: sound ---------- */
+
+tools.sound = {
+  video: true,
+  open() {
+    const v = app.video;
+    this.d = { ...v.history.current };
+    app.vpreview = this.d;
+    const a = v.info.audio;
+    $('#sound-what').textContent = core.video.codecName(a.codec) + ' · ' + Math.round(a.sampleRate / 1000) + ' kHz · ' + a.channels + ' ch';
+    this.sync();
+  },
+  sync() {
+    setPressed($$('[data-sound]'), (b) => (b.dataset.sound === 'keep') === this.d.audio);
+    $('#sound-result').textContent = this.d.audio ? 'with sound' : 'picture only';
+    $('#sound-out').textContent = this.d.audio ? 'sound kept' : 'sound left out';
+    playerRule();
+  },
+  apply() {
+    const v = app.video;
+    if (this.d.audio === v.history.current.audio) return;
+    v.history.push({ audio: this.d.audio }, this.d.audio ? 'Keep sound' : 'Remove sound');
+    afterHistoryChange();
+  },
+};
+for (const b of $$('[data-sound]')) b.addEventListener('click', () => { tools.sound.d.audio = b.dataset.sound === 'keep'; tools.sound.sync(); });
+
+/* ---------- Video export: copy the packets into a new MP4 ---------- */
+
+// Where the new file is written: the browser's private storage on this phone when
+// it has some (a long 4K clip can be hundreds of MB, too much to hold in memory),
+// else memory. Nothing here leaves the phone.
+async function exportTarget(MB) {
+  try {
+    const dir = await navigator.storage.getDirectory();
+    const fh = await dir.getFileHandle(VIDEO_EXPORT_TEMP, { create: true });
+    const w = await fh.createWritable();
+    return {
+      where: 'storage', target: new MB.StreamTarget(w, { chunked: true }),
+      file: () => fh.getFile(),
+      async patch(at, bytes) {
+        const w2 = await fh.createWritable({ keepExistingData: true });
+        await w2.write({ type: 'write', position: at, data: bytes });
+        await w2.close();
+      },
+    };
+  } catch (err) { /* no private storage here: build the file in memory */ }
+  const target = new MB.BufferTarget();
+  return {
+    where: 'memory', target,
+    file: async () => new Blob([target.buffer]),
+    patch: async (at, bytes) => { new Uint8Array(target.buffer).set(bytes, at); },
+  };
+}
+
+async function clearExportTemp() {
+  try { await (await navigator.storage.getDirectory()).removeEntry(VIDEO_EXPORT_TEMP); } catch (err) { /* nothing there */ }
+}
+
+// The kept packets of one track, with their data, in decode order. Reading starts
+// at the first kept packet, so a trim near the end does not read the whole file.
+async function* keptPackets(MB, track, index, keep, video) {
+  if (!keep.length) return;
+  const sink = new MB.EncodedPacketSink(track);
+  const want = new Set(keep.map((i) => index[i].seq));
+  const first = index[keep[0]], lastSeq = index[keep[keep.length - 1]].seq;
+  let from = video ? await sink.getKeyPacket(first.ts) : await sink.getPacket(first.ts);
+  if (!from || from.sequenceNumber !== first.seq) from = undefined;       // not found that way: read from the top
+  for await (const p of sink.packets(from)) {
+    if (want.has(p.sequenceNumber)) yield p;
+    if (p.sequenceNumber >= lastSeq) return;
+  }
+}
+
+// The top-level boxes of a written file, read a few bytes at a time.
+async function topBoxes(blob) {
+  const out = [];
+  for (let i = 0; i + 8 <= blob.size;) {
+    const h = new Uint8Array(await blob.slice(i, i + 16).arrayBuffer());
+    const dv = new DataView(h.buffer);
+    let size = dv.getUint32(0);
+    if (size === 1) size = Number(dv.getBigUint64(8)); else if (size === 0) size = blob.size - i;
+    if (size < 8) throw new Error('the written file is damaged at byte ' + i);
+    out.push({ type: String.fromCharCode(h[4], h[5], h[6], h[7]), start: i, end: i + size });
+    i += size;
+  }
+  return out;
+}
+
+// Copy the recipe's packets into a new MP4. progress(share) is told how far it got;
+// wanted() going false stops it. Returns { file, plan, sound, where } or null if stopped.
+async function exportClip(v, r, name, progress = () => {}, wanted = () => true) {
+  const MB = await loadMediabunny();
+  const plan = core.video.planTrim(v.vpk, r.start, r.end);
+  const akeep = r.audio && v.at ? core.video.planAudio(v.apk, plan) : [];
+  const vcodec = v.vt.codec, acodec = akeep.length ? v.at.codec : null;
+  const format = new MB.Mp4OutputFormat({ fastStart: false });
+  if (!format.getSupportedVideoCodecs().includes(vcodec)) throw new Error('a ' + core.video.codecName(vcodec) + ' picture cannot go into an MP4 without re-encoding, which comes in a later version');
+  if (acodec && !format.getSupportedAudioCodecs().includes(acodec)) throw new Error(core.video.codecName(acodec) + ' sound cannot go into an MP4 without re-encoding; remove the sound to export');
+  const sink = await exportTarget(MB);
+  const out = new MB.Output({ format, target: sink.target });
+  const vsrc = new MB.EncodedVideoPacketSource(vcodec);
+  out.addVideoTrack(vsrc, { rotation: v.vt.rotation });
+  let asrc = null;
+  if (acodec) { asrc = new MB.EncodedAudioPacketSource(acodec); out.addAudioTrack(asrc); }
+  try {
+    await out.start();
+    // The decoder configs carry the codec setup and the colour tags (HDR included) as recorded.
+    const vcfg = await v.vt.getDecoderConfig(), acfg = acodec ? await v.at.getDecoderConfig() : null;
+    const order = core.video.interleave(plan.keep.map((i) => v.vpk[i].ts), akeep.map((i) => v.apk[i].ts));
+    const reads = [keptPackets(MB, v.vt, v.vpk, plan.keep, true), acodec ? keptPackets(MB, v.at, v.apk, akeep, false) : null];
+    const srcs = [vsrc, asrc], cfgs = [vcfg, acfg], firsts = [true, true];
+    let n = 0;
+    for (const [track] of order) {
+      if (!wanted()) { await out.cancel(); return null; }
+      const p = (await reads[track].next()).value;
+      if (!p) throw new Error('a packet listed in the index could not be read');
+      // Times move so the clip starts at 0 (sound may start a hair before; the MP4 allows it).
+      await srcs[track].add(p.clone({ timestamp: p.timestamp - plan.from }), firsts[track] ? { decoderConfig: cfgs[track] } : undefined);
+      firsts[track] = false;
+      if (++n % 25 === 0) progress(n / order.length);
+    }
+    await out.finalize();
+  } catch (err) {
+    if (out.state !== 'finalized' && out.state !== 'canceled') { try { await out.cancel(); } catch (e) { /* already stopped */ } }
+    throw err;
+  }
+  // The muxer writes today's date into the headers: set them to 0, then check the
+  // written file for anything that says where, when or on what it was made.
+  const boxes = await topBoxes(await sink.file());
+  const m = boxes.find((x) => x.type === 'moov');
+  if (!m) throw new Error('the written file has no index (moov box)');
+  const moov = new Uint8Array(await (await sink.file()).slice(m.start, m.end).arrayBuffer());
+  core.video.zeroDates(moov);
+  await sink.patch(m.start, moov);
+  const blob = await sink.file();
+  const found = core.video.findMeta(boxes.map((x) => x.type), new Uint8Array(await blob.slice(m.start, m.end).arrayBuffer()));
+  if (found.length) throw new Error('Metadata survived: ' + found.join(', '));
+  return { file: new File([blob], name + '.mp4', { type: 'video/mp4' }), plan, sound: !!acodec, where: sink.where };
+}
+
+tools.vexport = {
+  video: true,
+  holdOriginal: true,
+  open() {
+    const v = app.video, r = v.history.current, plan = core.video.planTrim(v.vpk, r.start, r.end);
+    this.result = null;
+    $('#vexport-len').textContent = core.video.fmtTime(plan.to - plan.from);
+    $('#vexport-dims').textContent = fmtDims(v.info.width, v.info.height);
+    $('#vexport-sound').textContent = !v.at ? 'none' : r.audio ? 'kept, ' + core.video.codecName(v.at.codec) : 'removed';
+    $('#vexport-copy').textContent = 'copied, not re-encoded';
+    const note = $('#vexport-note');
+    const extra = plan.to - r.end;
+    note.hidden = extra < 0.001;
+    if (!note.hidden) note.textContent = 'The clip runs ' + core.video.fmtTime(extra) + ' past your end: the last frames before it are built from a frame after it, so that frame comes too.';
+    $('#vexport-share').hidden = !navigator.share;
+    this.run();
+  },
+  close() { this.ticket = (this.ticket || 0) + 1; },
+  run() {
+    const ticket = (this.ticket = (this.ticket || 0) + 1);
+    $('#vexport-download').disabled = true; $('#vexport-share').disabled = true;
+    $('#vexport-size').textContent = 'copying';
+    $('#vexport-meta').textContent = '';
+    $('#vexport-out').textContent = 'copying the packets';
+    const wanted = () => ticket === this.ticket && app.tool === this;
+    this.pending = (async () => {
+      await nextFrame();
+      try {
+        const r = await exportClip(app.video, app.video.history.current, exportName(),
+          (f) => { if (wanted()) $('#vexport-size').textContent = 'copying ' + Math.round(f * 100) + ' %'; }, wanted);
+        if (!r || !wanted()) return null;
+        this.result = r;
+        $('#vexport-size').textContent = fmtBytes(r.file.size);
+        $('#vexport-meta').innerHTML = '<span class="status-pass">Pass</span> none found';
+        $('#vexport-out').textContent = 'ready';
+        $('#vexport-download').disabled = false; $('#vexport-share').disabled = false;
+        return r;
+      } catch (err) {
+        if (!wanted()) return null;
+        $('#vexport-size').textContent = '';
+        $('#vexport-meta').innerHTML = '<span class="status-fail">Fail</span> ';
+        $('#vexport-meta').append(document.createTextNode(shortError(err)));
+        $('#vexport-out').textContent = 'failed';
+        return null;
+      }
+    })();
+    return this.pending;
+  },
+  confirm(how) {
+    const r = this.result, v = app.video;
+    notify(how + ' ' + r.file.name + ', ' + core.video.fmtTime(r.plan.to - r.plan.from) + ', ' + fmtDims(v.info.width, v.info.height) + ', ' + fmtBytes(r.file.size) +
+      (r.sound ? '' : ', no sound') + '. Copied without re-encoding. Metadata stripped: no location, dates or camera details.', 'pass', { id: 'export', timeout: 8000 });
+  },
+  download() {
+    const r = this.result; if (!r) return;
+    const url = URL.createObjectURL(r.file);
+    const a = document.createElement('a');
+    a.href = url; a.download = r.file.name;
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    this.confirm('Saved');
+  },
+  async share() {
+    const r = this.result; if (!r) return;
+    const data = { files: [r.file] };
+    if (!navigator.canShare || !navigator.canShare(data)) { notify('This browser cannot share this video. Use Download instead.', 'watch'); return; }
+    try { await navigator.share(data); this.confirm('Shared'); } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      notify('Sharing failed: ' + err.message, 'fail');
+    }
+  },
+};
+$('#vexport-download').addEventListener('click', () => tools.vexport.download());
+$('#vexport-share').addEventListener('click', () => tools.vexport.share());
+
+/* ---------- Tool: video check ---------- */
+
+// One check from core.video.CHECKS: ask WebCodecs, then give an encoder that says
+// yes a short trial run.
+async function checkOne(c) {
+  const api = { 'video-encode': window.VideoEncoder, 'audio-encode': window.AudioEncoder, 'video-decode': window.VideoDecoder, 'audio-decode': window.AudioDecoder }[c.kind];
+  const r = { supported: false, ran: null, error: null };
+  if (!api) { r.error = 'WebCodecs is not available'; return r; }
+  try { r.supported = !!(await api.isConfigSupported(c.config)).supported; } catch (err) { r.error = shortError(err); return r; }
+  if (!r.supported) return r;
+  try {
+    if (c.kind === 'video-encode') r.ran = await withTimeout(trialVideo(c.config), 30000);
+    if (c.kind === 'audio-encode') r.ran = await withTimeout(trialAudio(c.config), 15000);
+  } catch (err) { r.error = shortError(err); }
+  return r;
+}
+
+const withTimeout = (p, ms) => Promise.race([p, new Promise((res, rej) => setTimeout(() => rej(new Error('no answer after ' + ms / 1000 + ' s')), ms))]);
+
+// Encode 30 frames (20 at 4K) of moving colour; report frames per second.
+async function trialVideo(config) {
+  const frames = config.width > 2000 ? 20 : 30;
+  let got = 0, fail = null;
+  const enc = new VideoEncoder({ output: () => { got++; }, error: (e) => { fail = e; } });
+  try {
+    enc.configure(config);
+    const c = new OffscreenCanvas(config.width, config.height), x = c.getContext('2d');
+    const t0 = performance.now();
+    for (let i = 0; i < frames && !fail; i++) {
+      x.fillStyle = 'hsl(' + (i * 12) + ' 60% 50%)'; x.fillRect(0, 0, c.width, c.height);
+      x.fillStyle = '#fff'; x.fillRect((i * 97) % c.width, 0, c.width / 8, c.height);
+      const f = new VideoFrame(c, { timestamp: Math.round(i * 1e6 / config.framerate) });
+      enc.encode(f, { keyFrame: i === 0 });
+      f.close();
+      while (enc.encodeQueueSize > 4 && !fail) await new Promise((res) => setTimeout(res, 2));
+    }
+    if (!fail) await enc.flush();
+    if (fail) throw fail;
+    if (got < frames) throw new Error('only ' + got + ' of ' + frames + ' frames came out');
+    return { frames, fps: frames / ((performance.now() - t0) / 1000) };
+  } finally { if (enc.state !== 'closed') enc.close(); }
+}
+
+// Encode one second of a 440 Hz tone.
+async function trialAudio(config) {
+  const sr = config.sampleRate, ch = config.numberOfChannels, n = 1024;
+  let chunks = 0, fail = null;
+  const enc = new AudioEncoder({ output: () => { chunks++; }, error: (e) => { fail = e; } });
+  try {
+    enc.configure(config);
+    for (let s = 0; s < sr && !fail; s += n) {
+      const d = new Float32Array(n * ch);
+      for (let c = 0; c < ch; c++) for (let k = 0; k < n; k++) d[c * n + k] = 0.2 * Math.sin(2 * Math.PI * 440 * (s + k) / sr);
+      const a = new AudioData({ format: 'f32-planar', sampleRate: sr, numberOfFrames: n, numberOfChannels: ch, timestamp: Math.round(s * 1e6 / sr), data: d });
+      enc.encode(a);
+      a.close();
+    }
+    if (!fail) await enc.flush();
+    if (fail) throw fail;
+    if (!chunks) throw new Error('no packets came out');
+    return { seconds: 1, chunks };
+  } finally { if (enc.state !== 'closed') enc.close(); }
+}
+
+async function checkBrowser() {
+  try {
+    const h = await navigator.userAgentData.getHighEntropyValues(['model', 'platformVersion', 'fullVersionList']);
+    const chrome = (h.fullVersionList || []).find((b) => /Chrom/.test(b.brand) && !/Not/.test(b.brand));
+    return (chrome ? chrome.brand + ' ' + chrome.version : 'Chrome') + ', ' + h.platform + ' ' + h.platformVersion + (h.model ? ', ' + h.model : '');
+  } catch (err) { return navigator.userAgent; }
+}
+
+tools.vcheck = {
+  always: true,
+  tall: true,
+  open() {
+    if (!app.check) this.run(); else this.render();
+  },
+  async run() {
+    const ticket = (this.ticket = (this.ticket || 0) + 1);
+    app.check = { results: {}, done: false, browser: await checkBrowser(), when: stamp() };
+    $('#vcheck-run').disabled = true; $('#vcheck-copy').disabled = true;
+    this.render();
+    let i = 0;
+    for (const c of core.video.CHECKS) {
+      if (ticket !== this.ticket) return;
+      $('#vcheck-out').textContent = 'checking ' + (++i) + ' of ' + core.video.CHECKS.length;
+      app.check.results[c.id] = await checkOne(c);
+      this.render();
+    }
+    app.check.done = true;
+    const failed = Object.values(app.check.results).filter((r) => core.video.verdict(r) !== 'pass').length;
+    $('#vcheck-out').textContent = failed ? failed + ' of ' + core.video.CHECKS.length + ' not working' : 'all working';
+    $('#vcheck-run').disabled = false; $('#vcheck-copy').disabled = false;
+    this.render();
+  },
+  report() {
+    const c = app.check, v = app.video;
+    return core.video.report(c.results, { version: APP_VERSION, when: c.when, browser: c.browser, hdrScreen: matchMedia('(dynamic-range: high)').matches,
+      clip: v ? core.video.describe(v.info) + ' (' + v.info.codecString + ')' : null });
+  },
+  render() {
+    const list = $('#vcheck-list');
+    list.textContent = '';
+    for (const c of core.video.CHECKS) {
+      const r = app.check.results[c.id];
+      const row = document.createElement('div'); row.className = 'check-row'; row.dataset.check = c.id;
+      const k = document.createElement('span'); k.className = 'k'; k.textContent = c.label;
+      const val = document.createElement('span'); val.className = 'v' + (r ? ' ' + core.video.verdict(r) : '');
+      if (r) {
+        const b = document.createElement('b'); b.textContent = core.video.verdict(r).toUpperCase();
+        val.append(b, document.createTextNode(' ' + core.video.resultText(r)));
+      } else val.textContent = 'waiting';
+      row.append(k, val);
+      list.append(row);
+    }
+    $('#vcheck-report').textContent = app.check.done ? this.report() : '';
+    $('#vcheck-report').hidden = !app.check.done;
+  },
+  async copy() {
+    const text = this.report();
+    $('#vcheck-report').textContent = text;
+    try {
+      await navigator.clipboard.writeText(text);
+      notify('Report copied. Paste it into the chat.', 'pass', { id: 'vcheck' });
+    } catch (err) {
+      const sel = window.getSelection(), range = document.createRange();
+      range.selectNodeContents($('#vcheck-report')); sel.removeAllRanges(); sel.addRange(range);
+      notify('Copying is blocked here. The report is selected below: press and hold it to copy.', 'watch', { id: 'vcheck' });
+    }
+  },
+};
+$('#vcheck-run').addEventListener('click', () => tools.vcheck.run());
+$('#vcheck-copy').addEventListener('click', () => tools.vcheck.copy());
+$('#btn-check-empty').addEventListener('click', () => openTool('vcheck'));
 
 /* ---------- Service worker: offline, share target, update prompt ---------- */
 
@@ -4128,13 +5189,15 @@ new ResizeObserver(() => viewResize()).observe($('#stage'));
 viewResize();
 afterHistoryChange();
 startServiceWorker();
-receiveShared().catch((err) => notify('The shared photo could not be opened: ' + err.message, 'fail', { sticky: true }));
+clearExportTemp();
+receiveShared().catch((err) => notify('The shared file could not be opened: ' + err.message, 'fail', { sticky: true }));
 
 // Handles for the test suites. Read-only use; the app does not depend on it.
 window.retouch = {
   APP_VERSION, MAX_WORKING_PIXELS, HISTORY_DEPTH, CROP_ROTATE_MARGIN, RATIOS, TEXT_FONTS,
   BG_MIN_PERSON, BG_PREVIEW_LONG, BG_FEATHER_STEP, BG_VENDOR, SPOT_LARGE,
   core, app, view, tools, segmenter, openFile, openTool, closeTool, commit, commitTexts, encodeImage, fontsReady, undo, redo, draw,
+  player, loadMediabunny, readClip, exportClip, checkOne, VIDEO_EXPORT_TEMP,
   readPixels(src, x = 0, y = 0, w = src.width, h = src.height) {
     const c = core.makeCanvas(src.width, src.height);
     const ctx = c.getContext('2d', { willReadFrequently: true });

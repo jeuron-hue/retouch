@@ -9,8 +9,8 @@
 # Each line below is: name ||| exact text in CORE ||| replacement.
 # The text must appear exactly once between "// CORE:BEGIN" and "// CORE:END".
 #
-# Run: bash retouch_mutate.sh          (about 50 minutes)
-#      JOBS=4 bash retouch_mutate.sh   (run four mutants at a time)
+# Run: bash retouch_mutate.sh          (about an hour)
+#      JOBS=4 bash retouch_mutate.sh   (run four mutants at a time, about 30 minutes)
 
 set -u
 cd "$(dirname "$0")"
@@ -239,6 +239,46 @@ spot: grain left out ||| for (let c = 0; c < 3; c++) d[4 * i + c] += z * grain[c
 spot: noise all one value ||| return (s - 1.5) * 2; ||| return 0.5;
 spot: block margin too small ||| const m = Math.ceil(core.SPOT_HEAL_DIST[core.SPOT_HEAL_DIST.length - 1] * half + 2 * core.SPOT_HEAL_RING) + core.SPOT_EPS + core.SPOT_RING + 2; ||| const m = 2;
 spot: mask from the wrong place ||| pts: st.pts.map((p) => ({ x: p.x - x0, y: p.y - y0 })) ||| pts: st.pts
+video: keyframe before misses an exact hit ||| if (x <= t + core.video.EPS) k = x; else break; ||| if (x < t - core.video.EPS) k = x; else break;
+video: keyframe gap is the smallest, not the median ||| return gaps[Math.floor(gaps.length / 2)]; ||| return gaps[0];
+video: keyframe gap with one keyframe ||| if (keys.length < 2) return null; ||| if (keys.length < 1) return null;
+video: frame snap picks the farthest edge ||| const g = Math.abs(s - t); if (g < gap) { best = s; gap = g; } ||| const g = Math.abs(s - t); if (g > gap) { best = s; gap = g; }
+video: trim with no keyframes ||| if (!keys.length) return null; ||| if (!keys) return null;
+video: trim keeps the frame at the end ||| if (packets[i].ts < end - E) last = i; ||| if (packets[i].ts <= end + E) last = i;
+video: trim keeps leading pictures ||| if (p.ts < from - E) continue; ||| if (p.ts < from - 1) continue;
+video: trim end forgets the last frame's length ||| to = Math.max(to, p.ts + p.dur); ||| to = Math.max(to, p.ts);
+video: trim says moved on a keyframe ||| moved: from < start - E, ||| moved: from <= start,
+video: trim never whole ||| whole: from <= keys[0] + E ||| whole: from < keys[0] - E
+video: sound keeps the packet at the end ||| if (p.ts >= plan.to - E) continue; ||| if (p.ts > plan.to) continue;
+video: sound drops the packet across the start ||| if (!plan.whole && p.ts + p.dur <= plan.from + E) continue; ||| if (!plan.whole && p.ts <= plan.from) continue;
+video: sound drops the run-in when untrimmed ||| if (!plan.whole && p.ts + p.dur <= plan.from + E) continue; ||| if (p.ts + p.dur <= plan.from + E) continue;
+video: write order breaks ties the other way ||| if (j >= b.length || (i < a.length && a[i] <= b[j])) out.push([0, i++]); ||| if (j >= b.length || (i < a.length && a[i] < b[j])) out.push([0, i++]);
+video: write order drops the second track ||| else out.push([1, j++]); ||| else j++;
+video: bit depth misses High 4:2:2 and 4:4:4 ||| return [110, 122, 244].includes(profile) ? 10 : 8; ||| return [110].includes(profile) ? 10 : 8;
+video: bit depth reads the profile as decimal ||| const profile = parseInt(f[1].slice(0, 2), 16); ||| const profile = parseInt(f[1].slice(0, 2), 10);
+video: bit depth guesses unknown HEVC profiles ||| return profile === 1 ? 8 : profile === 2 ? 10 : null; ||| return profile === 1 ? 8 : 10;
+video: bit depth trips on the HEVC profile space ||| const profile = parseInt(f[1].replace(/^[A-C]/, ''), 10); ||| const profile = parseInt(f[1], 10);
+video: VP9 bit depth from the level ||| if (f[0] === 'vp09' && f[3]) return parseInt(f[3], 10); ||| if (f[0] === 'vp09' && f[3]) return parseInt(f[2], 10);
+video: AV1 bit depth from the level ||| if (f[0] === 'av01' && f[3]) return parseInt(f[3], 10); ||| if (f[0] === 'av01' && f[3]) return parseInt(f[2], 10);
+video: HDR names swapped ||| (cs && cs.transfer === 'pq' ? 'PQ' : cs && cs.transfer === 'hlg' ? 'HLG' : null) ||| (cs && cs.transfer === 'pq' ? 'HLG' : cs && cs.transfer === 'hlg' ? 'PQ' : null)
+video: time truncates instead of rounding ||| const cs = Math.max(0, Math.round(s * 100)); ||| const cs = Math.max(0, Math.floor(s * 100));
+video: minutes run past 59 ||| m = Math.floor(cs / 6000) % 60, ||| m = Math.floor(cs / 6000),
+video: video name test not anchored ||| core.video.VIDEO_EXT = /\.(mp4|m4v|mov|3gp|3g2|webm|mkv)$/i; ||| core.video.VIDEO_EXT = /\.(mp4|m4v|mov|3gp|3g2|webm|mkv)/i;
+video: describe drops the HDR curve ||| parts.push((info.bitDepth ? info.bitDepth + '-bit ' : '') + (hdr ? 'HDR ' + hdr : 'SDR')); ||| parts.push((info.bitDepth ? info.bitDepth + '-bit ' : '') + (hdr ? 'HDR' : 'SDR'));
+video: history keeps part of the redo tail |||   this.stack.splice(this.index + 1); |||   this.stack.splice(this.index + 2);
+video: history step forgets the rest of the recipe ||| this.stack.push({ ...this.current, ...recipe, label }); ||| this.stack.push({ ...recipe, label });
+video: history original is the current step ||| get original() { return this.stack[0]; } ||| get original() { return this.stack[this.index]; }
+video: dates zeroed only half way in version 1 ||| b.fill(0, x.body + 4, x.body + 4 + (wide ? 16 : 8)); ||| b.fill(0, x.body + 4, x.body + 4 + (wide ? 8 : 8));
+video: dates zeroed nowhere ||| walk(0, b.length); ||| walk(0, 0);
+video: dates zeroed only at the top ||| walk(x.body, x.end);   // the headers sit inside moov, trak and mdia ||| void x;   // the headers sit inside moov, trak and mdia
+video: finder allows a top-level uuid ||| const found = top.filter((t) => !['ftyp', 'moov', 'mdat', 'free', 'skip'].includes(t)) ||| const found = top.filter((t) => !['ftyp', 'moov', 'mdat', 'free', 'skip', 'uuid'].includes(t))
+video: finder misses udta ||| if (['udta', 'meta', 'uuid', 'ilst'].includes(x.type)) found.push(x.type + ' box'); ||| if (['meta', 'uuid', 'ilst'].includes(x.type)) found.push(x.type + ' box');
+video: finder reads the dates from the wrong place ||| if (moov.subarray(x.body + 4, x.body + 4 + (wide ? 16 : 8)).some((v) => v)) ||| if (moov.subarray(x.body + 12, x.body + 12 + (wide ? 16 : 8)).some((v) => v))
+video: finder misses the GPS tag ||| if (text.includes('\xA9xyz')) found.push('GPS location'); ||| if (text.includes('\xA9xyz ')) found.push('GPS location');
+video: check verdict ignores a failed trial ||| core.video.verdict = (r) => (!r.supported ? 'fail' : r.error ? 'watch' : 'pass'); ||| core.video.verdict = (r) => (!r.supported ? 'fail' : 'pass');
+video: check text shows raw fps ||| ' frames at ' + Math.round(r.ran.fps) + ' fps'; ||| ' frames at ' + r.ran.fps + ' fps';
+video: check report trips on a missing row ||| if (!r) continue; ||| if (!r && false) continue;
+video: check asks 4K 60 at the 4K 30 level ||| config: { codec: 'avc1.640034', width: 3840, height: 2160, framerate: 60, bitrate: 60e6 } ||| config: { codec: 'avc1.640033', width: 3840, height: 2160, framerate: 60, bitrate: 60e6 }
 EOF
 )
 
