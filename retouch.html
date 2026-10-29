@@ -2614,8 +2614,8 @@ class ClipHistory {
     this.stack.push({ ...this.current, ...recipe, label });
     this.index = this.stack.length - 1;
   }
-  undo() { if (this.canUndo) this.index--; return this.current; }
-  redo() { if (this.canRedo) this.index++; return this.current; }
+  undo() { if (this.canUndo) this.index -= 1; return this.current; }
+  redo() { if (this.canRedo) this.index += 1; return this.current; }
 }
 core.ClipHistory = ClipHistory;
 

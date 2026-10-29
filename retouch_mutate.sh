@@ -268,6 +268,7 @@ video: describe drops the HDR curve ||| parts.push((info.bitDepth ? info.bitDept
 video: history keeps part of the redo tail |||   this.stack.splice(this.index + 1); |||   this.stack.splice(this.index + 2);
 video: history step forgets the rest of the recipe ||| this.stack.push({ ...this.current, ...recipe, label }); ||| this.stack.push({ ...recipe, label });
 video: history original is the current step ||| get original() { return this.stack[0]; } ||| get original() { return this.stack[this.index]; }
+video: history undo walks forward ||| undo() { if (this.canUndo) this.index -= 1; return this.current; } ||| undo() { if (this.canUndo) this.index += 1; return this.current; }
 video: dates zeroed only half way in version 1 ||| b.fill(0, x.body + 4, x.body + 4 + (wide ? 16 : 8)); ||| b.fill(0, x.body + 4, x.body + 4 + (wide ? 8 : 8));
 video: dates zeroed nowhere ||| walk(0, b.length); ||| walk(0, 0);
 video: dates zeroed only at the top ||| walk(x.body, x.end);   // the headers sit inside moov, trak and mdia ||| void x;   // the headers sit inside moov, trak and mdia
