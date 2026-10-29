@@ -3197,6 +3197,7 @@ test('video check: opens from the empty screen, runs every check, copies a plain
   await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
   assert(await page.isVisible('#btn-check-empty'), 'Video check button on the empty screen');
   await page.click('#btn-check-empty');
+  assert((await page.textContent('#strip-code')) === 'Video check', 'no edit count with nothing open: ' + await page.textContent('#strip-code'));
   await page.waitForFunction(() => retouch.app.check && retouch.app.check.done, null, { timeout: 120000 });
   const rows = await page.$$eval('#vcheck-list .check-row', (rs) => rs.map((r) => [r.dataset.check, r.querySelector('.v').className, r.textContent]));
   const ids = await page.evaluate(() => retouch.core.video.CHECKS.map((c) => c.id));

@@ -3215,7 +3215,7 @@ function openTool(id) {
   for (const p of $$('.sheet-panel')) p.hidden = p.dataset.tool !== id;
   const panel = $('.sheet-panel[data-tool="' + id + '"]');
   // The thin strip that stands in for the top bar: edit number and tool name.
-  $('#strip-code').textContent = editCount() + ' ▸ ' + $('h2', panel).textContent;
+  $('#strip-code').textContent = (app.edits || app.video ? editCount() + ' ▸ ' : '') + $('h2', panel).textContent;   // no count with nothing open
   document.body.dataset.tool = id;
   $('#sheet').toggleAttribute('data-tall', !!t.tall);
   $('#hold-main').hidden = true;
