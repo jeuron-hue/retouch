@@ -11,10 +11,13 @@
 //   - the service worker cache version matches APP_VERSION
 //   - the manifest has the share target and icons
 //   - every image in the repo carries no EXIF, XMP, IPTC, GPS or text chunks
+//   - no video files are committed at all (test clips are made inside the tests)
+//   - the vendored Mediabunny (video) has no telemetry, and its only code that could
+//     reach the network (a URL reader and an HLS reader) is never used by retouch
 //
 // Run: node retouch_checks.cjs
-// The metadata parser at the bottom is exported for retouch_behave.cjs, and is
-// written independently of the one in retouch.html so the app is not checking itself.
+// The metadata parser and the MP4 reader below are exported for retouch_behave.cjs,
+// and are written independently of retouch.html so the app is not checking itself.
 
 'use strict';
 const fs = require('fs');
@@ -64,6 +67,23 @@ const MEDIAPIPE_LOADER_URLS = [
   'https://www.ietf.org/rfc/rfc2279.txt',
   'https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.15',
 ];
+
+// Mediabunny, vendored for video. Reviewed for 1.61.6: these six addresses sit in the
+// licence header and in error text; none is fetched. Its URL and HLS readers call
+// fetch in two places (written '??fetch' in the bundle); retouch never creates them.
+const MEDIABUNNY_DIR = 'vendor/mediabunny/';
+const MEDIABUNNY_SCRIPTS = ['vendor/mediabunny/mediabunny.js'];
+const MEDIABUNNY_URLS = [
+  'https://aomediacodec.github.io/av1-isobmff/.',
+  'https://mozilla.org/MPL/2.0/.',
+  'https://www.w3.org/TR/webcodecs-aac-codec-registration/.',
+  'https://www.w3.org/TR/webcodecs-flac-codec-registration/.',
+  'https://www.w3.org/TR/webcodecs-vorbis-codec-registration/.',
+  'https://www.webmproject.org/vp9/mp4/.',
+];
+const MEDIABUNNY_FETCH_SITES = 2;
+// Mediabunny names that reach the network, or could (a playlist names other files).
+const MEDIABUNNY_NETWORK_NAMES = ['UrlSource', 'HLS', 'HlsInputFormat', 'HLS_FORMATS', 'ALL_FORMATS', 'fetchFn', 'PathedSource', 'CustomPathedSource'];
 
 const CDN_HOSTS = [
   'cdnjs', 'jsdelivr', 'unpkg', 'googleapis', 'gstatic', 'cloudflare', 'bootstrapcdn',
@@ -132,6 +152,136 @@ function imageFormat(buf) {
   return null;
 }
 
+/* ---------- Independent MP4 reader ---------- */
+
+// Walks the ISO base media boxes of an MP4 or MOV file. Enough to count samples,
+// read durations, sizes, colour tags and rotation, and to find metadata.
+const CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'dinf', 'udta', 'mvex']);
+
+function mp4Boxes(b, from, to) {
+  const out = [];
+  let i = from;
+  while (i + 8 <= to) {
+    let size = b.readUInt32BE(i), hdr = 8;
+    const type = ascii(b, i + 4, 4);
+    if (size === 1) { size = Number(b.readBigUInt64BE(i + 8)); hdr = 16; }
+    else if (size === 0) size = to - i;
+    if (size < hdr || i + size > to) throw new Error('MP4 box ' + JSON.stringify(type) + ' at ' + i + ' runs past its parent');
+    out.push({ type, start: i, size, body: i + hdr, end: i + size });
+    i += size;
+  }
+  return out;
+}
+const kid = (b, box, type) => mp4Boxes(b, box.body, box.end).find((x) => x.type === type);
+const kids = (b, box, type) => mp4Boxes(b, box.body, box.end).filter((x) => x.type === type);
+const boxAt = (b, box, ...types) => types.reduce((bx, t) => bx && kid(b, bx, t), box);
+// Version 1 boxes use 64-bit times and durations.
+const u = (b, at, wide) => (wide ? Number(b.readBigUInt64BE(at)) : b.readUInt32BE(at));
+
+function parseMp4(buf) {
+  const b = Buffer.from(buf);
+  const top = mp4Boxes(b, 0, b.length);
+  const moov = top.find((x) => x.type === 'moov');
+  if (!moov) throw new Error('no moov box');
+  const mvhdBox = kid(b, moov, 'mvhd');
+  const v1 = b[mvhdBox.body] === 1;
+  const o = mvhdBox.body + 4;
+  const mvhd = { ctime: u(b, o, v1), mtime: u(b, o + (v1 ? 8 : 4), v1), timescale: b.readUInt32BE(o + (v1 ? 16 : 8)), duration: u(b, o + (v1 ? 20 : 12), v1) };
+  const tracks = kids(b, moov, 'trak').map((trak) => {
+    const t = {};
+    const tk = kid(b, trak, 'tkhd'), tv1 = b[tk.body] === 1, to = tk.body + 4;
+    t.tkhd = { ctime: u(b, to, tv1), mtime: u(b, to + (tv1 ? 8 : 4), tv1) };
+    const mo = to + (tv1 ? 32 : 20) + 16;                  // after times, id, reserved, duration, then 8 reserved + layer, group, volume, reserved
+    t.matrix = Array.from({ length: 9 }, (_, k) => b.readInt32BE(mo + k * 4));
+    t.width = b.readUInt32BE(mo + 36) / 65536; t.height = b.readUInt32BE(mo + 40) / 65536;
+    const md = boxAt(b, trak, 'mdia', 'mdhd'), mv1 = b[md.body] === 1, mdo = md.body + 4;
+    t.mdhd = { ctime: u(b, mdo, mv1), mtime: u(b, mdo + (mv1 ? 8 : 4), mv1), timescale: b.readUInt32BE(mdo + (mv1 ? 16 : 8)), duration: u(b, mdo + (mv1 ? 20 : 12), mv1) };
+    t.handler = ascii(b, boxAt(b, trak, 'mdia', 'hdlr').body + 8, 4);
+    const elst = boxAt(b, trak, 'edts', 'elst');
+    if (elst) {
+      const ev1 = b[elst.body] === 1, n = b.readUInt32BE(elst.body + 4);
+      t.elst = Array.from({ length: n }, (_, k) => {
+        const at = elst.body + 8 + k * (ev1 ? 20 : 12);
+        return { duration: u(b, at, ev1), mediaTime: ev1 ? Number(b.readBigInt64BE(at + 8)) : b.readInt32BE(at + 4) };
+      });
+    }
+    const stbl = boxAt(b, trak, 'mdia', 'minf', 'stbl');
+    const stsd = kid(b, stbl, 'stsd');
+    const entry = mp4Boxes(b, stsd.body + 8, stsd.end)[0];
+    t.codec = entry.type;
+    const visual = t.handler === 'vide';
+    // Sample entry: 8 bytes, then 70 more for video or 20 for (version 0) audio, then child boxes.
+    t.entryBoxes = mp4Boxes(b, entry.body + 8 + (visual ? 70 : 20), entry.end).map((x) => x.type);
+    // The codec's own setup bytes (avcC, hvcC, dOps, esds...), as a decoder needs them.
+    t.entryChild = (type) => { const x = mp4Boxes(b, entry.body + 8 + (visual ? 70 : 20), entry.end).find((y) => y.type === type); return x ? b.subarray(x.body, x.end) : null; };
+    if (visual) { t.codedWidth = b.readUInt16BE(entry.body + 24); t.codedHeight = b.readUInt16BE(entry.body + 26); }
+    const colr = mp4Boxes(b, entry.body + 8 + (visual ? 70 : 20), entry.end).find((x) => x.type === 'colr');
+    if (colr && ascii(b, colr.body, 4) === 'nclx') {
+      t.colr = { primaries: b.readUInt16BE(colr.body + 4), transfer: b.readUInt16BE(colr.body + 6), matrix: b.readUInt16BE(colr.body + 8), fullRange: !!(b[colr.body + 10] & 0x80) };
+    }
+    const stts = kid(b, stbl, 'stts');
+    t.deltas = [];
+    for (let k = 0, n = b.readUInt32BE(stts.body + 4); k < n; k++) {
+      const c = b.readUInt32BE(stts.body + 8 + k * 8), d = b.readUInt32BE(stts.body + 12 + k * 8);
+      for (let j = 0; j < c; j++) t.deltas.push(d);
+    }
+    const stsz = kid(b, stbl, 'stsz');
+    const fixed = b.readUInt32BE(stsz.body + 4), count = b.readUInt32BE(stsz.body + 8);
+    t.sizes = Array.from({ length: count }, (_, k) => fixed || b.readUInt32BE(stsz.body + 12 + k * 4));
+    t.sampleCount = count;
+    t.mediaDuration = t.deltas.reduce((a, x) => a + x, 0);
+    const stss = kid(b, stbl, 'stss');
+    t.sync = stss ? Array.from({ length: b.readUInt32BE(stss.body + 4) }, (_, k) => b.readUInt32BE(stss.body + 8 + k * 4) - 1) : null;   // 0-based; null means every sample is a key
+    t.hasCtts = !!kid(b, stbl, 'ctts');
+    // Where each sample's bytes are: chunks from stco or co64, samples per chunk from stsc.
+    const stco = kid(b, stbl, 'stco'), co64 = kid(b, stbl, 'co64');
+    const chunks = stco ? Array.from({ length: b.readUInt32BE(stco.body + 4) }, (_, k) => b.readUInt32BE(stco.body + 8 + k * 4))
+      : Array.from({ length: b.readUInt32BE(co64.body + 4) }, (_, k) => Number(b.readBigUInt64BE(co64.body + 8 + k * 8)));
+    const stsc = kid(b, stbl, 'stsc');
+    const runs = Array.from({ length: b.readUInt32BE(stsc.body + 4) }, (_, k) => [b.readUInt32BE(stsc.body + 8 + k * 12) - 1, b.readUInt32BE(stsc.body + 12 + k * 12)]);
+    t.offsets = [];
+    let s = 0;
+    for (let c = 0; c < chunks.length && s < count; c++) {
+      let per = 0;
+      for (const [first, n] of runs) if (c >= first) per = n;
+      let at = chunks[c];
+      for (let j = 0; j < per && s < count; j++) { t.offsets.push(at); at += t.sizes[s++]; }
+    }
+    t.sample = (k) => b.subarray(t.offsets[k], t.offsets[k] + t.sizes[k]);
+    return t;
+  });
+  return { top: top.map((x) => x.type), mvhd, tracks, bytes: b };
+}
+
+// Everything in an MP4 that could say where, when or with what a video was made.
+function findVideoMetadata(buf) {
+  const b = Buffer.from(buf);
+  const found = [];
+  const top = mp4Boxes(b, 0, b.length);
+  for (const x of top) if (!['ftyp', 'moov', 'mdat', 'free', 'skip'].includes(x.type)) found.push('top-level ' + x.type + ' box');
+  const moov = top.find((x) => x.type === 'moov');
+  if (!moov) return found.concat('no moov box');
+  const walk = (box, where) => {
+    for (const x of mp4Boxes(b, box.body, box.end)) {
+      if (['udta', 'meta', 'uuid', 'ilst', 'keys', 'XMP_', 'cprt', 'loci'].includes(x.type)) found.push(x.type + ' box in ' + where);
+      if (CONTAINERS.has(x.type) && x.type !== 'udta') walk(x, where + '/' + x.type);
+    }
+  };
+  walk(moov, 'moov');
+  // Signatures are looked for in every box but the media data itself.
+  const m = Buffer.concat(top.filter((x) => x.type !== 'mdat').map((x) => b.subarray(x.start, x.end)));
+  for (const [sig, name] of [['\xA9xyz', 'GPS location (\xA9xyz)'], ['<x:xmpmeta', 'XMP packet'], ['ns.adobe.com/xap', 'XMP signature'], ['Exif\0\0', 'EXIF signature'], ['\xA9mak', 'camera make'], ['\xA9mod', 'camera model'], ['\xA9day', 'date tag']]) {
+    if (m.indexOf(Buffer.from(sig, 'latin1')) >= 0) found.push(name);
+  }
+  const p = parseMp4(b);
+  if (p.mvhd.ctime || p.mvhd.mtime) found.push('date in mvhd');
+  for (const t of p.tracks) {
+    if (t.tkhd.ctime || t.tkhd.mtime || t.mdhd.ctime || t.mdhd.mtime) found.push('date in the ' + t.handler + ' track');
+    if (!['vide', 'soun'].includes(t.handler)) found.push('extra ' + t.handler + ' track');
+  }
+  return found;
+}
+
 /* ---------- Checks ---------- */
 
 function walk(dir, out = []) {
@@ -169,7 +319,7 @@ function runChecks() {
   check('only allowed files at top level (app logic stays in retouch.html)', () => {
     const extra = fs.readdirSync(ROOT).filter((f) => !ALLOWED_TOP.has(f));
     assert(!extra.length, 'unexpected: ' + extra.join(', '));
-    const js = walk('').filter((f) => /\.(m?js|cjs)$/.test(f) && !['sw.js', 'retouch_checks.cjs', 'retouch_behave.cjs', ...MEDIAPIPE_SCRIPTS].includes(f));
+    const js = walk('').filter((f) => /\.(m?js|cjs)$/.test(f) && !['sw.js', 'retouch_checks.cjs', 'retouch_behave.cjs', ...MEDIAPIPE_SCRIPTS, ...MEDIABUNNY_SCRIPTS].includes(f));
     assert(!js.length, 'extra script files: ' + js.join(', '));
   });
 
@@ -214,7 +364,7 @@ function runChecks() {
   check('no CDN references in any source file', () => {
     const bad = [];
     for (const f of walk('').filter((x) => /\.(html|js|cjs|json|webmanifest|css|md|sh)$/.test(x))) {
-      if (f === 'CLAUDE.md' || f === 'retouch_checks.cjs' || f.startsWith(MEDIAPIPE_DIR)) continue;   // MediaPipe: own check below
+      if (f === 'CLAUDE.md' || f === 'retouch_checks.cjs' || f.startsWith(MEDIAPIPE_DIR) || f.startsWith(MEDIABUNNY_DIR)) continue;   // vendored code: own checks below
       const src = read(f).toLowerCase();
       for (const h of CDN_HOSTS) if (src.includes(h)) bad.push(f + ': ' + h);
     }
@@ -256,9 +406,9 @@ function runChecks() {
     }
     assert(!missing.length, 'no pinned version recorded for: ' + missing.join(', '));
     assert(!drifted.length, 'file differs from the sha256 in the build notes: ' + drifted.join(', '));
-    const mp = walk('vendor').filter((f) => f.startsWith(MEDIAPIPE_DIR) && !/\.txt$/.test(f));
+    const mp = walk('vendor').filter((f) => (f.startsWith(MEDIAPIPE_DIR) || f.startsWith(MEDIABUNNY_DIR)) && !/\.txt$/.test(f));
     const unhashed = mp.filter((f) => !/sha256 [0-9a-f]{64}/.test(notes.split('\n').find((l) => l.includes(f + ' ')) || ''));
-    assert(!unhashed.length, 'MediaPipe files need a sha256 in the build notes: ' + unhashed.join(', '));
+    assert(!unhashed.length, 'MediaPipe and Mediabunny files need a sha256 in the build notes: ' + unhashed.join(', '));
     const listed = Array.from(notes.matchAll(/vendor\/\S+/g)).map((m) => m[0]);
     const ghost = listed.filter((f) => !exists(f));
     assert(!ghost.length, 'build notes list files that do not exist: ' + ghost.join(', '));
@@ -283,16 +433,37 @@ function runChecks() {
     return MEDIAPIPE_LOADER_URLS.length + ' reviewed comment links in the loader';
   });
 
+  check('vendored Mediabunny: no telemetry, network readers reviewed and never used', () => {
+    const src = read('vendor/mediabunny/mediabunny.js');
+    const urls = [...new Set(src.match(/(?:https?|wss?|ftp):\/\/[^\s"'<>)`]*/g) || [])];
+    const extra = urls.filter((x) => !MEDIABUNNY_URLS.includes(x));
+    assert(!extra.length, 'new web addresses in Mediabunny, review them: ' + extra.join(', '));
+    for (const sig of ['XMLHttpRequest', 'sendBeacon', 'WebSocket', 'EventSource', 'importScripts', 'google-analytics', 'firebase', 'clearcut', 'x-goog-api-key', 'telemetry', 'posthog', 'sentry']) {
+      assert(!src.includes(sig), 'Mediabunny contains "' + sig + '"');
+    }
+    const sites = (src.match(/\?\?fetch\b/g) || []).length;
+    assert(sites === MEDIABUNNY_FETCH_SITES, 'Mediabunny calls fetch in ' + sites + ' places, reviewed ' + MEDIABUNNY_FETCH_SITES + ': review the change');
+    assert(!/\bfetch\s*\(/.test(src), 'Mediabunny calls fetch( directly: review it');
+    const page = stripComments(scriptOf(read('retouch.html')));
+    const used = MEDIABUNNY_NETWORK_NAMES.filter((n) => new RegExp('\\b' + n + '\\b').test(page));
+    assert(!used.length, 'retouch.html uses Mediabunny network readers: ' + used.join(', '));
+    return MEDIABUNNY_URLS.length + ' reviewed addresses, ' + sites + ' fetch sites in readers retouch never uses';
+  });
+
   check('service worker caches the shell and every vendored runtime file', () => {
     const sw = read('sw.js');
     const list = (name) => Array.from((sw.match(new RegExp('const ' + name + ' = \\[([\\s\\S]*?)\\];')) || ['', ''])[1].matchAll(/'([^']+)'/g)).map((m) => m[1]);
-    const shell = [...list('SHELL'), ...list('VENDOR')];
+    const shell = [...list('SHELL'), ...list('VENDOR'), ...list('VIDEO_VENDOR')];
     assert(list('SHELL').length, 'no SHELL list in sw.js');
     // The MediaPipe cache is named by its pin, so a new pin always downloads fresh files.
     const pin = (read('retouch.html').match(/@mediapipe\/tasks-vision (\d+\.\d+\.\d+)/) || [])[1];
     const vc = (sw.match(/const VENDOR_CACHE = '([^']+)'/) || [])[1];
     assert(pin && vc === 'retouch-mediapipe-' + pin, 'VENDOR_CACHE ' + vc + ' does not match the pinned @mediapipe/tasks-vision ' + pin);
     assert(list('VENDOR').every((f) => f.startsWith(MEDIAPIPE_DIR)), 'VENDOR lists files outside ' + MEDIAPIPE_DIR);
+    const mbPin = (read('retouch.html').match(/mediabunny (\d+\.\d+\.\d+)/) || [])[1];
+    const mbc = (sw.match(/const VIDEO_CACHE = '([^']+)'/) || [])[1];
+    assert(mbPin && mbc === 'retouch-mediabunny-' + mbPin, 'VIDEO_CACHE ' + mbc + ' does not match the pinned mediabunny ' + mbPin);
+    assert(list('VIDEO_VENDOR').length && list('VIDEO_VENDOR').every((f) => f.startsWith(MEDIABUNNY_DIR)), 'VIDEO_VENDOR must list only ' + MEDIABUNNY_DIR);
     const missing = shell.filter((f) => f !== './' && !exists(f));
     assert(!missing.length, 'SHELL lists missing files: ' + missing.join(', '));
     const runtime = walk('vendor').filter((f) => !/\.txt$/.test(f)).concat(walk('icons'));
@@ -334,6 +505,7 @@ function runChecks() {
     assert(st && st.method === 'POST' && st.enctype === 'multipart/form-data', 'share_target must POST multipart/form-data');
     const files = (st.params && st.params.files) || [];
     assert(files.some((f) => f.accept.includes('image/*')), 'share_target must accept image/*');
+    assert(files.some((f) => f.accept.includes('video/*')), 'share_target must accept video/*');
     const name = files[0].name;
     assert(read('sw.js').includes("getAll('" + name + "')"), 'sw.js does not read the shared field "' + name + '"');
     assert(read('sw.js').includes("endsWith('/share-target')") && st.action.endsWith('share-target'), 'share action and sw.js disagree');
@@ -356,6 +528,11 @@ function runChecks() {
     }
     assert(!bad.length, bad.join('; '));
     return imgs.length + ' images';
+  });
+
+  check('no video files in the repo (test clips are made in the tests)', () => {
+    const vids = walk('').filter((f) => /\.(mp4|m4v|mov|3gp|3g2|webm|mkv|avi|hevc|h264|264|265)$/i.test(f));
+    assert(!vids.length, 'video files committed: ' + vids.join(', '));
   });
 
   check('README states the Ultra HDR limitation', () => {
@@ -382,5 +559,5 @@ function main() {
   process.exit(failed ? 1 : 0);
 }
 
-module.exports = { findImageMetadata, imageFormat };
+module.exports = { findImageMetadata, imageFormat, parseMp4, findVideoMetadata };
 if (require.main === module) main();

@@ -1,7 +1,7 @@
 {
   "name": "retouch",
   "short_name": "retouch",
-  "description": "Photo editor that works entirely on this phone.",
+  "description": "Photo and video editor that works entirely on this phone.",
   "id": "./retouch.html",
   "start_url": "./retouch.html",
   "scope": "./",
@@ -20,7 +20,7 @@
     "enctype": "multipart/form-data",
     "params": {
       "files": [
-        { "name": "image", "accept": ["image/*", ".jpg", ".jpeg", ".png", ".webp", ".avif", ".heic", ".heif"] }
+        { "name": "media", "accept": ["image/*", "video/*", ".jpg", ".jpeg", ".png", ".webp", ".avif", ".heic", ".heif", ".mp4", ".mov", ".m4v", ".webm", ".3gp"] }
       ]
     }
   }

@@ -1,17 +1,19 @@
 # retouch
 
-A small photo editor for an Android phone, installed from this site as an app (PWA). Built for one person's use.
+A small photo and video editor for an Android phone, installed from this site as an app (PWA). Built for one person's use.
 
 Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home screen" or "Install app".
 
-## Photos never leave the phone
+## Photos and videos never leave the phone
 
 - Every edit runs in the browser on the phone. There is no server, no upload, no analytics.
 - The page carries a Content-Security-Policy that only lets it talk to its own site, so the browser itself blocks any attempt to send data elsewhere.
 - Fonts are stored in this repository (all under the SIL Open Font License; licence files sit beside them in vendor/fonts/). After the first visit the app works with no network at all.
 - Background removal and skin smoothing run Google's MediaPipe (version 0.10.35) on the phone, in WebAssembly, with its selfie multiclass model and, for objects, its tap-to-select (MagicTouch) model. All of it is stored in this repository (Apache License 2.0; the licence text is in vendor/mediapipe/). Newer MediaPipe releases (1.0 onwards) carry code that sends usage logs to Google, so retouch stays on 0.10.35, and a test fails if logging code ever appears in the vendored files.
 - The first visit downloads about 34 MB extra for the models and their runtime. App updates do not download it again; only a new MediaPipe version would.
+- Video is read and written with Mediabunny (version 1.61.6, Mozilla Public License 2.0; the licence text is in vendor/mediabunny/, and its source is in the npm package and the Vanilagy/mediabunny repository on GitHub). It is stored in this repository too. It contains readers for web addresses and streaming playlists; retouch never uses them, a test makes sure, and the page's Content-Security-Policy would block them anyway.
 - Exports are re-encoded and stripped of EXIF, XMP, IPTC, GPS and text chunks, then checked again before they are saved or shared.
+- Video exports are new MP4 files that carry only the picture and the sound: no location, no camera make or model, no XMP, and every date in the file set to zero. The file is checked again before it is saved or shared.
 
 ## What it does
 
@@ -29,7 +31,22 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 - Dark only, in a darkroom style: a neutral near-black surround so colour and skin tones are judged fairly, and one amber accent. Interface fonts are Barlow Semi Condensed and IBM Plex Mono.
 - Export as JPEG, PNG or WebP. Share straight to another app (Instagram) or download. Anything with transparent areas exports as PNG.
 
+### Video
+
+- Open MP4, MOV or WebM videos, from the Open button or by sharing a video to retouch from Google Photos. The top bar shows the size and length; Chrome's own player plays it.
+- Trim: drag the start and end on the bar, or play to a point and tap Start here or End here. Undo and redo work as for photos.
+- Sound: keep the sound or remove it.
+- Export copies the chosen part of the video into a new MP4 without decoding it, so it is fast and the picture and sound are exactly as recorded, 10-bit HDR included. Share or download it as with photos.
+- Why the start snaps: a video stores a whole picture only now and then (a keyframe, about once a second on a Pixel), and the frames in between only as changes from it. A copied clip has to begin on a keyframe, so the start moves back to the keyframe at or before the point you pick, and the Trim sheet says when it has. The end can be any frame.
+- Video check: a button on the start screen (and Check in the video tools) lists what this phone's Chrome can encode and decode (H.264 at 1080p and 4K, 30 and 60 fps, HEVC, AAC, Opus), with a short trial run of each encoder, and copies a plain report.
+
 ## Known limitations
+
+- Video trims start on a keyframe (see above), so a clip can begin up to about a second before the chosen point. Cutting exactly between keyframes would mean re-encoding the first second, which is planned for a later version.
+- Right after a cut, the first fraction of a second of sound can click faintly, because sound packets lean on the one before them.
+- Video exports are written to the browser's private storage on the phone first (a long 4K clip can be hundreds of MB). The copy is replaced by the next export.
+- HDR10 (PQ) videos with separate brightness boxes (mdcv, clli) lose those boxes on export; the colour tags are kept. HLG video, the other HDR kind, does not use them.
+- A video whose picture cannot go into an MP4 without re-encoding cannot be exported yet. If only its sound cannot (Vorbis, in some WebM files), remove the sound to export it.
 
 - Pixel photos are Ultra HDR JPEGs. Re-encoding drops the HDR gain map, so exports look slightly flatter on HDR screens than the original does.
 - Editing happens in the sRGB colour space.
