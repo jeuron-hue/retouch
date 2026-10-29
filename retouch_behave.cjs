@@ -1887,28 +1887,229 @@ test('background core: feather, brush strokes and the backdrop fills', async () 
   await ctx.close();
 }, { core: true });
 
+test('background core: plain border key, holes, photographed backdrops and edge unmixing (independent check)', async () => {
+  const { ctx, page } = await newApp();
+  const r = await page.evaluate(() => {
+    const core = retouch.core;
+    // Pictures as RGBA arrays from px(x, y) -> [r, g, b].
+    const pic = (w, h, px) => { const d = new Uint8ClampedArray(w * h * 4); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const c = px(x, y), o = (y * w + x) * 4; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255; } return d; };
+    const B = [0, 114, 187], W = [255, 255, 255], DARK = [22, 23, 23];
+    const ring = (x, y) => { const s = Math.max(Math.abs(x - 50), Math.abs(y - 30)); return s >= 6 && s <= 12; };
+    // Banner: blue, a white square ring (blue hole inside), and a 2 px dark line along the top.
+    const banner = pic(100, 60, (x, y) => (y < 2 ? DARK : ring(x, y) ? W : B));
+    const kb = core.borderKey(banner, 100, 60);
+    const mb = core.keyMask(banner, 100, 60, kb);
+    const at = (a, x, y, w = 100) => +a[y * w + x].toFixed(3);
+    // Photographed backdrop: blue with grain (+/- 12 on each channel, fixed pattern).
+    const grain = (x, y) => ((x * 7 + y * 13) % 25) - 12;
+    const photo = pic(100, 60, (x, y) => (ring(x, y) ? W : B.map((v) => v + grain(x, y))));
+    const kp = core.borderKey(photo, 100, 60);
+    const mp = core.keyMask(photo, 100, 60, kp);
+    // Busy border: the gradient.
+    const kg = core.borderKey(pic(100, 60, (x, y) => [x * 2, y * 4, 77]), 100, 60);
+    // The ramp between KEY_IN and KEY_OUT, one pixel at a time, on a photographed key
+    // (a flat key's walk stops at KEY_MATCH and leaves the rest to keyCut).
+    const one = (c) => core.keyMask(new Uint8ClampedArray([...c, 255]), 1, 1, { rgb: B, flat: false })[0];
+    const ramp = [0, core.KEY_IN, (core.KEY_IN + core.KEY_OUT) / 2, core.KEY_OUT].map((s) => +one([B[0] + s, B[1], B[2]]).toFixed(3));
+    // Edge unmixing: a white bar on blue with a column of half-and-half pixels between.
+    const half = B.map((v, c) => Math.round((v + W[c]) / 2));
+    const bar = pic(40, 20, (x) => (x < 15 ? B : x === 15 ? half : W));
+    const kc = core.keyCut(bar, 40, 20, { rgb: B, flat: true });
+    const cut = { mixA: at(kc.a, 15, 10, 40), mixRGB: Array.from(kc.rgb.slice((10 * 40 + 15) * 4, (10 * 40 + 15) * 4 + 3)), white: at(kc.a, 30, 10, 40), blue: at(kc.a, 5, 10, 40) };
+    // A pixel off the blue-to-white line (mid orange beside blue and white) keeps the ramp.
+    const off = pic(40, 20, (x) => (x < 15 ? B : x === 15 ? [240, 120, 30] : W));
+    const ko = core.keyCut(off, 40, 20, { rgb: B, flat: true });
+    // keyModel: a plain picture with nothing on it gives no key; the banner gives one.
+    const canvasOf = (d, w, h) => { const c = core.makeCanvas(w, h); c.getContext('2d').putImageData(new ImageData(d, w, h), 0, 0); return c; };
+    const empty = core.keyModel(canvasOf(pic(60, 40, () => B), 60, 40));
+    const km = core.keyModel(canvasOf(banner, 100, 60));
+    // A pale subject touching a pale flat fill (white strands on mint): the walk in
+    // from the border must not run into the white.
+    const MINT = [216, 233, 227];
+    const pale = pic(60, 40, (x, y) => (x >= 20 && x < 40 ? W : MINT));
+    const mm = core.keyMask(pale, 60, 40, core.borderKey(pale, 60, 40));
+    // A photographed backdrop on about 70 % of the border is not enough (a wall, not a
+    // backdrop); on about 90 % it is. Grainy blue, with a dark shelf along the top left.
+    const shelf = (len) => pic(100, 60, (x, y) => (y < 8 && x < len ? DARK : ring(x, y) ? W : B.map((v) => v + grain(x, y))));
+    const k70 = core.keyModel(canvasOf(shelf(90), 100, 60)), k90 = core.keyModel(canvasOf(shelf(30), 100, 60));
+    // With that shelf at 80 px, the dark is a third of the border but one flat colour,
+    // while the grainy blue is two thirds spread over several grid bins: the busiest
+    // bin is dark, the colour with the most border pixels near it is blue.
+    const k80 = core.borderKey(shelf(80), 100, 60);
+    // A flat fill on only half the border (the other half a gradient) is not plain.
+    const halfFlat = core.keyModel(canvasOf(pic(100, 60, (x, y) => (y < 30 ? [x * 2, y * 4, 77] : B)), 100, 60));
+    // A pocket of grainy backdrop that reaches the border only along the bottom row,
+    // walled off by white everywhere else.
+    const pocket = pic(100, 60, (x, y) => (y >= 40 && y < 44 ? W : y >= 44 && (x < 3 || x >= 97) ? W : ring(x, y) ? W : B.map((v) => v + grain(x, y))));
+    const kpk = core.borderKey(pocket, 100, 60), mpk = core.keyMask(pocket, 100, 60, kpk);
+    // Heads: hair and face skin count, body skin and clothes do not.
+    const conf = (k) => [0, 1, 2, 3, 4, 5].map((c) => new Float32Array(100).map((_, i) => (c === k && i < 10 ? 0.9 : c === 0 ? (i < 10 ? 0.1 : 1) : 0)));
+    const heads = [1, 2, 3, 4].map((k) => core.headShare(conf(k)));
+    // The marked point of an L shape (whose centre is outside it) is a marked pixel.
+    const L = { w: 10, h: 10, data: new Float32Array(100).map((_, i) => (i % 10 === 0 || i >= 90 ? 1 : 0)) };
+    const lp = core.markedPoint(L);
+    const none = core.markedPoint({ w: 4, h: 4, data: new Float32Array(16).fill(0.4) });
+    return {
+      kb, kp: { rgb: kp.rgb, share: kp.share, flat: kp.flat }, kgShare: kg.share,
+      banner: [at(mb, 2, 30), at(mb, 50, 30), at(mb, 44, 30), at(mb, 50, 0), at(mb, 99, 59)],
+      photo: [at(mp, 2, 30), at(mp, 50, 30), at(mp, 44, 30)],
+      ramp, cut, offA: at(ko.a, 15, 10, 40), empty, km: km && { kind: km.kind, found: +km.found.toFixed(3), flat: km.flat },
+      pale: [at(mm, 30, 20, 60), at(mm, 5, 20, 60)], k70, k90: k90 && k90.kind, heads, lp, none,
+      k80: { rgb: k80.rgb, share: +k80.share.toFixed(2) }, halfFlat,
+      pocket: [at(mpk, 50, 52), at(mpk, 50, 41), at(mpk, 1, 50)],
+    };
+  });
+  assert(r.kb.rgb.join() === '0,114,187' && r.kb.share === 1 && r.kb.flat === true, 'banner key, the dark top line skipped: ' + JSON.stringify(r.kb));
+  assert(r.banner.join() === '0,0,1,1,0', 'flat key: blue gone, hole gone, ring kept, dark line kept: ' + r.banner);
+  assert(r.kp.flat === false && r.kp.share === 1 && Math.abs(r.kp.rgb[1] - 114) <= 2, 'grainy backdrop is plain but not flat: ' + JSON.stringify(r.kp));
+  assert(r.photo.join() === '0,1,1', 'photographed backdrop: outside gone, the same blue inside the ring kept: ' + r.photo);
+  assert(r.kgShare < 0.6, 'gradient border is not plain: ' + r.kgShare);
+  assert(r.ramp.join() === '0,0,0.5,1', 'ramp from KEY_IN to KEY_OUT: ' + r.ramp);
+  near(r.cut.mixA, 0.5, 0.02, 'half-and-half pixel is half kept');
+  samePx(r.cut.mixRGB, [255, 255, 255], 2, 'half-and-half pixel is white once the blue is taken out');
+  assert(r.cut.white === 1 && r.cut.blue === 0, 'white kept, blue gone: ' + JSON.stringify(r.cut));
+  assert(r.offA === 1, 'a pixel off the blend line keeps the ramp (orange is far from blue): ' + r.offA);
+  assert(r.empty === null, 'a picture that is all background gives no key');
+  assert(r.pale.join() === '1,0', 'white beside mint kept, mint gone: ' + r.pale);
+  assert(r.pocket.join() === '0,1,1', 'backdrop reached only from the bottom row is gone, its walls kept: ' + r.pocket);
+  assert(r.k80.rgb.join() === '0,114,187' && r.k80.share === 0.72, 'grainy blue beats a busier flat bin: ' + JSON.stringify(r.k80));
+  assert(r.halfFlat === null, 'a flat fill on half the border is not plain');
+  assert(r.k70 === null && r.k90 === 'key', 'photographed backdrop needs 80 % of the border: ' + JSON.stringify([r.k70, r.k90]));
+  assert(r.heads.join() === '0.1,0,0.1,0', 'hair and face skin are a head, body skin and clothes are not: ' + r.heads);
+  // L: the left column (10 px) and the bottom row (9 more). Centre (2.37, 6.63), off the L;
+  // the nearest marked pixel is (0, 7), cell centre (0.5, 7.5) of 10.
+  assert(r.lp && Math.abs(r.lp.x * 10 - 0.5) < 1e-9 && Math.abs(r.lp.y * 10 - 7.5) < 1e-9, 'L shape: nearest marked pixel to its centre: ' + JSON.stringify(r.lp));
+  assert(r.none === null, 'nothing marked, no point');
+  assert(r.km && r.km.kind === 'key' && r.km.flat && r.km.found === 0.117, 'banner model (ring 504 px + dark line 200 px of 6000): ' + JSON.stringify(r.km));
+  await ctx.close();
+}, { core: true });
+
 // A photo with no one in it: the real model's answer is a faint haze of about 0.08
-// "person" everywhere (and the same floor for skin). Found 26/10/26 on a logo, where
-// the sheet said 8 % and cut the whole picture away without a word.
-test('background and skin: a photo with no one in it says so, haze is not a person', async () => {
+// "person" everywhere (and the same floor for skin). Found 26/10/26 on a banner,
+// where the sheet cut the whole picture away. Since v0.7.0 the sheet then picks
+// the subject itself: a plain border is keyed out by colour, anything else gets
+// the object at the centre, and a tap picks a different one.
+const haze = () => {
+  const h = (v) => () => ({ w: 16, h: 12, data: new Float32Array(192).fill(v) });
+  retouch.segmenter.override = h(0.08);
+  retouch.segmenter.skinOverride = () => ({ ...h(0.034)(), face: 0.017 });
+  // Stand-in for the tap-to-select model: the object is a 9 x 9 cell block round the
+  // point asked for, on a 32 x 24 grid. Every call is recorded.
+  window.__picks = [];
+  retouch.segmenter.objectOverride = (canvas, pt) => {
+    window.__picks.push([+pt.x.toFixed(3), +pt.y.toFixed(3)]);
+    if (window.__emptyPick) return { w: 32, h: 24, data: new Float32Array(768) };
+    const cx = Math.floor(pt.x * 32), cy = Math.floor(pt.y * 24);
+    return { w: 32, h: 24, data: new Float32Array(768).map((_, i) => (Math.abs(i % 32 - cx) <= 4 && Math.abs(Math.floor(i / 32) - cy) <= 4 ? 1 : 0)) };
+  };
+};
+const notices = (page) => page.evaluate(() => Array.from(document.querySelectorAll('.notice')).map((n) => n.textContent));
+// A still, single-finger tap at image point (x, y), then the wait for a double tap to rule it out.
+async function tapAt(page, x, y) {
+  await page.evaluate(([x, y]) => {
+    const c = document.querySelector('#view'), r = c.getBoundingClientRect(), v = retouch.view;
+    const at = { clientX: r.left + v.tx + x * v.scale, clientY: r.top + v.ty + y * v.scale };
+    for (const type of ['pointerdown', 'pointerup']) c.dispatchEvent(new PointerEvent(type, { pointerId: 41, ...at, bubbles: true, pointerType: 'touch', isPrimary: true }));
+  }, [x, y]);
+  await page.waitForTimeout(450);
+  await idle(page);
+}
+
+test('background: no person on a plain border, the background colour is taken away', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  await load(page, personPng());                       // sky all round, a skin block
+  await page.evaluate(haze);
+  await bgReady(page);
+  const m = await page.evaluate(() => { const m = retouch.tools.bg.model; return { kind: m.kind, rgb: m.rgb, flat: m.flat, found: +m.found.toFixed(3) }; });
+  assert(m.kind === 'key' && m.rgb.join() === '40,90,200' && m.flat === true, 'keyed on the sky: ' + JSON.stringify(m));
+  near(m.found, 1 / 4, 0.01, 'kept share (the skin block)');
+  assert(await page.textContent('#bg-out') === 'Plain background removed.', 'status line ' + await page.textContent('#bg-out'));
+  assert(!(await notices(page)).some((t) => /Nothing found/.test(t)), 'no notice: ' + await notices(page));
+  assert(await page.isVisible('.hint[data-for="bg-view"]'), 'view mode says a tap picks again');
+  await applyTool(page, 'bg');
+  const got = await page.evaluate(() => [[150, 120], [20, 20], [150, 199], [99, 120]].map(([x, y]) => retouch.readPixels(retouch.app.edits.current, x, y, 1, 1)));
+  samePx(got[0], SKIN.concat(255), 0, 'skin kept as it was');
+  assert(got[1][3] === 0, 'sky taken away: ' + got[1]);
+  samePx(got[2], SKIN.concat(255), 0, 'skin at the bottom edge kept');
+  assert(got[3][3] === 0, 'sky right beside the skin taken away: ' + got[3]);
+  assert(await page.evaluate(() => window.__picks.length) === 0, 'the object model was not needed');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('background: no person and a busy border, the centre object is picked; a tap picks another', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  await load(page, gradient());                        // every border pixel a different colour
+  await page.evaluate(haze);
+  await bgReady(page);
+  let m = await page.evaluate(() => ({ kind: retouch.tools.bg.model.kind, picks: window.__picks }));
+  assert(m.kind === 'object' && JSON.stringify(m.picks) === '[[0.5,0.5]]', 'centre picked: ' + JSON.stringify(m));
+  assert(await page.textContent('#bg-out') === 'Centre object picked.', 'status line ' + await page.textContent('#bg-out'));
+  // A stroke, then a tap near the top left: the new object, and the stroke is dropped.
+  await page.click('[data-bgmode="erase"]');
+  await brush(page, [[120, 90], [125, 90]]);
+  await page.click('[data-bgmode="view"]');
+  await page.waitForTimeout(100);
+  assert(await page.textContent('#bg-out') === 'Centre object picked, 1 stroke.', 'stroke counted');
+  await tapAt(page, 40, 30);
+  m = await page.evaluate(() => ({ kind: retouch.tools.bg.model.kind, picks: window.__picks, n: retouch.tools.bg.strokes.length }));
+  near(m.picks[1][0], 40.5 / 241, 0.01, 'tap x');
+  near(m.picks[1][1], 30.5 / 181, 0.01, 'tap y');
+  assert(m.picks.length === 2 && m.n === 0, 'one new pick, strokes cleared: ' + JSON.stringify(m));
+  assert(await page.textContent('#bg-out') === 'Object picked.', 'status line ' + await page.textContent('#bg-out'));
+  const a = await page.evaluate(() => [[40, 30], [200, 150]].map(([x, y]) => window.__px(retouch.tools.bg.pv.mask, Math.round(x * retouch.tools.bg.pv.k), Math.round(y * retouch.tools.bg.pv.k))[3]));
+  assert(a[0] > 250 && a[1] < 5, 'mask follows the new object: ' + a);
+  // A double tap zooms and picks nothing; a tap in a brush mode paints, not picks.
+  await page.evaluate(() => {
+    const c = document.querySelector('#view'), r = c.getBoundingClientRect(), v = retouch.view;
+    const at = { clientX: r.left + v.tx + 100 * v.scale, clientY: r.top + v.ty + 100 * v.scale };
+    for (const type of ['pointerdown', 'pointerup', 'pointerdown', 'pointerup']) c.dispatchEvent(new PointerEvent(type, { pointerId: 42, ...at, bubbles: true, pointerType: 'touch', isPrimary: true }));
+  });
+  await page.waitForTimeout(450);
+  assert(await page.evaluate(() => window.__picks.length) === 2, 'double tap picks nothing');
+  await page.click('[data-bgmode="keep"]');
+  await tapAt(page, 100, 100);
+  assert(await page.evaluate(() => window.__picks.length) === 2, 'a tap while brushing paints instead');
+  // A pick that finds nothing says so, and points at tapping.
+  await page.click('[data-bgmode="view"]');
+  await page.evaluate(() => { window.__emptyPick = true; });
+  await tapAt(page, 120, 90);
+  assert(await page.textContent('#bg-out') === 'Nothing picked.', 'status line ' + await page.textContent('#bg-out'));
+  assert((await notices(page)).some((t) => /Nothing found to keep here\. Tap the subject to pick it\./.test(t)), 'notice: ' + await notices(page));
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('background: something marked without a head (a bag, a cat) goes to the object model at that spot', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  await load(page, gradient());
+  await page.evaluate(haze);
+  // The person model marks a block in the top right quarter, with no head in the picture.
+  await page.evaluate(() => {
+    retouch.segmenter.override = () => ({ w: 16, h: 12, head: 0, data: new Float32Array(192).map((_, i) => (i % 16 >= 10 && i % 16 < 14 && Math.floor(i / 16) >= 2 && Math.floor(i / 16) < 5 ? 1 : 0)) });
+  });
+  await bgReady(page);
+  const m = await page.evaluate(() => ({ kind: retouch.tools.bg.model.kind, centre: retouch.tools.bg.model.centre, picks: window.__picks }));
+  assert(m.kind === 'object' && m.centre === false && m.picks.length === 1, 'object at the marked spot: ' + JSON.stringify(m));
+  near(m.picks[0][0], 11.5 / 16, 0.07, 'marked x');
+  near(m.picks[0][1], 3.5 / 12, 0.09, 'marked y');
+  assert(await page.textContent('#bg-out') === 'Object picked.', 'status line ' + await page.textContent('#bg-out'));
+  // With a head, the same mark is a person.
+  await page.click('.sheet-panel[data-tool="bg"] [data-cancel]');
+  await page.evaluate(() => { const o = retouch.segmenter.override; retouch.segmenter.override = (c) => ({ ...o(c), head: 0.01 }); });
+  await bgReady(page);
+  assert(await page.evaluate(() => retouch.tools.bg.model.kind) === 'person', 'with a head it is a person');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('skin: haze is not skin, and the sheet says no skin was found', async () => {
   const { ctx, page } = await newApp({ init: BG_INIT });
   await load(page, personPng());
-  await page.evaluate(() => {
-    const haze = (v) => () => ({ w: 16, h: 12, data: new Float32Array(192).fill(v) });
-    retouch.segmenter.override = haze(0.08);
-    const skin = haze(0.034);
-    retouch.segmenter.skinOverride = () => ({ ...skin(), face: 0.017 });
-  });
-  const notices = () => page.evaluate(() => Array.from(document.querySelectorAll('.notice')).map((n) => n.textContent));
-  await bgReady(page);
-  const bg = await page.evaluate(() => ({ cov: +retouch.tools.bg.model.coverage.toFixed(3), found: retouch.tools.bg.model.found }));
-  assert(bg.cov === 0.08 && bg.found === 0, 'haze: ' + JSON.stringify(bg));
-  assert(await page.textContent('#bg-out') === 'No person found.', 'status line ' + await page.textContent('#bg-out'));
-  assert((await notices()).some((t) => /No person found in this photo/.test(t)), 'no-person notice: ' + await notices());
-  await page.click('.sheet-panel[data-tool="bg"] [data-cancel]');
+  await page.evaluate(haze);
   await skinReady(page);
   assert(await page.textContent('#skin-out') === 'No skin found.', 'skin status ' + await page.textContent('#skin-out'));
-  assert((await notices()).some((t) => /No skin found in this photo/.test(t)), 'no-skin notice: ' + await notices());
+  assert((await notices(page)).some((t) => /No skin found in this photo/.test(t)), 'no-skin notice: ' + await notices(page));
   assert(page.errors.length === 0, page.errors.join('; '));
   await ctx.close();
 });
@@ -2021,14 +2222,42 @@ const logoPng = () => makePng(480, 120, (x, y) => {
   if (x >= 140 && x < 450 && ((y >= 30 && y < 55) || (y >= 70 && y < 85))) return [255, 255, 255, 255];
   return [0, 114, 188, 255];
 });
-test('background: the real model finds no one in a flat graphic', async () => {
+test('background: the real model finds no one in a flat graphic, so its background colour is keyed out', async () => {
   const { ctx, page } = await newApp();
   await load(page, logoPng());
   await bgReady(page);
-  const m = await page.evaluate(() => ({ cov: retouch.tools.bg.model.coverage, found: retouch.tools.bg.model.found }));
-  assert(m.found < 0.01, 'person found in a logo: ' + JSON.stringify(m));
-  assert(await page.textContent('#bg-out') === 'No person found.', 'status line ' + await page.textContent('#bg-out'));
-  console.log('      logo: mean ' + (m.cov * 100).toFixed(1) + ' %, found ' + (m.found * 100).toFixed(1) + ' %');
+  const m = await page.evaluate(() => { const m = retouch.tools.bg.model; return { kind: m.kind, rgb: m.rgb, flat: m.flat }; });
+  assert(m.kind === 'key' && m.rgb.join() === '0,114,188' && m.flat, 'a logo is keyed on its background: ' + JSON.stringify(m));
+  assert(await page.textContent('#bg-out') === 'Plain background removed.', 'status line ' + await page.textContent('#bg-out'));
+  await applyTool(page, 'bg');
+  const px = await page.evaluate(() => [[5, 5], [200, 40], [60, 80], [470, 60]].map(([x, y]) => retouch.readPixels(retouch.app.edits.current, x, y, 1, 1)));
+  assert(px[0][3] === 0 && px[3][3] === 0, 'background gone: ' + px[0] + ' / ' + px[3]);
+  samePx(px[1], [255, 255, 255, 255], 0, 'white bar kept');
+  samePx(px[2], [240, 120, 30, 255], 0, 'orange block kept');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+// A red disc on a patchwork of muted squares: no person, no plain border, so the real
+// tap-to-select model picks the disc when tapped.
+const discPng = () => makePng(400, 300, (x, y) => {
+  if (Math.hypot(x - 200, y - 150) <= 70) return [224, 48, 48, 255];
+  const i = Math.floor(x / 20), j = Math.floor(y / 20), v = 90 + ((i * 37 + j * 53) % 5) * 25;
+  return [v, 150 - ((i + j) % 3) * 30, 255 - v, 255];
+});
+test('background: the real tap-to-select model picks the object tapped', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  await load(page, discPng());
+  await bgReady(page);
+  // Whatever was picked first (the person model can mistake a red disc for a
+  // person), a tap on the disc picks it with the real tap-to-select model.
+  await tapAt(page, 200, 150);
+  const m = await page.evaluate(() => { const m = retouch.tools.bg.model; return { kind: m.kind, centre: m.centre, found: m.found, o: retouch.segmenter.objectOverride }; });
+  assert(m.kind === 'object' && m.centre === false && m.o === null, 'disc picked by the real model: ' + JSON.stringify(m));
+  near(m.found, Math.PI * 70 * 70 / 120000, 0.03, 'picked share is the disc');
+  const a = await page.evaluate(() => { const pv = retouch.tools.bg.pv; return [[200, 150], [20, 20], [380, 280]].map(([x, y]) => window.__px(pv.mask, Math.round(x * pv.k), Math.round(y * pv.k))[3]); });
+  assert(a[0] > 250 && a[1] < 5 && a[2] < 5, 'disc kept, squares cut: ' + a);
+  console.log('      disc: found ' + (m.found * 100).toFixed(1) + ' % (disc is ' + (Math.PI * 4900 / 1200).toFixed(1) + ' %)');
   assert(page.errors.length === 0, page.errors.join('; '));
   await ctx.close();
 });
@@ -2040,7 +2269,7 @@ test('background: the real model runs from vendor/, offline, and nothing else is
     const names = await caches.keys(), mp = names.find((n) => n.startsWith('retouch-mediapipe-'));
     return { names, files: mp ? (await (await caches.open(mp)).keys()).map((r) => new URL(r.url).pathname.split('/').pop()).sort() : [] };
   });
-  assert(cached.files.join() === 'selfie_multiclass_256x256.tflite,vision_bundle.js,vision_wasm_internal.js,vision_wasm_internal.wasm', 'MediaPipe cache: ' + JSON.stringify(cached));
+  assert(cached.files.join() === 'magic_touch.tflite,selfie_multiclass_256x256.tflite,vision_bundle.js,vision_wasm_internal.js,vision_wasm_internal.wasm', 'MediaPipe cache: ' + JSON.stringify(cached));
   await ctx.setOffline(true);
   await page.reload();
   await page.waitForFunction(() => window.retouch && window.retouch.app);
@@ -2049,9 +2278,14 @@ test('background: the real model runs from vendor/, offline, and nothing else is
   await page.exposeFunction('__busyLabel', (t) => labels.push(t));
   await page.evaluate(() => new MutationObserver(() => window.__busyLabel(document.querySelector('#busy').textContent)).observe(document.querySelector('#busy'), { childList: true, characterData: true, subtree: true }));
   await bgReady(page);
-  const m = await page.evaluate(() => { const t = retouch.tools.bg; return { w: t.model.w, h: t.model.h, cov: t.model.coverage, n: t.model.ar.length, override: retouch.segmenter.override }; });
-  assert(m.w === 300 && m.h === 200 && m.n === 60000, 'model on the guide grid: ' + JSON.stringify(m));
-  assert(m.cov >= 0 && m.cov <= 1 && m.override === null, 'person share from the real model ' + m.cov);
+  // The person model always runs first. This picture has no person and a plain sky
+  // border, so the sky is then keyed out by colour.
+  const m = await page.evaluate(async () => ({ kind: retouch.tools.bg.model.kind, person: !!(retouch.segmenter.promise && await retouch.segmenter.promise), override: retouch.segmenter.override }));
+  assert(m.person && m.override === null && m.kind === 'key', 'real person model ran, then the key: ' + JSON.stringify(m));
+  // A tap loads the tap-to-select model, offline too.
+  await tapAt(page, 150, 120);
+  const t = await page.evaluate(() => ({ kind: retouch.tools.bg.model.kind, w: retouch.tools.bg.model.w, n: retouch.tools.bg.model.ar.length }));
+  assert(t.kind === 'object' && t.w === 300 && t.n === 60000, 'object model offline, on the guide grid: ' + JSON.stringify(t));
   assert(labels.includes('Loading model'), 'first use says it is loading the model: ' + labels);
   await applyTool(page, 'bg');
   const d = await dims(page);
