@@ -39,12 +39,13 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 - Exact cuts: when Split or Trim's Start here would snap back more than half a second to reach a keyframe (some videos saved by other apps have keyframes 4 s apart), the sheet offers to cut exactly at the playhead instead. That piece can no longer be copied, so the export is re-encoded to H.264, with the same warnings as a join.
 - Size: make the video smaller, by long edge (2560, 1920, 1280, or any number) or 1080 wide, and drop the frame rate to 60, 30, 25 or 24 fps. Never larger, and never a higher frame rate than the video has. A lower rate drops frames (60 to 30 keeps every other one); it does not blend them.
 - Canvas: the photo Add canvas tool for video. Pad the frame out to 1:1, 4:5, 1.91:1, 9:16 or 3:4, with a margin if wanted, filled with a colour or the video itself stretched and blurred, frame by frame. Drag the picture to move it in the frame. The frame stays within the video's own long edge (and under 4K), so a landscape video in a tall frame gets smaller inside it rather than the frame growing.
+- Skin: smooth the skin in every frame, with the photo tool's Strength and Texture, for the whole video. The skin model looks at each frame, and its mask is steadied from frame to frame so the skin does not flicker; it starts afresh at each cut, since the next piece can show another face. The filter is the photo one, run on the phone's graphics chip (WebGL2) so a whole video takes minutes rather than hours. The sheet shows the paused frame smoothed (hold the half-circle to compare); playing shows the video as it is. There is no brush, since a painted area would not follow a face that moves.
 - Sound: keep the sound or remove it.
 - Export copies the chosen pieces into a new MP4 without decoding them, so it is fast and the picture and sound are exactly as recorded, 10-bit HDR included. Share or download it as with photos.
 - Joined videos are copied the same way when they were all recorded with the same settings (same size, frame rate, codec and HDR or not). When they differ, the picture is re-encoded to H.264 at the size and frame rate of the first piece; videos of another shape are scaled to fit inside it with black bars. Re-encoding is slower and loses a little quality, and the phone cannot encode 10-bit HDR, so HDR video becomes SDR. The export sheet says why and waits for a tap on Re-encode before it starts. Sound is copied when every video's sound matches, and re-encoded otherwise (with silence for a video that has none).
-- Size and Canvas always re-encode the picture to H.264, with the same warnings. The sound is still copied when it can be.
+- Size, Canvas and Skin always re-encode the picture to H.264, with the same warnings. The sound is still copied when it can be.
 - Why the start snaps: a video stores a whole picture only now and then (a keyframe, about once a second on a Pixel), and the frames in between only as changes from it. A copied clip has to begin on a keyframe, so the start moves back to the keyframe at or before the point you pick, and the Trim sheet says when it has. The end can be any frame.
-- Video check: a button on the start screen (and Check in the video tools) lists what this phone's Chrome can encode and decode (H.264 at 1080p and 4K, 30 and 60 fps, HEVC, AAC, Opus), with a short trial run of each encoder, and copies a plain report.
+- Video check: a button on the start screen (and Check in the video tools) lists what this phone's Chrome can encode and decode (H.264 at 1080p and 4K, 30 and 60 fps, HEVC, AAC, Opus), with a short trial run of each encoder, times the skin model and the skin filter at 1080p and 4K, and copies a plain report.
 
 ## Known limitations
 
@@ -54,6 +55,7 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 - HDR10 (PQ) videos with separate brightness boxes (mdcv, clli) lose those boxes on export; the colour tags are kept. HLG video, the other HDR kind, does not use them.
 - Re-encoding takes time on the phone: 4K runs slower than real time, so a minute of 4K 60 takes two minutes or more.
 - Where two pieces meet, the sound can be nudged by up to half a sound packet (about 10 ms) so it never runs backwards.
+- Skin smoothing on video runs the skin model and the filter on every frame, so it is the slowest export: run the Video check to see this phone's speed. On a phone whose graphics chip cannot run the filter it falls back to JavaScript, which is far slower, and the sheet says so.
 
 - Pixel photos are Ultra HDR JPEGs. Re-encoding drops the HDR gain map, so exports look slightly flatter on HDR screens than the original does.
 - Editing happens in the sRGB colour space.
