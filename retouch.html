@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.9.3 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.10.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -63,11 +63,13 @@ How the file is laid out:
         cut-out, skin smoothing, spot healing and inpainting, metadata strip, edit history),
         and for video: which packets a trim copies, clip facts, cut and join (when
         clips can be copied together, splits, the frame grid and sound placement
-        for a join, resampling), video edit history, MP4 dates and metadata, the
+        for a join, resampling), size and canvas (the frame, rates to drop to,
+        a clip fitted in), video edit history, MP4 dates and metadata, the
         video check list. Tests and the mutation runner target this block.
         MediaPipe and Mediabunny sit outside it, in the app.
      c. App: view (zoom, pan), tools, open, export, video (check, player, trim,
-        cut and join, sound, export by copy or H.264 re-encode), service worker.
+        cut and join, size, canvas, sound, export by copy or H.264 re-encode),
+        service worker.
 -->
 <html lang="en">
 <head>
@@ -159,7 +161,8 @@ body[data-tool="crop"] .strip [data-for="crop"],body[data-tool="pad"] .strip [da
 body[data-tool="bg"] .strip [data-for="bg"],body[data-tool="skin"] .strip [data-for="skin"],
 body[data-tool="spot"] .strip [data-for="spot"],body[data-tool="trim"] .strip [data-for="trim"],
 body[data-tool="sound"] .strip [data-for="sound"],body[data-tool="vexport"] .strip [data-for="vexport"],
-body[data-tool="vcheck"] .strip [data-for="vcheck"],body[data-tool="cut"] .strip [data-for="cut"]{display:inline}
+body[data-tool="vcheck"] .strip [data-for="vcheck"],body[data-tool="cut"] .strip [data-for="cut"],
+body[data-tool="vsize"] .strip [data-for="vsize"],body[data-tool="vpad"] .strip [data-for="vpad"]{display:inline}
 
 /* Stage: the photo fills everything between the bars. */
 #stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;touch-action:none;background:var(--stage)}
@@ -179,12 +182,18 @@ body[data-tool="vcheck"] .strip [data-for="vcheck"],body[data-tool="cut"] .strip
 body[data-tool="pad"] .hint[data-for="pad"],body[data-tool="spot"] .hint[data-for="spot"],
 body[data-tool="bg"][data-brush] .hint[data-for="bg"],body[data-tool="skin"][data-brush] .hint[data-for="skin"],
 body[data-tool="bg"][data-bg-ready]:not([data-brush]) .hint[data-for="bg-view"],body[data-tool="trim"] .hint[data-for="trim"],
-body[data-tool="cut"] .hint[data-for="cut"]{display:block}
+body[data-tool="cut"] .hint[data-for="cut"],body[data-tool="vpad"][data-vpad-move] .hint[data-for="vpad"]{display:block}
 
 /* Video mode: the player stands in for the photo canvas, with a play bar over its foot. */
 #player{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:var(--stage);display:none}
 body[data-mode="video"] #player{display:block}
 body[data-mode="video"] #view{display:none}
+/* Canvas preview: the export's frame drawn to scale behind the player, which shrinks
+   to the picture's place in it. Set from showFrame(). */
+#vframe{position:absolute;overflow:hidden}
+body:not([data-mode="video"]) #vframe{display:none}
+#vblur{position:absolute;inset:0;width:100%;height:100%}
+#player[data-framed]{inset:auto;background:transparent}
 .transport{position:absolute;left:8px;right:8px;bottom:8px;display:none;align-items:center;gap:8px;padding:0 10px 0 2px;border-radius:6px;background:rgba(20,19,18,.86);z-index:3}
 body[data-mode="video"]:not([data-tool]) .transport{display:flex}
 .transport .readout{min-width:0}
@@ -351,6 +360,8 @@ fieldset:disabled{opacity:.4}
   <span class="edge status" id="spot-out" data-for="spot"></span>
   <span class="edge status" id="trim-out" data-for="trim"></span>
   <span class="edge status" id="cut-out" data-for="cut"></span>
+  <span class="edge status" id="vsize-out" data-for="vsize"></span>
+  <span class="edge status" id="vpad-out" data-for="vpad"></span>
   <span class="edge status" id="sound-out" data-for="sound"></span>
   <span class="edge status" id="vexport-out" data-for="vexport"></span>
   <span class="edge status" id="vcheck-out" data-for="vcheck"></span>
@@ -358,6 +369,7 @@ fieldset:disabled{opacity:.4}
 
 <main id="stage">
   <canvas id="view" aria-label="Photo"></canvas>
+  <div id="vframe" hidden><canvas id="vblur"></canvas></div>
   <video id="player" playsinline preload="auto" aria-label="Video"></video>
   <div class="transport" id="transport">
     <button class="icon-btn" id="play" aria-label="Play" title="Play"><svg viewBox="0 0 24 24"><path class="play" d="M8 5.5v13l10-6.5z"/><path class="pause" d="M8.5 5.5v13M15.5 5.5v13"/></svg></button>
@@ -373,6 +385,7 @@ fieldset:disabled{opacity:.4}
   <div class="hint" data-for="spot">Tap or brush a spot · 2 fingers move · small spots only</div>
   <div class="hint" data-for="trim">Start snaps back to a keyframe · nothing is re-encoded</div>
   <div class="hint" data-for="cut">Tap a piece to pick it · split snaps back to a keyframe</div>
+  <div class="hint" data-for="vpad">Drag the picture to move it in the frame</div>
 
   <section class="empty" id="empty">
     <div class="band top">
@@ -744,6 +757,66 @@ fieldset:disabled{opacity:.4}
     </div>
   </div>
 
+  <div class="sheet-panel" data-tool="vsize" hidden>
+    <div class="sheet-head">
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Size</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold for the original" title="Hold for the original"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+    </div>
+    <div class="scroller" id="vsize-edges" role="group" aria-label="Size preset"></div>
+    <div class="row">
+      <label for="vsize-long">Long edge</label>
+      <input type="range" id="vsize-slider" min="144" max="1920" step="2" aria-label="Long edge slider">
+      <input type="number" id="vsize-long" inputmode="numeric" min="144" step="2">
+    </div>
+    <div class="row">
+      <span class="lbl">Frame rate</span>
+      <div class="seg mono" id="vsize-rates" role="group" aria-label="Frame rate" style="flex:1"></div>
+    </div>
+    <div class="cells">
+      <div class="cell"><span class="k">Now</span><span class="v" id="vsize-from"></span></div>
+      <div class="cell"><span class="k">After</span><span class="v key" id="vsize-to"></span></div>
+    </div>
+    <p class="note" id="vsize-note" hidden></p>
+  </div>
+
+  <div class="sheet-panel" data-tool="vpad" hidden>
+    <div class="sheet-head">
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Canvas</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold for the original" title="Hold for the original"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+    </div>
+    <div class="scroller" id="vpad-ratios" role="group" aria-label="Frame ratio"></div>
+    <div class="row">
+      <label for="vpad-margin">Margin</label>
+      <input type="range" id="vpad-margin" min="0" max="25" step="0.5" value="0">
+      <span class="readout" id="vpad-margin-out">0 %</span>
+    </div>
+    <div class="row">
+      <div class="seg" role="group" aria-label="Fill" style="flex:1">
+        <button data-vfill="colour" aria-pressed="true">Colour</button>
+        <button data-vfill="blur" aria-pressed="false">Blur</button>
+      </div>
+      <button class="icon-btn boxed" id="vpad-centre" aria-label="Centre the picture" title="Centre the picture"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1"/><path d="M12 8v8M8 12h8"/></svg></button>
+    </div>
+    <div class="swatches" id="vpad-colour-row">
+      <button class="swatch" data-vcolour="#000000" style="background:#000000" aria-label="Black" aria-pressed="true"></button>
+      <button class="swatch" data-vcolour="#FFFFFF" style="background:#FFFFFF" aria-label="White" aria-pressed="false"></button>
+      <button class="swatch" data-vcolour="#F7F8F6" style="background:#F7F8F6" aria-label="Off-white" aria-pressed="false"></button>
+      <input type="color" id="vpad-colour" value="#000000" aria-label="Pick colour">
+    </div>
+    <div class="row" id="vpad-blur-row" hidden>
+      <label for="vpad-blur">Blur</label>
+      <input type="range" id="vpad-blur" min="0" max="100" step="1" value="50">
+      <span class="readout" id="vpad-blur-out">50</span>
+    </div>
+    <p class="note" id="vpad-note" hidden></p>
+  </div>
+
   <div class="sheet-panel" data-tool="sound" hidden>
     <div class="sheet-head">
       <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
@@ -837,6 +910,12 @@ fieldset:disabled{opacity:.4}
     <button class="tool" data-mode="video" data-open-tool="cut" disabled>
       <svg viewBox="0 0 24 24"><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/><path d="M8.3 15.7L17 4M15.7 15.7L7 4"/></svg>Cut
     </button>
+    <button class="tool" data-mode="video" data-open-tool="vsize" disabled>
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="10.5" width="10" height="10" rx="1"/><path d="M13 4h7v7"/><path d="M20 4l-8 8"/></svg>Size
+    </button>
+    <button class="tool" data-mode="video" data-open-tool="vpad" disabled>
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1"/><rect x="7.5" y="8.5" width="9" height="7" rx="0.5"/></svg>Canvas
+    </button>
     <button class="tool" data-mode="video" data-open-tool="sound" disabled>
       <svg viewBox="0 0 24 24"><path d="M4 9.5h4l5-4v13l-5-4H4z"/><path d="M16.5 9a4 4 0 0 1 0 6M19 6.5a7.5 7.5 0 0 1 0 11"/></svg>Sound
     </button>
@@ -856,7 +935,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.9.3';
+const APP_VERSION = '0.10.0';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -1111,8 +1190,9 @@ core.drawBlurCover = (ctx, src, W, H, amount) => {
   const pad = Math.ceil(radius * 3);
   const small = core.makeCanvas(sw, sh);
   const sctx = small.getContext('2d');
-  const cover = Math.max((sw + 2 * pad) / src.width, (sh + 2 * pad) / src.height);
-  const dw = src.width * cover, dh = src.height * cover;
+  const iw = src.videoWidth || src.width, ih = src.videoHeight || src.height;   // a video element's own size is videoWidth
+  const cover = Math.max((sw + 2 * pad) / iw, (sh + 2 * pad) / ih);
+  const dw = iw * cover, dh = ih * cover;
   sctx.filter = 'blur(' + radius + 'px)';
   sctx.imageSmoothingQuality = 'high';
   sctx.drawImage(src, (sw - dw) / 2, (sh - dh) / 2, dw, dh);
@@ -2778,6 +2858,55 @@ core.video.reshaper = (fromRate, toRate, toChannels) => {
 // the phone records at), between 2 and 60 Mbit/s (60 is what the video check ran 4K 60 at).
 core.video.encodeBitrate = (w, h, rate) => Math.round(Math.min(60e6, Math.max(2e6, w * h * rate * 0.25)));
 
+/* Size and canvas (phase V3): two settings on the recipe that hold for the whole
+   export. size { mode: null | 'long' | 'width', px, rate }: the long edge or the
+   width in pixels (null keeps the size), and a lower frame rate (null keeps it).
+   pad null | { ratio, margin, fill, colour, blur, px, py }: the photo Add canvas
+   tool, frame by frame. Either one means the picture is re-encoded. */
+
+// Frame rates a clip can drop to: the usual ones below its own. Never up: that only
+// shows each frame twice. A frame is dropped, not blended, so 60 to 30 keeps every other one.
+core.video.RATE_CHOICES = [60, 30, 25, 24];
+core.video.ratesBelow = (rate) => core.video.RATE_CHOICES.filter((r) => r < rate * 0.995);
+
+// The export's frame for a picture w × h (upright, as shown). The canvas pads it to
+// ratio pad.R (null keeps its shape) with pad.margin (a share of the long edge) on
+// every side, as the photo tool does; the frame is then scaled down, if need be, to
+// stay within the picture's long edge and under maxPixels. The size setting scales
+// it down further, never up. H.264 wants even sides. Returns the frame W × H, where
+// the picture sits in it (x, y, w, h), and which settings change anything.
+core.video.frameFor = (w, h, pad, size, maxPixels) => {
+  let W = w, H = h, ox = 0, oy = 0;
+  if (pad) {
+    ({ W, H } = core.padDims(w, h, pad.R, Math.round((pad.margin || 0) * Math.max(w, h))));
+    ({ x: ox, y: oy } = core.padOffset(W, H, w, h, pad.px, pad.py));
+  }
+  let k = Math.min(1, Math.max(w, h) / Math.max(W, H));
+  if (W * H * k * k > maxPixels) k = Math.sqrt(maxPixels / (W * H));
+  let s = 1;
+  if (size && size.mode === 'long' && size.px) s = Math.min(1, size.px / (Math.max(W, H) * k));
+  if (size && size.mode === 'width' && size.px) s = Math.min(1, size.px / (W * k));
+  const even = (n) => Math.max(2, n - (n % 2));
+  const t = k * s, FW = even(Math.round(W * t)), FH = even(Math.round(H * t));
+  const pw = Math.min(FW, Math.round(w * t)), ph = Math.min(FH, Math.round(h * t));
+  return {
+    W: FW, H: FH, w: pw, h: ph,
+    x: Math.min(FW - pw, Math.round(ox * t)), y: Math.min(FH - ph, Math.round(oy * t)),
+    padded: W !== w || H !== h, shrunk: k < 1, sized: s < 1,
+  };
+};
+
+// Where a clip of another shape goes inside the picture's place r { x, y, w, h }:
+// as large as fits, centred, nothing cropped. Within a pixel of filling a side, it
+// fills it, so a rounding never leaves a hairline.
+core.video.fitIn = (r, w, h) => {
+  const k = Math.min(r.w / w, r.h / h);
+  let bw = Math.min(r.w, Math.round(w * k)), bh = Math.min(r.h, Math.round(h * k));
+  if (bw >= r.w - 1) bw = r.w;
+  if (bh >= r.h - 1) bh = r.h;
+  return { x: r.x + Math.floor((r.w - bw) / 2), y: r.y + Math.floor((r.h - bh) / 2), w: Math.max(1, bw), h: Math.max(1, bh) };
+};
+
 // The player's place in a list of pieces. pieceAt turns a time in the export into
 // { i, at }: which piece, and the time in its clip. timeOf goes back.
 core.video.pieceAt = (pieces, t) => {
@@ -3302,7 +3431,7 @@ function afterHistoryChange() {
   if (v) {
     const r = v.history.current, j = joinPlan(v, r), d = new Date();
     v.sel = Math.min(v.sel, r.pieces.length - 1);
-    $('#dims').textContent = fmtDims(j.w, j.h) + ' · ' + core.video.fmtTime(j.total) + (j.sound.mode === 'none' ? ' · no sound' : '');
+    $('#dims').textContent = fmtDims(j.w, j.h) + ' · ' + core.video.fmtTime(j.total) + (j.encode && j.rate !== v.clips[j.used[0]].facts.rate ? ' · ' + j.rate + ' fps' : '') + (j.sound.mode === 'none' ? ' · no sound' : '');
     $('#top-code').textContent = editCount() + ' ▸ ' + pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + ' ' + pad2(d.getHours()) + pad2(d.getMinutes());
     playerRule();
     return;
@@ -4775,6 +4904,10 @@ const VIDEO_EXPORT_TEMP = 'retouch-export.mp4';   // scratch file in the browser
 // When a split or a trim start would snap back more than this (seconds) to reach a
 // keyframe, the sheet offers to cut exactly there instead, at the cost of a re-encode.
 const SNAP_OFFER = 0.5;
+// The largest frame a re-encode makes, in pixels: 4K (3840 × 2160), or the clip's own
+// size if that is larger. A canvas around a 4K clip is scaled down to stay under it,
+// since the Pixel's H.264 encoder is only known to work up to 4K (video check, 30/10/26).
+const VIDEO_MAX_PIXELS = 3840 * 2160;
 
 let mediabunny = null;
 function loadMediabunny() {
@@ -4857,7 +4990,7 @@ function disposeClip(c) {
 // The open video: the clips read so far (the one opened first; Cut adds more), the
 // edit history, and which piece Trim and Cut start on.
 function newVideo(clip) {
-  return { clips: [clip], sel: 0, history: new core.ClipHistory({ pieces: [{ clip: 0, start: clip.first, end: clip.end }], audio: true }) };
+  return { clips: [clip], sel: 0, history: new core.ClipHistory({ pieces: [{ clip: 0, start: clip.first, end: clip.end }], audio: true, size: null, pad: null }) };
 }
 
 // Read more videos into the open one, for joining. Returns the index of each clip
@@ -4886,6 +5019,20 @@ async function readMore(files) {
 // Does any clip in the recipe have sound?
 const recipeHasSound = (v, r) => r.pieces.some((p) => v.clips[p.clip].at);
 
+// The canvas ratio for a ratio id; null keeps the picture's own shape.
+const padRatio = (id) => { const x = RATIOS.find((q) => q.id === id); return x && typeof x.r === 'number' ? x.r : null; };
+const padName = (pad) => (padRatio(pad.ratio) ? 'a ' + pad.ratio + ' canvas' : 'a canvas');
+
+// The export's frame for recipe r, from the first piece's clip with the canvas and
+// size settings (core.video.frameFor), and its frame rate.
+function frameOf(v, r) {
+  const c = v.clips[r.pieces[0].clip], w = c.info.width, h = c.info.height;
+  const pad = r.pad ? { ...r.pad, R: padRatio(r.pad.ratio) } : null;
+  const f = core.video.frameFor(w, h, pad, r.size, Math.max(VIDEO_MAX_PIXELS, w * h));
+  const base = c.facts.rate, want = r.size && r.size.rate;
+  return { ...f, base, rate: want && core.video.ratesBelow(base).includes(want) ? want : base };
+}
+
 // What an export of recipe r will be: copied or re-encoded and why, the sound, the
 // size and rate, and where each piece runs from and to in its clip.
 function joinPlan(v, r) {
@@ -4899,15 +5046,21 @@ function joinPlan(v, r) {
       ' between keyframes (an exact cut)');
   }
   const sound = core.video.soundCheck(clips.map((c, k) => ({ name: clipName(used[k]), ...c.sfacts })), r.audio);
-  const first = clips[0], encode = why.length > 0, rate = first.facts.rate;
+  const f = frameOf(v, r);
+  if (f.padded) why.push(padName(r.pad) + ' is added');
+  if (f.sized) why.push('the size changes to ' + fmtDims(f.W, f.H));
+  if (f.rate !== f.base) why.push('the frame rate drops to ' + f.rate + ' fps');
+  const first = clips[0], encode = why.length > 0, rate = f.rate;
   const plans = encode
     ? core.video.frameGrid(r.pieces, rate).pieces.map((g, n) => ({ ...g, whole: r.pieces[n].start <= v.clips[r.pieces[n].clip].keys[0] + E }))
     : r.pieces.map((p) => core.video.planTrim(v.clips[p.clip].vpk, p.start, p.end));
   const { at, total } = core.video.joinOffsets(plans);
-  const even = (n) => Math.max(2, n - (n % 2));         // H.264 wants whole 2 × 2 colour blocks
   return {
     used, encode, why, sound, rate, plans, at, total,
-    w: encode ? even(first.info.width) : first.info.width, h: encode ? even(first.info.height) : first.info.height,
+    w: encode ? f.W : first.info.width, h: encode ? f.H : first.info.height,
+    pic: { x: f.x, y: f.y, w: f.w, h: f.h },
+    fill: r.pad && f.padded ? r.pad : { fill: 'colour', colour: '#000000' },
+    shapes: clips.some((c) => c.info.width * first.info.height !== c.info.height * first.info.width),
     frames: encode ? plans.reduce((n, p) => n + p.times.length, 0) : 0,
     hdr: encode && clips.some((c) => c.facts.hdr),
     soundClip: clips.find((c) => c.at) || null,
@@ -4946,6 +5099,7 @@ function closeVideo() {
   player.removeAttribute('src');
   player.load();
   Object.assign(pl, { i: 0, clip: -1, seek: null, play: false });
+  showFrame();                          // no video: the frame goes and the player fills the stage again
   for (const c of v.clips) disposeClip(c);
   for (const id of ['player', 'video-note', 'add']) { const n = document.querySelector('.notice[data-id="' + id + '"]'); if (n) n.remove(); }
 }
@@ -5000,6 +5154,7 @@ function playerRule() {
   player.muted = !(r.audio && v.clips[p.clip].at);
   const t = playerTime();
   if (t < p.start - 0.01 || t > p.end) seekTo(p.start);
+  showFrame();
   showClock();
 }
 
@@ -5025,6 +5180,7 @@ function watchPlay() {
     else { player.pause(); showPiece(0, r.pieces[0].start); }
   }
   showClock();
+  drawFrameFill();
   requestAnimationFrame(watchPlay);
 }
 player.addEventListener('play', () => {
@@ -5052,7 +5208,7 @@ player.addEventListener('loadedmetadata', () => {
 });
 const togglePlay = () => { if (!app.video) return; if (player.paused) player.play().catch(() => {}); else player.pause(); };
 $('#play').addEventListener('click', togglePlay);
-player.addEventListener('click', togglePlay);
+player.addEventListener('click', () => { if (app.tool !== tools.vpad) togglePlay(); });   // in Canvas a touch moves the picture
 $('#seek').addEventListener('input', (e) => {
   const r = playerRecipe();
   if (!r) return;
@@ -5205,7 +5361,7 @@ tools.cut = {
   video: true,
   open() {
     const v = app.video, c = v.history.current;
-    this.d = { pieces: c.pieces.map((p) => ({ ...p })), audio: c.audio };
+    this.d = { ...c, pieces: c.pieces.map((p) => ({ ...p })) };
     this.sel = Math.min(v.sel, this.d.pieces.length - 1);
     this.joined = false;
     this.msg = null;
@@ -5372,6 +5528,220 @@ tools.cut = {
   });
 }
 
+/* ---------- Canvas preview ---------- */
+
+// With a canvas in the recipe on screen, the stage shows the export's frame to
+// scale: the fill behind (a colour, or the frame on screen stretched and blurred,
+// as the export does it), and the player shrunk to the picture's place in it.
+// Without one, the player fills the stage as before.
+const frameView = { k: 0, f: null };
+function showFrame() {
+  const v = app.video, r = playerRecipe(), box = $('#vframe');
+  const f = v && r && r.pad ? frameOf(v, r) : null;
+  frameView.f = f && f.padded ? f : null;
+  if (!frameView.f) {
+    box.hidden = true;
+    player.removeAttribute('data-framed');
+    for (const k of ['left', 'top', 'width', 'height']) player.style[k] = '';
+    return;
+  }
+  const st = $('#stage'), gap = 12;
+  const k = Math.max(1e-6, Math.min((st.clientWidth - 2 * gap) / f.W, (st.clientHeight - 2 * gap) / f.H));
+  const fx = (st.clientWidth - f.W * k) / 2, fy = (st.clientHeight - f.H * k) / 2;
+  frameView.k = k;
+  const px = (n) => n + 'px';
+  Object.assign(box.style, { left: px(fx), top: px(fy), width: px(f.W * k), height: px(f.H * k), background: r.pad.fill === 'blur' ? '#000' : r.pad.colour });
+  box.dataset.blur = r.pad.fill === 'blur' ? String(r.pad.blur) : '';
+  $('#vblur').hidden = r.pad.fill !== 'blur';
+  box.hidden = false;
+  player.dataset.framed = '';
+  Object.assign(player.style, { left: px(fx + f.x * k), top: px(fy + f.y * k), width: px(f.w * k), height: px(f.h * k) });
+  drawFrameFill();
+}
+// The blurred fill, from the frame on screen. Redrawn as the video plays and seeks.
+function drawFrameFill() {
+  const box = $('#vframe');
+  if (box.hidden || !box.dataset.blur || player.readyState < 2 || !player.videoWidth) return;
+  const c = $('#vblur'), dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(box.clientWidth * dpr)), h = Math.max(1, Math.round(box.clientHeight * dpr));
+  if (c.width !== w) c.width = w;
+  if (c.height !== h) c.height = h;
+  core.drawBlurCover(c.getContext('2d'), player, w, h, +box.dataset.blur);
+}
+player.addEventListener('seeked', drawFrameFill);
+player.addEventListener('loadeddata', drawFrameFill);
+new ResizeObserver(() => { if (app.video) showFrame(); }).observe($('#stage'));
+
+/* ---------- Tool: size and frame rate ---------- */
+
+// The export's size (long edge or width, never larger than the frame it would have
+// anyway) and a lower frame rate. Both apply to the whole edit at export.
+const VSIZE_EDGES = [2560, 1920, 1280];
+const VSIZE_MIN = 144;
+
+tools.vsize = {
+  video: true,
+  open() {
+    const v = app.video, c = v.history.current;
+    this.d = { ...c, size: { mode: null, px: null, rate: null, ...(c.size || {}) } };
+    app.vpreview = this.d;
+    this.full = frameOf(v, { ...c, size: null });
+    const long = Math.max(this.full.W, this.full.H);
+    const edges = $('#vsize-edges');
+    edges.textContent = '';
+    const chip = (label, mode, px, word) => {
+      const b = document.createElement('button');
+      b.className = 'chip' + (word ? ' word' : '');
+      b.textContent = label;
+      b.dataset.mode = mode || '';
+      b.dataset.px = px || '';
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', () => this.setSize(mode, px));
+      edges.append(b);
+    };
+    chip('Original', null, null, true);
+    if (this.full.W > 1080) chip('1080 wide', 'width', 1080, true);
+    for (const e of VSIZE_EDGES.filter((x) => x < long)) chip(String(e), 'long', e, false);
+    for (const el of [$('#vsize-slider'), $('#vsize-long')]) { el.min = String(Math.min(VSIZE_MIN, long)); el.max = String(long); }
+    const rates = $('#vsize-rates');
+    rates.textContent = '';
+    for (const r of [null, ...core.video.ratesBelow(this.full.base)]) {
+      const b = document.createElement('button');
+      b.dataset.rate = r ? String(r) : '';
+      b.textContent = String(r || this.full.base);
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', () => { this.d.size.rate = r; this.sync(); });
+      rates.append(b);
+    }
+    this.sync();
+  },
+  setSize(mode, px) { Object.assign(this.d.size, { mode, px }); this.sync(); },
+  // A long edge from the slider or the number field: even (rounded down), at least VSIZE_MIN, and
+  // back to the original size at (or past) the frame's own long edge.
+  setLong(n) {
+    const long = Math.max(this.full.W, this.full.H);
+    if (!(n > 0)) return;
+    const e = Math.floor(Math.min(long, Math.max(Math.min(VSIZE_MIN, long), n)) / 2) * 2;
+    if (e >= long - 1) this.setSize(null, null); else this.setSize('long', e);
+  },
+  sync() {
+    const v = app.video, d = this.d.size, f = frameOf(v, this.d), j = joinPlan(v, this.d), full = this.full;
+    setPressed($$('#vsize-edges .chip'), (b) => b.dataset.mode === (d.mode || '') && (!d.mode || +b.dataset.px === d.px));
+    setPressed($$('#vsize-rates button'), (b) => (b.dataset.rate ? +b.dataset.rate : null) === (f.rate === f.base ? null : f.rate));
+    const long = Math.max(f.W, f.H);
+    $('#vsize-slider').value = String(long);
+    if (document.activeElement !== $('#vsize-long')) $('#vsize-long').value = String(long);
+    $('#vsize-from').textContent = fmtDims(full.W, full.H) + ' · ' + full.base + ' fps';
+    $('#vsize-to').textContent = fmtDims(f.W, f.H) + ' · ' + f.rate + ' fps';
+    $('#vsize-out').textContent = fmtDims(f.W, f.H) + ' · ' + f.rate + ' fps · ' + (j.encode ? 're-encode' : 'copy');
+    const lines = [];
+    if (f.sized || f.rate !== f.base) {
+      lines.push('Export will re-encode the picture to H.264' + (f.rate !== f.base ? ', dropping frames to make ' + f.rate + ' fps' : '') + '.' +
+        (j.hdr ? ' HDR becomes SDR.' : ''));
+    }
+    if (!core.video.ratesBelow(full.base).length) lines.push(full.base + ' fps is already as low as retouch goes.');
+    const note = $('#vsize-note');
+    note.hidden = !lines.length;
+    note.textContent = lines.join(' ');
+    playerRule();
+  },
+  apply() {
+    const v = app.video, d = this.d.size;
+    const size = d.mode || d.rate ? { mode: d.mode, px: d.mode ? d.px : null, rate: d.rate } : null;
+    if (JSON.stringify(size) === JSON.stringify(v.history.current.size || null)) return;
+    v.history.push({ size }, 'Size');
+    afterHistoryChange();
+  },
+};
+$('#vsize-slider').addEventListener('input', (e) => tools.vsize.setLong(+e.target.value));
+$('#vsize-long').addEventListener('change', (e) => tools.vsize.setLong(+e.target.value));
+
+/* ---------- Tool: canvas ---------- */
+
+// The photo Add canvas tool for video: pad the frame out to a ratio, with a margin,
+// filled with a colour or the frame itself blurred (MP4 video cannot be see-through).
+// Drag the picture to move it. The frame keeps within the clip's long edge, so the
+// picture shrinks inside a frame of another shape.
+tools.vpad = {
+  video: true,
+  s: null,          // the last settings, kept for the next time the sheet opens
+  open() {
+    const c = app.video.history.current;
+    this.s = c.pad ? { ...c.pad } : { ...(this.s || { ratio: '1:1', margin: 0, fill: 'colour', colour: '#000000', blur: 0.5 }), px: 0.5, py: 0.5 };
+    this.d = { ...c, pad: this.s };
+    app.vpreview = this.d;
+    this.drag = null;
+    player.pause();
+    ratioChips($('#vpad-ratios'), ['original', '1:1', '4:5', '1.91:1', '9:16', '3:4'], (id) => { this.s.ratio = id; this.sync(); });
+    this.sync();
+  },
+  close() { this.drag = null; document.body.removeAttribute('data-vpad-move'); },
+  sync() {
+    const s = this.s, v = app.video, f = frameOf(v, this.d), j = joinPlan(v, this.d);
+    setPressed($$('#vpad-ratios .chip'), (b) => b.dataset.ratio === s.ratio);
+    setPressed($$('[data-vfill]'), (b) => b.dataset.vfill === s.fill);
+    setPressed($$('[data-vcolour]'), (b) => b.dataset.vcolour.toLowerCase() === s.colour.toLowerCase());
+    $('#vpad-colour').value = s.colour.toLowerCase();
+    $('#vpad-colour-row').hidden = s.fill !== 'colour';
+    $('#vpad-blur-row').hidden = s.fill !== 'blur';
+    const pct = Math.round(s.margin * 1000) / 10;
+    $('#vpad-margin').value = String(pct);
+    $('#vpad-margin-out').textContent = pct + ' %';
+    $('#vpad-blur').value = String(Math.round(s.blur * 100));
+    $('#vpad-blur-out').textContent = String(Math.round(s.blur * 100));
+    $('#vpad-out').textContent = f.padded ? 'frame ' + fmtDims(f.W, f.H) + ' · re-encode' : 'no canvas';
+    const lines = [];
+    if (f.padded) {
+      lines.push('Export will re-encode the picture to H.264 at ' + fmtDims(f.W, f.H) + '.' +
+        (f.shrunk ? ' The frame keeps within the clip\'s size, so the picture shrinks to ' + fmtDims(f.w, f.h) + ' inside it.' : '') +
+        (j.hdr ? ' HDR becomes SDR.' : ''));
+    }
+    const note = $('#vpad-note');
+    note.hidden = !lines.length;
+    note.textContent = lines.join(' ');
+    document.body.toggleAttribute('data-vpad-move', f.W > f.w + 1 || f.H > f.h + 1);
+    playerRule();
+  },
+  // Drag the picture: the share of the spare room on each side follows the finger.
+  pointerDown(x, y) {
+    const f = frameView.f;
+    if (!f || (f.W <= f.w && f.H <= f.h)) return;
+    this.drag = { x, y, px: this.s.px, py: this.s.py, f, k: frameView.k };
+  },
+  pointerMove(x, y) {
+    const d = this.drag;
+    if (!d) return;
+    if (d.f.W > d.f.w) this.s.px = Math.min(1, Math.max(0, d.px + (x - d.x) / d.k / (d.f.W - d.f.w)));
+    if (d.f.H > d.f.h) this.s.py = Math.min(1, Math.max(0, d.py + (y - d.y) / d.k / (d.f.H - d.f.h)));
+    this.sync();
+  },
+  apply() {
+    const v = app.video, f = frameOf(v, this.d);
+    const pad = f.padded ? { ...this.s } : null;
+    if (JSON.stringify(pad) === JSON.stringify(v.history.current.pad || null)) return;
+    v.history.push({ pad }, 'Canvas');
+    afterHistoryChange();
+  },
+};
+{
+  const t = tools.vpad, stage = $('#stage');
+  stage.addEventListener('pointerdown', (e) => {
+    if (app.tool !== t || app.holding || !app.video) return;
+    try { stage.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
+    t.pointerDown(e.clientX, e.clientY);
+  });
+  stage.addEventListener('pointermove', (e) => { if (app.tool === t) t.pointerMove(e.clientX, e.clientY); });
+  const up = () => { t.drag = null; };
+  stage.addEventListener('pointerup', up);
+  stage.addEventListener('pointercancel', up);
+  $('#vpad-margin').addEventListener('input', (e) => { t.s.margin = +e.target.value / 100; t.sync(); });
+  $('#vpad-blur').addEventListener('input', (e) => { t.s.blur = +e.target.value / 100; t.sync(); });
+  $('#vpad-colour').addEventListener('input', (e) => { t.s.colour = e.target.value.toUpperCase(); t.sync(); });
+  for (const b of $$('[data-vfill]')) b.addEventListener('click', () => { t.s.fill = b.dataset.vfill; t.sync(); });
+  for (const b of $$('[data-vcolour]')) b.addEventListener('click', () => { t.s.colour = b.dataset.vcolour; t.sync(); });
+  $('#vpad-centre').addEventListener('click', () => { t.s.px = 0.5; t.s.py = 0.5; t.sync(); });
+}
+
 /* ---------- Tool: sound ---------- */
 
 tools.sound = {
@@ -5500,22 +5870,27 @@ async function copyPackets(MB, v, r, j, vsrc, asrc, progress, wanted) {
   return true;
 }
 
-// Re-encode: every frame of the export, decoded from its clip, scaled to fit the
-// export's size (turned upright, black bars where the shape differs) and handed
-// to the H.264 encoder. The frames are evenly spaced at the export's rate; each
-// shows the clip's frame that is on screen at that moment.
+// Re-encode: every frame of the export, decoded from its clip (turned upright),
+// scaled into the picture's place in the frame and handed to the H.264 encoder.
+// Round it goes the canvas fill: a colour, or this very frame stretched to cover the
+// frame and blurred; black where there is no canvas and a clip's shape differs. The
+// frames are evenly spaced at the export's rate; each shows the clip's frame that is
+// on screen at that moment, so a lower rate drops frames.
 async function encodeFrames(MB, v, r, j, canvas, vsrc, progress, wanted) {
   const ctx = canvas.getContext('2d', { alpha: false });
+  ctx.imageSmoothingQuality = 'high';
   let g = 0;
   for (let n = 0; n < r.pieces.length; n++) {
-    const c = v.clips[r.pieces[n].clip];
-    const sink = new MB.CanvasSink(c.vt, { width: j.w, height: j.h, fit: 'contain', poolSize: 2 });
-    for await (const wc of sink.canvasesAtTimestamps(j.plans[n].times)) {
+    const c = v.clips[r.pieces[n].clip], box = core.video.fitIn(j.pic, c.info.width, c.info.height);
+    const sink = new MB.CanvasSink(c.vt, { width: box.w, height: box.h, fit: 'fill', poolSize: 2 });
+    // A hair past each frame time (0.1 ms, far less than a frame even at 240 fps), so a
+    // source frame stamped a rounding later than the grid time is still the one found.
+    for await (const wc of sink.canvasesAtTimestamps(j.plans[n].times.map((t) => t + 1e-4))) {
       if (!wanted()) return false;
       if (wc) {                         // none before the clip's first frame: the frame before stays
-        ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, j.w, j.h);
-        ctx.drawImage(wc.canvas, 0, 0);
+        if (j.fill.fill === 'blur') core.drawBlurCover(ctx, wc.canvas, j.w, j.h, j.fill.blur);
+        else { ctx.fillStyle = j.fill.colour; ctx.fillRect(0, 0, j.w, j.h); }
+        ctx.drawImage(wc.canvas, box.x, box.y);
       }
       await vsrc.add(g / j.rate, 1 / j.rate);
       if (++g % 5 === 0) progress(g / j.frames);
@@ -5660,7 +6035,8 @@ tools.vexport = {
         : 'The clip runs ' + core.video.fmtTime(j.extra) + ' past your end: the last frames before it are built from a frame after it, so that frame comes too.');
     }
     if (j.encode) {
-      lines.push('The picture is re-encoded to H.264 at ' + fmtDims(j.w, j.h) + ', ' + j.rate + ' fps, because ' + j.why.join('; ') + '. Clips of another shape get black bars.' +
+      lines.push('The picture is re-encoded to H.264 at ' + fmtDims(j.w, j.h) + ', ' + j.rate + ' fps, because ' + j.why.join('; ') + '.' +
+        (j.shapes ? (r.pad ? ' Clips of another shape sit inside the picture\'s place, with the canvas fill round them.' : ' Clips of another shape get black bars.') : '') +
         (j.hdr ? ' HDR becomes SDR: this phone cannot encode 10-bit HDR video.' : '') + ' This is slower than a copy and loses a little quality.');
     }
     if (j.sound.mode === 'encode') lines.push('The sound is re-encoded: ' + j.sound.why.join('; ') + '.');
