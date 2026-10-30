@@ -77,7 +77,7 @@ Builds may run in cloud sessions (claude.ai/code) or locally on the rig; both fo
 After Phase 5: the darkroom UI redesign (v0.6.0, 24/10/26). Gary then uses retouch day to day for a few months before deciding whether it becomes the final 1.0 release; fixes in that period follow the same gate.
 
 ## Testing
-- retouch_checks.cjs (static): CSP present, no external origins anywhere in the source, no CDN URLs, required files present, vendored versions recorded.
+- retouch_checks.cjs (static): CSP present, no external origins anywhere in the source, no CDN URLs, required files present, vendored versions recorded, CHANGELOG.md in step with APP_VERSION (see Versions and changes).
 - retouch_behave.cjs (behavioural): real Chromium via Playwright, since canvas and wasm need a real browser. Use synthetic fixtures generated in the test (gradients, shapes, a fake "spot") so results can be asserted numerically: crop dimensions, padding ratios, metadata absence, undo/redo, inpainting fills the spot within a colour tolerance.
 - Video tests build their own synthetic clips in the test (coloured frames and a tone, encoded with WebCodecs), so durations, frame counts, sizes and the absence of an audio track can be asserted as numbers.
 - Segmentation and smoothing tests run against reference/test-images/ when present and skip otherwise. Pictures without people (logos, banners, objects, pets) for trying the cut-out can be tested in a cloud session; photos of people cannot.
@@ -85,6 +85,15 @@ After Phase 5: the darkroom UI redesign (v0.6.0, 24/10/26). Gary then uses retou
 - Everything green before any commit.
 - Phone testing: after each merge, Gary opens jeuron-hue.github.io/retouch on the Pixel. Optional earlier check from the rig: serve locally, connect the Pixel by USB and use adb reverse so the phone opens it as localhost (a secure context for the service worker).
 - Service worker updates: version the cache name in sw.js and bump it with every release, and show an "update available, reload" prompt, so the installed app on the phone never sits on a stale copy. Found 30/10/26: right after tapping Reload, Chrome on the Pixel laid the page out about one navigation bar taller than the screen (the empty screen's bottom band, with the version line, went out of sight; the middle sat half a band lower), fixed by opening the app again. Since v0.9.3 the page height comes from the window's own measures (fitHeight: the smallest of innerHeight, the root's clientHeight and the visual viewport), with 100dvh only as the fallback, and the Video check report ends with a Screen line giving those measures.
+
+## Versions and changes
+The same rule runs in every app repo (retouch, filter, travelboard, icantell), agreed with Gary 30/10/26. The full method is in the version-release skill.
+- Numbers run x.y.z. Patch (z): a fix or retuning, nothing new to learn. Minor (y): something new Gary can do, a finished phase, or a visible redesign; the patch goes back to 0. Major (x): 1.0.0 only when Gary declares the app finished after real use; after that x moves only when something old stops working (saved data, a file format). Until then the app stays on 0.x.
+- One version per release. A release is any change to the app that reaches main. Docs-only and test-only work carries no bump and is listed in the next version's entry. A work-in-progress checkpoint does not bump the version; the bump goes in the commit that completes the release.
+- The bump changes APP_VERSION in retouch.html (the header line and the constant) and CACHE_VERSION in sw.js together, in the release commit, and the commit subject ends with (vX.Y.Z).
+- CHANGELOG.md gets the version's entry in the same commit, at the top (newest first): a heading `## vX.Y.Z, dd/mm/yy HHMM hrs`, optionally followed by `, <phase>`, giving the date and time the release commit is made, in Singapore time; then one or more `- ` lines saying what changed, in plain words. Reasons and phone results stay in this file. A released entry is changed only to correct a fact.
+- retouch_checks.cjs fails if a heading lacks the version, date or time, the newest entry is not the current version, versions or times are out of order, or an entry has no change line.
+- Each release is built on its own branch and merged by Gary through a pull request; the branch is deleted after the merge. Once merged, the release is tagged vX.Y.Z on its commit in main; a session that finds a merged release without a tag adds it.
 
 ## Working with Gary
 - Gary is a process chemist learning to code. Explain each layer in plain words as you build it: what it does and why, not just the code.

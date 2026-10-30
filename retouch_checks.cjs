@@ -9,6 +9,8 @@
 //     and every sha256 recorded there matches the file
 //   - the vendored MediaPipe code holds no telemetry and no other site to call
 //   - the service worker cache version matches APP_VERSION
+//   - CHANGELOG.md: every heading gives version, release date and time; the newest is
+//     APP_VERSION; newest first; each entry has a change line
 //   - the manifest has the share target and icons
 //   - every image in the repo carries no EXIF, XMP, IPTC, GPS or text chunks
 //   - no video files are committed at all (test clips are made inside the tests)
@@ -27,6 +29,40 @@ const ROOT = __dirname;
 const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
 const exists = (f) => fs.existsSync(path.join(ROOT, f));
 
+// CHANGELOG.md (versioning rule, 30/10/26).
+// Every heading is "## <version>, dd/mm/yy HHMM hrs" with an optional ", <label>"; the
+// version is vX.Y.Z, a legacy vN, or Brief. Newest first: the top entry is the current
+// APP_VERSION, x.y.z versions strictly fall, times never rise going down, and every entry
+// has at least one "- " change line.
+function changelogProblems(text, appVersion) {
+  const probs = [];
+  const heads = [];
+  const lines = text.split('\n');
+  lines.forEach((l, i) => { if (l.startsWith('## ')) heads.push(i); });
+  if (!heads.length) return ['no entries'];
+  const cmp = (a, b) => { for (let k = 0; k < 3; k++) if (a[k] !== b[k]) return a[k] - b[k]; return 0; };
+  let prevVer = null, prevStamp = null;
+  heads.forEach((h, n) => {
+    const m = lines[h].match(/^## (v\d+\.\d+\.\d+|v\d+|Brief), (\d\d)\/(\d\d)\/(\d\d) (\d\d)(\d\d) hrs(, .+)?$/);
+    if (!m) { probs.push(`heading not "## vX.Y.Z, dd/mm/yy HHMM hrs": ${lines[h]}`); return; }
+    const [, label, dd, mo, yy, hh, mi] = m;
+    if (+dd < 1 || +dd > 31 || +mo < 1 || +mo > 12 || +hh > 23 || +mi > 59) probs.push(`bad date or time: ${lines[h]}`);
+    if (n === 0 && label !== 'v' + appVersion) probs.push(`newest entry ${label} is not the current version v${appVersion}`);
+    const stamp = yy + mo + dd + hh + mi;
+    if (prevStamp && stamp > prevStamp) probs.push(`${label} is later than the entry above it`);
+    prevStamp = stamp;
+    const xyz = label.match(/^v(\d+)\.(\d+)\.(\d+)$/);
+    if (xyz) {
+      const v = xyz.slice(1).map(Number);
+      if (prevVer && cmp(v, prevVer) >= 0) probs.push(`${label} is not below the version above it`);
+      prevVer = v;
+    }
+    const body = lines.slice(h + 1, heads[n + 1] ?? lines.length);
+    if (!body.some((l) => l.startsWith('- '))) probs.push(`${label} has no "- " change line`);
+  });
+  return probs;
+}
+
 // App source: the files the browser runs.
 const APP_SOURCE = ['retouch.html', 'index.html', 'sw.js', 'manifest.webmanifest'];
 
@@ -34,7 +70,7 @@ const APP_SOURCE = ['retouch.html', 'index.html', 'sw.js', 'manifest.webmanifest
 // minimum; the rest is docs and the test suites.
 const ALLOWED_TOP = new Set([
   'retouch.html', 'index.html', 'manifest.webmanifest', 'sw.js', 'icons', 'vendor',
-  'README.md', 'CLAUDE.md', '.gitignore', '.git', 'package.json', 'package-lock.json',
+  'README.md', 'CLAUDE.md', 'CHANGELOG.md', '.gitignore', '.git', 'package.json', 'package-lock.json',
   'retouch_checks.cjs', 'retouch_behave.cjs', 'retouch_mutate.sh',
   'reference', 'node_modules', // both gitignored
 ]);
@@ -311,7 +347,7 @@ function runChecks() {
   const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 
   check('required files present', () => {
-    const req = [...APP_SOURCE, 'README.md', 'CLAUDE.md', '.gitignore', 'retouch_checks.cjs', 'retouch_behave.cjs', 'retouch_mutate.sh'];
+    const req = [...APP_SOURCE, 'README.md', 'CLAUDE.md', 'CHANGELOG.md', '.gitignore', 'retouch_checks.cjs', 'retouch_behave.cjs', 'retouch_mutate.sh'];
     const missing = req.filter((f) => !exists(f));
     assert(!missing.length, 'missing: ' + missing.join(', '));
   });
@@ -482,6 +518,15 @@ function runChecks() {
     const pkg = JSON.parse(read('package.json'));
     assert(pkg.version === app, 'package.json version ' + pkg.version + ' differs from ' + app);
     return 'v' + app;
+  });
+
+  // Every release adds its entry to CHANGELOG.md in the same commit as the
+  // version bump: the newest entry must be the version the app says it is.
+  check('CHANGELOG.md: version, release date and time, change; newest first', () => {
+    const app = (read('retouch.html').match(/const APP_VERSION = '([^']+)'/) || [])[1];
+    const probs = changelogProblems(read('CHANGELOG.md'), app);
+    assert(!probs.length, probs.join('; '));
+    return (read('CHANGELOG.md').match(/^## /gm) || []).length + ' entries';
   });
 
   check('working-size ceiling is one named constant', () => {
