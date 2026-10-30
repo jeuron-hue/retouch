@@ -306,9 +306,15 @@ video: bitrate cap missing ||| Math.round(Math.min(60e6, Math.max(2e6, ||| Math.
 video: piece at gives the next piece at a join ||| if (t < o + len - core.video.EPS || i === pieces.length - 1) ||| if (t <= o + len + core.video.EPS || i === pieces.length - 1)
 video: piece at runs past the end ||| at: pieces[i].start + Math.min(len, Math.max(0, t - o)) ||| at: pieces[i].start + Math.max(0, t - o)
 video: time of counts the piece itself ||| for (let k = 0; k < i; k++) o += pieces[k].end - pieces[k].start; ||| for (let k = 0; k <= i; k++) o += pieces[k].end - pieces[k].start;
-video: split at the playhead, not a keyframe ||| return [...pieces.slice(0, i), { ...p, end: k }, { ...p, start: k }, ||| return [...pieces.slice(0, i), { ...p, end: t }, { ...p, start: k },
-video: split at the piece start ||| if (k <= p.start + E || k >= p.end - E) return null; ||| if (k < p.start - E || k >= p.end - E) return null;
-video: split drops the pieces after ||| { ...p, start: k }, ...pieces.slice(i + 1)]; ||| { ...p, start: k }];
+video: split at the playhead, not a keyframe ||| core.video.splitAt(pieces, i, core.video.keyBefore(keys, t)); ||| core.video.splitAt(pieces, i, t);
+video: split at the piece start ||| if (at <= p.start + E || at >= p.end - E) return null; ||| if (at < p.start - E || at >= p.end - E) return null;
+video: split at the piece end ||| if (at <= p.start + E || at >= p.end - E) return null; ||| if (at <= p.start + E || at > p.end + E) return null;
+video: split drops the pieces after ||| { ...p, start: at }, ...pieces.slice(i + 1)]; ||| { ...p, start: at }];
+video: split end left where it was ||| return [...pieces.slice(0, i), { ...p, end: at }, ||| return [...pieces.slice(0, i), { ...p },
+video: exact cut seen on every piece ||| if (!keysOf(p.clip).some((k) => Math.abs(k - p.start) <= core.video.EPS)) out.push(n + 1); ||| out.push(n + 1);
+video: exact cut needs a hair-exact keyframe ||| if (!keysOf(p.clip).some((k) => Math.abs(k - p.start) <= core.video.EPS)) ||| if (!keysOf(p.clip).some((k) => k === p.start))
+video: exact cut counts from 0 ||| out.push(n + 1); }); ||| out.push(n); });
+video: exact cut reads the wrong clip's keyframes ||| keysOf(p.clip).some ||| keysOf(0).some
 EOF
 )
 

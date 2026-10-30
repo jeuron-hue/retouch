@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.9.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.9.1 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -707,6 +707,7 @@ fieldset:disabled{opacity:.4}
       <div class="cell"><span class="k">Length</span><span class="v key" id="trim-len"></span></div>
     </div>
     <p class="note" id="trim-note" hidden></p>
+    <button class="btn" id="trim-exact" hidden></button>
     <div class="tiles">
       <button class="tile" id="trim-play"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5z"/></svg>Play</button>
       <button class="tile" id="trim-set-start"><svg viewBox="0 0 24 24"><path d="M6 4v16"/><path d="M10 12h10M14 8l-4 4 4 4"/></svg>Start here</button>
@@ -732,6 +733,7 @@ fieldset:disabled{opacity:.4}
       <div class="cell"><span class="k">Total</span><span class="v key" id="cut-total"></span></div>
     </div>
     <p class="note" id="cut-note" hidden></p>
+    <button class="btn" id="cut-exact" hidden></button>
     <div class="tiles">
       <button class="tile" id="cut-play"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5z"/></svg>Play</button>
       <button class="tile" id="cut-split"><svg viewBox="0 0 24 24"><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/><path d="M8.3 15.7L17 4M15.7 15.7L7 4"/></svg>Split</button>
@@ -854,7 +856,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.9.0';
+const APP_VERSION = '0.9.1';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -2793,14 +2795,27 @@ core.video.timeOf = (pieces, i, at) => {
   return o + at - pieces[i].start;
 };
 
+// Split piece i at time at in its clip, exactly there. Returns the new list, or
+// null when at is not inside the piece.
+core.video.splitAt = (pieces, i, at) => {
+  const p = pieces[i], E = core.video.EPS;
+  if (at <= p.start + E || at >= p.end - E) return null;
+  return [...pieces.slice(0, i), { ...p, end: at }, { ...p, start: at }, ...pieces.slice(i + 1)];
+};
+
 // Split piece i at time t in its clip. The cut goes back to the keyframe at or
 // before t, so both halves start on a keyframe and still copy. Returns the new list,
 // or null when the piece has no keyframe after its start to cut at.
-core.video.split = (pieces, i, keys, t) => {
-  const p = pieces[i], E = core.video.EPS;
-  const k = core.video.keyBefore(keys, t);
-  if (k <= p.start + E || k >= p.end - E) return null;
-  return [...pieces.slice(0, i), { ...p, end: k }, { ...p, start: k }, ...pieces.slice(i + 1)];
+core.video.split = (pieces, i, keys, t) => core.video.splitAt(pieces, i, core.video.keyBefore(keys, t));
+
+// Exact cuts: a piece may also start between keyframes, where the user asked for it
+// (Split exactly, Start exactly). Such a piece cannot be copied, so the export is
+// re-encoded. keysOf(clip) gives a clip's keyframe times. Returns the numbers
+// (counting from 1) of the pieces that start between keyframes.
+core.video.exactCuts = (pieces, keysOf) => {
+  const out = [];
+  pieces.forEach((p, n) => { if (!keysOf(p.clip).some((k) => Math.abs(k - p.start) <= core.video.EPS)) out.push(n + 1); });
+  return out;
 };
 
 /* Video edits: each step is the whole recipe { pieces, audio } (pieces as above,
@@ -4756,6 +4771,9 @@ $('#btn-export').addEventListener('click', () => openTool(app.video ? 'vexport' 
    packets and the frames. */
 
 const VIDEO_EXPORT_TEMP = 'retouch-export.mp4';   // scratch file in the browser's private storage for the clip being written
+// When a split or a trim start would snap back more than this (seconds) to reach a
+// keyframe, the sheet offers to cut exactly there instead, at the cost of a re-encode.
+const SNAP_OFFER = 0.5;
 
 let mediabunny = null;
 function loadMediabunny() {
@@ -4874,6 +4892,11 @@ function joinPlan(v, r) {
   const used = [...new Set(r.pieces.map((p) => p.clip))];
   const clips = used.map((i) => v.clips[i]);
   const why = core.video.joinCheck(clips.map((c, k) => ({ name: clipName(used[k]), ...c.facts })));
+  const exact = core.video.exactCuts(r.pieces, (i) => v.clips[i].keys);
+  if (exact.length) {
+    why.push((exact.length > 1 ? 'pieces ' + exact.slice(0, -1).join(', ') + ' and ' + exact[exact.length - 1] + ' start' : 'piece ' + exact[0] + ' starts') +
+      ' between keyframes (an exact cut)');
+  }
   const sound = core.video.soundCheck(clips.map((c, k) => ({ name: clipName(used[k]), ...c.sfacts })), r.audio);
   const first = clips[0], encode = why.length > 0, rate = first.facts.rate;
   const plans = encode
@@ -5080,6 +5103,16 @@ tools.trim = {
     x.fillStyle = '#4A4640';
     for (const k of this.clip.keys) x.fillRect(Math.round(this.frac(k) * (c.width - 1)), 0, Math.max(1, Math.round(dpr)), c.height);
   },
+  // Start exactly on the frame that was on screen when Start here was tapped, between
+  // keyframes. The piece can no longer be copied, so the export is re-encoded.
+  startExact() {
+    const v = this.clip, E = core.video.EPS;
+    if (this.picked === null) return;
+    const f = frameBefore(v.starts, this.picked + 0.0005);
+    this.picked = null;
+    if (f < this.d.end - E) this.d.start = f;
+    this.preview(this.d.start);
+  },
   // Start: the keyframe at or before t, and always before the end.
   setStart(t, fromPlayhead) {
     const v = this.clip, E = core.video.EPS;
@@ -5109,9 +5142,13 @@ tools.trim = {
     $('#trim-from').textContent = core.video.fmtTime(d.start - v.first);
     $('#trim-to').textContent = core.video.fmtTime(d.end - v.first);
     $('#trim-len').textContent = core.video.fmtTime(d.end - d.start);
-    const note = $('#trim-note');
-    note.hidden = this.picked === null;
+    const note = $('#trim-note'), exact = !v.keys.some((k) => Math.abs(k - d.start) <= core.video.EPS);
+    note.hidden = this.picked === null && !exact;
     if (this.picked !== null) note.textContent = 'Start moved back to ' + core.video.fmtTime(d.start - v.first) + ', the keyframe before ' + core.video.fmtTime(this.picked - v.first) + ', so the clip is copied without re-encoding.';
+    else if (exact) note.textContent = 'Starts exactly at ' + core.video.fmtTime(d.start - v.first) + ', between keyframes, so the export will be re-encoded to H.264.';
+    const offer = $('#trim-exact');
+    offer.hidden = this.picked === null || this.picked - d.start <= SNAP_OFFER;
+    if (!offer.hidden) offer.textContent = 'Start exactly at ' + core.video.fmtTime(frameBefore(v.starts, this.picked + 0.0005) - v.first) + ' (re-encodes)';
     showClock();
   },
   apply() {
@@ -5147,6 +5184,7 @@ tools.trim = {
   };
   $('#trim-play').addEventListener('click', () => { showPiece(0, t.d.start, true); });
   $('#trim-set-start').addEventListener('click', () => t.setStart(playerTime(), true));
+  $('#trim-exact').addEventListener('click', () => t.startExact());
   $('#trim-set-end').addEventListener('click', () => {
     // Keep the frame on screen: the end goes to the edge after it.
     const v = t.clip, cur = frameBefore(v.starts, playerTime() + 0.0005);
@@ -5170,6 +5208,7 @@ tools.cut = {
     this.sel = Math.min(v.sel, this.d.pieces.length - 1);
     this.joined = false;
     this.msg = null;
+    this.offer = null;
     app.vpreview = this.d;
     player.pause();
     showPiece(this.sel, this.d.pieces[this.sel].start);
@@ -5218,15 +5257,25 @@ tools.cut = {
     const note = $('#cut-note');
     note.hidden = !lines.length;
     note.textContent = lines.join(' ');
+    const offer = $('#cut-exact');
+    offer.hidden = !this.offer;
+    if (this.offer) {
+      const c = v.clips[this.offer.pieces[this.offer.i].clip];
+      offer.textContent = 'Split exactly at ' + core.video.fmtTime(frameBefore(c.starts, this.offer.t + 0.0005) - c.first) + ' (re-encodes)';
+    }
     $('#cut-out').textContent = d.pieces.length + (d.pieces.length > 1 ? ' pieces' : ' piece') + ' · ' + (j.encode ? 're-encode to H.264' : 'copy, no re-encode');
     this.showHead();
   },
+  // Split at the keyframe at or before the playhead. When that is more than
+  // SNAP_OFFER back (or there is none), offer to split exactly at the playhead.
   split() {
     const d = this.d, i = Math.min(pl.i, d.pieces.length - 1), p = d.pieces[i], clip = app.video.clips[p.clip];
-    const t = playerTime();
+    const t = playerTime(), before = d.pieces.map((q) => ({ ...q }));
     const next = core.video.split(d.pieces, i, clip.keys, t);
+    const exactOk = !!core.video.splitAt(before, i, frameBefore(clip.starts, t + 0.0005));
     if (!next) {
-      this.msg = 'No keyframe inside this piece before the playhead, so it cannot be split there. Move the playhead later.';
+      this.msg = 'No keyframe inside this piece before the playhead, so it cannot be split there without re-encoding.';
+      this.offer = exactOk ? { pieces: before, i, t } : null;
       this.sync();
       return;
     }
@@ -5235,12 +5284,27 @@ tools.cut = {
     this.msg = k < t - 0.005 ? 'Split at ' + core.video.fmtTime(k - clip.first) + ' in ' + clipName(p.clip) + ', the keyframe before ' +
       core.video.fmtTime(t - clip.first) + ', so both pieces copy without re-encoding.' : null;
     this.pick(i + 1, k);
+    this.offer = exactOk && t - k > SNAP_OFFER ? { pieces: before, i, t } : null;
+    this.sync();
+  },
+  // The offered exact split: undo the snapped one and cut on the frame that was on screen.
+  splitExact() {
+    const o = this.offer, d = this.d;
+    if (!o) return;
+    const clip = app.video.clips[o.pieces[o.i].clip], f = frameBefore(clip.starts, o.t + 0.0005);
+    const next = core.video.splitAt(o.pieces, o.i, f);
+    if (!next) return;
+    d.pieces.splice(0, d.pieces.length, ...next);
+    this.msg = 'Split exactly at ' + core.video.fmtTime(f - clip.first) + ' in ' + clipName(o.pieces[o.i].clip) + '.';
+    this.offer = null;
+    this.pick(o.i + 1, f);
   },
   remove() {
     const d = this.d;
     if (d.pieces.length < 2) return;
     d.pieces.splice(this.sel, 1);
     this.msg = null;
+    this.offer = null;
     this.pick(Math.min(this.sel, d.pieces.length - 1));
   },
   move(step) {
@@ -5248,6 +5312,7 @@ tools.cut = {
     if (k < 0 || k >= d.pieces.length) return;
     [d.pieces[i], d.pieces[k]] = [d.pieces[k], d.pieces[i]];
     this.msg = null;
+    this.offer = null;
     this.pick(k);
   },
   // Read each file and put it after the picked piece, whole.
@@ -5261,6 +5326,7 @@ tools.cut = {
       this.joined = true;
     }
     this.msg = null;
+    this.offer = null;
     this.pick(this.sel);
   },
   apply() {
@@ -5277,6 +5343,7 @@ tools.cut = {
     const r = line.getBoundingClientRect(), len = t.total();
     const p = core.video.pieceAt(t.d.pieces, Math.min(len - 0.001, Math.min(1, Math.max(0, (x - r.left) / r.width)) * len));
     t.msg = null;
+    t.offer = null;
     t.pick(p.i, Math.min(t.d.pieces[p.i].end - 0.001, p.at));
   };
   line.addEventListener('pointerdown', (e) => {
@@ -5292,6 +5359,7 @@ tools.cut = {
   line.addEventListener('pointercancel', up);
   $('#cut-play').addEventListener('click', () => { const p = t.d.pieces[t.sel]; showPiece(t.sel, Math.min(p.end - 0.02, Math.max(p.start, pl.i === t.sel ? playerTime() : p.start)), true); });
   $('#cut-split').addEventListener('click', () => t.split());
+  $('#cut-exact').addEventListener('click', () => t.splitExact());
   $('#cut-delete').addEventListener('click', () => t.remove());
   $('#cut-earlier').addEventListener('click', () => t.move(-1));
   $('#cut-later').addEventListener('click', () => t.move(1));

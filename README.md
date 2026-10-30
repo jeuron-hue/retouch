@@ -36,6 +36,7 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 - Open MP4, MOV or WebM videos, from the Open button or by sharing a video to retouch from Google Photos. Pick or share several videos at once and they open joined end to end. The top bar shows the size and length; Chrome's own player plays it.
 - Trim: drag the start and end on the bar, or play to a point and tap Start here or End here. With several pieces, Trim works on the one picked in Cut. Undo and redo work as for photos.
 - Cut and join: the Cut sheet shows the video as a row of pieces. Split cuts the piece under the playhead in two; Delete drops the picked piece (split either side of a part, then delete it, to cut out the middle); Earlier and Later change the order; Add puts more videos after the picked piece. Tap a piece to pick it.
+- Exact cuts: when Split or Trim's Start here would snap back more than half a second to reach a keyframe (some videos saved by other apps have keyframes 4 s apart), the sheet offers to cut exactly at the playhead instead. That piece can no longer be copied, so the export is re-encoded to H.264, with the same warnings as a join.
 - Sound: keep the sound or remove it.
 - Export copies the chosen pieces into a new MP4 without decoding them, so it is fast and the picture and sound are exactly as recorded, 10-bit HDR included. Share or download it as with photos.
 - Joined videos are copied the same way when they were all recorded with the same settings (same size, frame rate, codec and HDR or not). When they differ, the picture is re-encoded to H.264 at the size and frame rate of the first piece; videos of another shape are scaled to fit inside it with black bars. Re-encoding is slower and loses a little quality, and the phone cannot encode 10-bit HDR, so HDR video becomes SDR. The export sheet says why and waits for a tap on Re-encode before it starts. Sound is copied when every video's sound matches, and re-encoded otherwise (with silence for a video that has none).
@@ -44,7 +45,7 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 
 ## Known limitations
 
-- Video trims and splits start on a keyframe (see above), so a piece can begin up to about a second before the chosen point. This holds even when a join is re-encoded, so a piece starts in the same place either way.
+- Video trims and splits start on a keyframe (see above), so a piece can begin before the chosen point: up to about a second on a Pixel clip, more on videos with keyframes further apart. An exact cut avoids that at the cost of a re-encode. Without one, a piece starts in the same place whether the export is copied or re-encoded.
 - Right after a cut, the first fraction of a second of sound can click faintly, because sound packets lean on the one before them.
 - Video exports are written to the browser's private storage on the phone first (a long 4K clip can be hundreds of MB). The copy is replaced by the next export.
 - HDR10 (PQ) videos with separate brightness boxes (mdcv, clli) lose those boxes on export; the colour tags are kept. HLG video, the other HDR kind, does not use them.

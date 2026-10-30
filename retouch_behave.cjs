@@ -3635,6 +3635,9 @@ test('video core: frame rates, join and sound checks, frame grid, sound at a joi
       at: [0, 1.4, 1.5, 2.2, 2.5, 9].map((t) => v.pieceAt(ps, t)), of: [v.timeOf(ps, 0, 1), v.timeOf(ps, 0, 2), v.timeOf(ps, 1, 0.5)],
       split: [v.split([{ clip: 0, start: 0, end: 3 }, { clip: 1, start: 0, end: 2 }], 0, [0, 1, 2], 1.2), v.split([{ clip: 0, start: 0, end: 3 }, { clip: 1, start: 0, end: 2 }], 1, [0, 1], 1.6), v.split([{ clip: 1, start: 0, end: 2 }], 0, [0, 1], 0.6),
         v.split([{ clip: 0, start: 1, end: 3 }], 0, [0, 1, 2], 1), v.split([{ clip: 0, start: 0, end: 2 }], 0, [0, 1, 2], 2.5), v.split([{ clip: 0, start: 0, end: 3 }], 0, [0, 1, 2], 2)],
+      splitAt: [v.splitAt([{ clip: 0, start: 0, end: 3 }, { clip: 1, start: 0, end: 2 }], 0, 1.3), v.splitAt([{ clip: 0, start: 1, end: 3 }], 0, 1), v.splitAt([{ clip: 0, start: 1, end: 3 }], 0, 3)],
+      exact: [v.exactCuts([{ clip: 0, start: 0 }, { clip: 0, start: 1.3 }, { clip: 1, start: 2 }, { clip: 1, start: 0.5 + 1e-9 }], (c) => (c ? [0, 0.5, 2] : [0, 1])),
+        v.exactCuts([{ clip: 0, start: 1 }], () => [0, 1])],
     };
   });
   assert(JSON.stringify(r.rates) === JSON.stringify([30, 29.97, 30, 25, 59.94, 60, 27.33, 23.976, 120, 26, 31]), 'rates ' + r.rates);
@@ -3660,6 +3663,8 @@ test('video core: frame rates, join and sound checks, frame grid, sound at a joi
   assert(JSON.stringify(r.of) === JSON.stringify([0, 1, 2]), 'time of ' + r.of);
   assert(JSON.stringify(r.split) === JSON.stringify([[{ clip: 0, start: 0, end: 1 }, { clip: 0, start: 1, end: 3 }, { clip: 1, start: 0, end: 2 }],
     [{ clip: 0, start: 0, end: 3 }, { clip: 1, start: 0, end: 1 }, { clip: 1, start: 1, end: 2 }], null, null, null, [{ clip: 0, start: 0, end: 2 }, { clip: 0, start: 2, end: 3 }]]), 'split ' + JSON.stringify(r.split));
+  assert(JSON.stringify(r.splitAt) === JSON.stringify([[{ clip: 0, start: 0, end: 1.3 }, { clip: 0, start: 1.3, end: 3 }, { clip: 1, start: 0, end: 2 }], null, null]), 'exact split ' + JSON.stringify(r.splitAt));
+  assert(JSON.stringify(r.exact) === JSON.stringify([[2], []]), 'pieces that start between keyframes ' + JSON.stringify(r.exact));
   await ctx.close();
 }, { core: true });
 
@@ -3717,6 +3722,71 @@ test('video cut: split twice, delete the middle; the rest copies byte for byte a
   assert(page.errors.length === 0, page.errors.join('; '));
   await ctx.close();
 }, { core: true });
+
+test('video cut: with keyframes far apart, Split and Start here offer an exact cut, which re-encodes', async () => {
+  const { ctx, page } = await newApp();
+  // Keyframes 3 s apart (at 0 and 3 s), as some re-saved videos have; 110 frames.
+  const src = await makeClip(page, { frames: 110, gop: 90 });
+  await loadVideo(page, src);
+  await page.click('[data-open-tool="cut"]');
+  // No keyframe inside the piece before 2.2 s: it offers the exact split.
+  await seekPlayer(page, 2.2);
+  await page.click('#cut-split');
+  assert(/cannot be split there without re-encoding/.test(await page.textContent('#cut-note')), 'note ' + await page.textContent('#cut-note'));
+  assert((await page.textContent('#cut-exact')) === 'Split exactly at 0:02.20 (re-encodes)', 'offer ' + await page.textContent('#cut-exact'));
+  await page.click('#cut-exact');
+  assert(JSON.stringify(await pieces(page)) === JSON.stringify([[0, 0, 2.2], [0, 2.2, 3.667]]), 'split exactly ' + JSON.stringify(await pieces(page)));
+  assert(await page.isHidden('#cut-exact') && (await page.textContent('#cut-out')) === '2 pieces · re-encode to H.264', 'strip ' + await page.textContent('#cut-out'));
+  assert(/Split exactly at 0:02\.20 in clip 1\. Export will re-encode the picture to H\.264 at 320 × 240, 30 fps: piece 2 starts between keyframes \(an exact cut\)\./.test(await page.textContent('#cut-note')), 'note ' + await page.textContent('#cut-note'));
+  // Moving the exact piece first: the message follows it.
+  await page.click('#cut-earlier');
+  assert(/piece 1 starts between keyframes/.test(await page.textContent('#cut-note')), 'the exact piece is now piece 1');
+  // Pick the piece from 0 (now second) on the bar and delete it; 2.2 s to the end stays.
+  const b0 = await page.locator('#cut-line').boundingBox();
+  await page.mouse.click(b0.x + b0.width * 0.9, b0.y + b0.height / 2);
+  await page.click('#cut-delete');
+  assert(JSON.stringify(await pieces(page)) === JSON.stringify([[0, 2.2, 3.667]]), 'kept the end ' + JSON.stringify(await pieces(page)));
+  await applyTool(page, 'cut');
+  const { bytes, note } = await reencodeVideo(page);
+  assert(/piece 1 starts between keyframes \(an exact cut\)/.test(note), 'export note ' + note);
+  const v = vtrack(parseMp4(bytes));
+  assert(v.sampleCount === 44, 'frames 66 to 109: ' + v.sampleCount);
+  const p = await probe(page, bytes, { at: [0.01] });
+  near(p.colors[0][0][0], 152, 8, 'starts on source frame 66');
+  // A snap of 0.5 s or less is not worth a re-encode: no offer.
+  await page.click('#btn-undo');
+  await page.click('[data-open-tool="cut"]');
+  await seekPlayer(page, 3.4);
+  await page.click('#cut-split');
+  assert(await page.isHidden('#cut-exact') && /Split at 0:03\.00/.test(await page.textContent('#cut-note')), 'small snap: no offer');
+  // A bigger snap offers; tapping a piece on the bar takes the offer away.
+  await page.click('.sheet-panel[data-tool="cut"] [data-cancel]');
+  await page.click('[data-open-tool="cut"]');
+  await seekPlayer(page, 3.6);
+  await page.click('#cut-split');
+  assert(await page.isVisible('#cut-exact'), 'a 0.6 s snap offers');
+  const bar = await page.locator('#cut-line').boundingBox();
+  await page.mouse.click(bar.x + bar.width * 0.2, bar.y + bar.height / 2);
+  assert(await page.isHidden('#cut-exact'), 'picking a piece clears the offer');
+  await page.click('.sheet-panel[data-tool="cut"] [data-cancel]');
+  // Trim: Start here at 3.6 s snaps back 0.6 s to 3.0, and offers the exact start.
+  await page.click('[data-open-tool="trim"]');
+  await seekPlayer(page, 3.6);
+  await page.click('#trim-set-start');
+  assert((await page.textContent('#trim-exact')) === 'Start exactly at 0:03.60 (re-encodes)', 'trim offer ' + await page.textContent('#trim-exact'));
+  await page.click('#trim-exact');
+  assert(await page.isHidden('#trim-exact') && /Starts exactly at 0:03\.60, between keyframes, so the export will be re-encoded to H\.264\./.test(await page.textContent('#trim-note')), 'trim note ' + await page.textContent('#trim-note'));
+  near(await page.evaluate(() => retouch.tools.trim.d.start), 3.6, 1e-6, 'start on frame 108');
+  await page.evaluate(() => retouch.tools.trim.setStart(3.4, false));
+  assert(await page.isHidden('#trim-exact') && await page.isHidden('#trim-note'), 'a dragged start snaps again, no offer');
+  near(await page.evaluate(() => retouch.tools.trim.d.start), 3, 1e-6, 'back on the keyframe');
+  // Start here 0.4 s after a keyframe: no offer.
+  await seekPlayer(page, 3.4);
+  await page.click('#trim-set-start');
+  assert(await page.isHidden('#trim-exact') && await page.isVisible('#trim-note'), 'small snap in Trim: note, no offer');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
 
 test('video join: two clips recorded the same way copy end to end, in the order set', async () => {
   const { ctx, page } = await newApp();
