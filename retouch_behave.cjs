@@ -2933,14 +2933,14 @@ test('spot: a tap fills a spot, a stroke fills a scratch; undo stroke; two finge
 /* ---------- Video phase V1: check, open, trim, sound, export ---------- */
 
 // In the page: build a synthetic clip with WebCodecs and the app's own Mediabunny.
-// Frame i is a flat colour whose red level says which frame it is (20 + 2i), so a
-// decoded frame can be traced back. The sound is a tone rising from 440 Hz (so no two
+// Frame i is a flat colour whose red level says which frame it is (20 + 2i, or
+// 20 + step × i), so a decoded frame can be traced back. The sound is a tone rising from 440 Hz (so no two
 // packets are alike and each can be traced too), in Opus (Chromium on
 // Linux has no AAC encoder; the copying code does not care which codec it is).
 // The file is written with the index (moov) last, so a test can add boxes to it.
 const VIDEO_INIT = () => {
   window.__makeClip = async (o = {}) => {
-    const { w = 320, h = 240, fps = 30, frames = 90, gop = 30, audio = true, rotation = 0, colorSpace = null, blue = 64, rate = 48000, channels = 1, mark = false } = o;
+    const { w = 320, h = 240, fps = 30, frames = 90, gop = 30, audio = true, rotation = 0, colorSpace = null, blue = 64, rate = 48000, channels = 1, mark = false, step = 2 } = o;
     const MB = await retouch.loadMediabunny();
     const target = new MB.BufferTarget();
     const out = new MB.Output({ format: new MB.Mp4OutputFormat({ fastStart: false }), target });
@@ -2951,10 +2951,10 @@ const VIDEO_INIT = () => {
     await out.start();
     const vc = [];
     const enc = new VideoEncoder({ output: (c, m) => vc.push([c, m]), error: (e) => { throw e; } });
-    enc.configure({ codec: 'avc1.42001f', width: w, height: h, framerate: fps, bitrate: 1e6 });
+    enc.configure({ codec: w * h > 921600 ? 'avc1.420028' : 'avc1.42001f', width: w, height: h, framerate: fps, bitrate: 1e6 });   // Baseline 4.0 above 720p, else 3.1
     const cv = new OffscreenCanvas(w, h), cx = cv.getContext('2d');
     for (let i = 0; i < frames; i++) {
-      cx.fillStyle = 'rgb(' + (20 + 2 * i) + ',128,' + blue + ')'; cx.fillRect(0, 0, w, h);
+      cx.fillStyle = 'rgb(' + (20 + step * i) + ',128,' + blue + ')'; cx.fillRect(0, 0, w, h);
       if (mark) { cx.fillStyle = '#fff'; cx.fillRect(0, 0, w / 4, h / 4); }     // a white corner, top left as stored
       const f = new VideoFrame(cv, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
       enc.encode(f, { keyFrame: i % gop === 0 }); f.close();
@@ -3310,7 +3310,7 @@ test('video: opens from the picker, shows its facts, plays; photo tools give way
   });
   assert(r.edits === null, 'the photo is closed');
   assert(r.mode === 'video' && r.canvas === 'none' && r.player === 'block', 'video mode ' + JSON.stringify([r.mode, r.canvas, r.player]));
-  assert(JSON.stringify(r.toolsShown) === JSON.stringify(['trim', 'cut', 'sound', 'vcheck']), 'tools ' + r.toolsShown);
+  assert(JSON.stringify(r.toolsShown) === JSON.stringify(['trim', 'cut', 'vsize', 'vpad', 'sound', 'vcheck']), 'tools ' + r.toolsShown);
   assert(r.frames === 90 && r.keys.length === 3 && Math.abs(r.keys[1] - 1) < 1e-6 && r.audio >= 149, 'index ' + JSON.stringify([r.frames, r.keys, r.audio]));
   assert(Math.abs(r.first) < 1e-6 && Math.abs(r.end - 3) < 1e-3, 'length ' + [r.first, r.end]);
   assert(r.info.width === 320 && r.info.height === 240 && Math.abs(r.info.fps - 30) < 0.01 && r.info.codec === 'avc' && r.info.audio.codec === 'opus', 'facts ' + JSON.stringify(r.info));
@@ -3549,7 +3549,7 @@ test('video: phone layout, tap targets at least 44 px in every video sheet', asy
   const wide = () => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
   await loadVideo(page, await makeClip(page, { frames: 30 }));
   let s = await small(); assert(!s.length && await wide(), 'video view: ' + s);
-  for (const t of ['trim', 'cut', 'sound', 'vcheck']) {
+  for (const t of ['trim', 'cut', 'vsize', 'vpad', 'sound', 'vcheck']) {
     await page.click('[data-open-tool="' + t + '"]');
     s = await small(); assert(!s.length && await wide(), t + ': ' + s);
     const stage = await page.locator('#stage').boundingBox();
@@ -4075,6 +4075,196 @@ test('real-photo tests (reference/test-images)', async () => {
     await page.click('#btn-undo');
     console.log('      ' + f + ': person ' + (cov * 100).toFixed(1) + ' %, skin ' + (skin * 100).toFixed(1) + ' %');
   }
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+/* ---------- Video phase V3: size, frame rate, canvas ---------- */
+
+test('video core: frame rates to drop to, the frame for a canvas and a size, a clip fitted in (independent check)', async () => {
+  const { ctx, page } = await newApp();
+  const r = await page.evaluate(() => {
+    const v = retouch.core.video, K4 = 3840 * 2160;
+    const pad = (R, o = {}) => ({ R, margin: 0, px: 0.5, py: 0.5, ...o });
+    return {
+      rates: [60, 59.94, 30, 29.97, 25, 24.93, 24, 23.976, 120].map(v.ratesBelow),
+      frames: [
+        v.frameFor(1920, 1080, null, null, K4),
+        v.frameFor(1081, 721, null, null, K4),
+        v.frameFor(1920, 1080, pad(4 / 5), null, K4),
+        v.frameFor(1080, 1920, pad(9 / 16), null, K4),
+        v.frameFor(1000, 500, pad(null, { margin: 0.05 }), null, K4),
+        v.frameFor(1920, 1080, null, { mode: 'long', px: 1280 }, K4),
+        v.frameFor(1080, 1920, null, { mode: 'width', px: 1080 }, K4),
+        v.frameFor(1920, 1080, null, { mode: 'width', px: 1080 }, K4),
+        v.frameFor(1920, 1080, null, { mode: 'long', px: 4000 }, K4),
+        v.frameFor(3840, 2160, pad(1), null, K4),
+        v.frameFor(400, 200, pad(1, { px: 0, py: 1 }), null, K4),
+        v.frameFor(400, 200, pad(1), { mode: 'long', px: 200 }, K4),
+        v.frameFor(1920, 1080, null, { mode: null, px: 640, rate: 30 }, K4),
+      ].map((f) => [f.W, f.H, f.x, f.y, f.w, f.h, f.padded, f.shrunk, f.sized]),
+      fit: [
+        v.fitIn({ x: 0, y: 0, w: 320, h: 240 }, 160, 240),
+        v.fitIn({ x: 0, y: 528, w: 1536, h: 864 }, 1920, 1080),
+        v.fitIn({ x: 10, y: 20, w: 1080, h: 720 }, 1083, 721),
+        v.fitIn({ x: 0, y: 0, w: 400, h: 200 }, 100, 200),
+        v.fitIn({ x: 0, y: 0, w: 1080, h: 720 }, 1079, 720),
+      ].map((b) => [b.x, b.y, b.w, b.h]),
+    };
+  });
+  assert(JSON.stringify(r.rates) === JSON.stringify([[30, 25, 24], [30, 25, 24], [25, 24], [25, 24], [24], [24], [], [], [60, 30, 25, 24]]), 'rates ' + JSON.stringify(r.rates));
+  const want = [
+    [1920, 1080, 0, 0, 1920, 1080, false, false, false],     // nothing set
+    [1080, 720, 0, 0, 1080, 720, false, false, false],       // odd sides made even, the picture still fills
+    [1536, 1920, 0, 528, 1536, 864, true, true, false],      // 4:5 would be 1920 × 2400: scaled to the 1920 long edge
+    [1080, 1920, 0, 0, 1080, 1920, false, false, false],     // 9:16 on a 9:16 clip changes nothing
+    [1000, 544, 45, 45, 909, 455, true, true, false],        // a 5 % margin (50 px) round the picture, then back to 1000 long
+    [1280, 720, 0, 0, 1280, 720, false, false, true],        // long edge 1280
+    [1080, 1920, 0, 0, 1080, 1920, false, false, false],     // 1080 wide on a clip already 1080 wide
+    [1080, 608, 0, 0, 1080, 608, false, false, true],        // 1080 wide: 607.5 rounds to 608, already even
+    [1920, 1080, 0, 0, 1920, 1080, false, false, false],     // never bigger
+    [2880, 2880, 0, 630, 2880, 1620, true, true, false],     // 4K in 1:1: 3840 square is over the 4K pixel count
+    [400, 400, 0, 200, 400, 200, true, false, false],        // picture moved to the foot
+    [200, 200, 0, 50, 200, 100, true, false, true],          // canvas, then long edge 200
+    [1920, 1080, 0, 0, 1920, 1080, false, false, false],     // a stray px with no mode does nothing
+  ];
+  r.frames.forEach((f, i) => assert(JSON.stringify(f) === JSON.stringify(want[i]), 'frame ' + i + ': got ' + JSON.stringify(f) + ', want ' + JSON.stringify(want[i])));
+  assert(JSON.stringify(r.fit) === JSON.stringify([[80, 0, 160, 240], [0, 528, 1536, 864], [10, 20, 1080, 720], [150, 0, 100, 200], [0, 0, 1080, 720]]), 'fit ' + JSON.stringify(r.fit));
+  await ctx.close();
+}, { core: true });
+
+test('video size: a 60 fps clip to long edge 160 and 30 fps re-encodes, keeping every other frame; undo puts it back', async () => {
+  const { ctx, page } = await newApp();
+  await loadVideo(page, await makeClip(page, { fps: 60, frames: 40, gop: 60, step: 6 }));
+  await page.click('[data-open-tool="vsize"]');
+  const chips = await page.$$eval('#vsize-edges .chip', (bs) => bs.map((b) => b.textContent));
+  const rates = await page.$$eval('#vsize-rates button', (bs) => bs.map((b) => b.textContent + (b.getAttribute('aria-pressed') === 'true' ? '*' : '')));
+  assert(JSON.stringify(chips) === JSON.stringify(['Original']), 'no preset bigger than the clip: ' + chips);
+  assert(JSON.stringify(rates) === JSON.stringify(['60*', '30', '25', '24']), 'rates ' + rates);
+  assert((await page.textContent('#vsize-from')) === '320 × 240 · 60 fps' && (await page.isHidden('#vsize-note')), 'starts as it is');
+  assert((await page.textContent('#vsize-out')) === '320 × 240 · 60 fps · copy', 'strip ' + await page.textContent('#vsize-out'));
+  await page.fill('#vsize-long', '161');
+  await page.dispatchEvent('#vsize-long', 'change');
+  await page.click('#vsize-rates button[data-rate="30"]');
+  assert((await page.textContent('#vsize-to')) === '160 × 120 · 30 fps', 'after ' + await page.textContent('#vsize-to'));
+  assert((await page.inputValue('#vsize-long')) === '160', 'an odd edge is made even');
+  assert((await page.textContent('#vsize-note')) === 'Export will re-encode the picture to H.264, dropping frames to make 30 fps.', 'note ' + await page.textContent('#vsize-note'));
+  await applyTool(page, 'vsize');
+  assert((await page.textContent('#dims')) === '160 × 120 · 0:00.67 · 30 fps', 'top bar ' + await page.textContent('#dims'));
+  await page.click('#btn-undo');
+  assert((await page.textContent('#dims')) === '320 × 240 · 0:00.67', 'undo ' + await page.textContent('#dims'));
+  await page.click('#btn-redo');
+  const { bytes, note } = await reencodeVideo(page);
+  assert(/re-encoded to H\.264 at 160 × 120, 30 fps, because the size changes to 160 × 120; the frame rate drops to 30 fps\./.test(note) && !/black bars/.test(note), 'export note ' + note);
+  const m = parseMp4(bytes), v = vtrack(m);
+  assert(v.codedWidth === 160 && v.codedHeight === 120 && v.sampleCount === 20, 'picture ' + [v.codedWidth, v.codedHeight, v.sampleCount]);
+  near(seconds(v), 40 / 60, 0.002, 'length');
+  const p = await probe(page, bytes, { at: Array.from({ length: 20 }, (_, k) => k / 30 + 0.005) });
+  // Source frame i has red 20 + 6i; export frame k should be source frame 2k.
+  const which = p.colors.map((c) => Math.round((c[0][0] - 20) / 6));
+  assert(JSON.stringify(which) === JSON.stringify(Array.from({ length: 20 }, (_, k) => 2 * k)), 'frames kept ' + JSON.stringify(which) + ' reds ' + JSON.stringify(p.colors.map((c) => c[0][0])));
+  assert(p.audio && p.audio.codec === 'opus', 'the sound is still copied');
+  assert(findVideoMetadata(bytes).length === 0, 'metadata: ' + findVideoMetadata(bytes));
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video size: presets for a 1080p clip, 1080 wide, HDR warning, nothing lower than 24 fps', async () => {
+  const { ctx, page } = await newApp();
+  const hlg = { primaries: 'bt2020', transfer: 'hlg', matrix: 'bt2020-ncl', fullRange: false };
+  await loadVideo(page, await makeClip(page, { w: 1920, h: 1080, frames: 3, audio: false, colorSpace: hlg }));
+  await page.click('[data-open-tool="vsize"]');
+  const chips = await page.$$eval('#vsize-edges .chip', (bs) => bs.map((b) => b.textContent));
+  assert(JSON.stringify(chips) === JSON.stringify(['Original', '1080 wide', '1280']), 'presets ' + chips);
+  await page.click('#vsize-edges .chip:has-text("1280")');
+  assert((await page.textContent('#vsize-to')) === '1280 × 720 · 30 fps', '1280 ' + await page.textContent('#vsize-to'));
+  assert(/HDR becomes SDR\./.test(await page.textContent('#vsize-note')), 'HDR warning ' + await page.textContent('#vsize-note'));
+  await page.click('#vsize-edges .chip:has-text("1080 wide")');
+  assert((await page.textContent('#vsize-to')) === '1080 × 608 · 30 fps', '1080 wide ' + await page.textContent('#vsize-to'));
+  await page.fill('#vsize-long', '5000');
+  await page.dispatchEvent('#vsize-long', 'change');
+  assert((await page.textContent('#vsize-to')) === '1920 × 1080 · 30 fps' && (await page.getAttribute('#vsize-edges .chip:has-text("Original")', 'aria-pressed')) === 'true', 'never bigger: back to Original');
+  await page.click('.sheet-panel[data-tool="vsize"] [data-apply]');
+  assert(await page.evaluate(() => retouch.app.video.history.index === 0), 'nothing changed, so no step');
+  await loadVideo(page, await makeClip(page, { fps: 24, frames: 6, audio: false }));
+  await page.click('[data-open-tool="vsize"]');
+  const rates = await page.$$eval('#vsize-rates button', (bs) => bs.map((b) => b.textContent));
+  assert(JSON.stringify(rates) === JSON.stringify(['24']) && /24 fps is already as low as retouch goes\./.test(await page.textContent('#vsize-note')), 'a 24 fps clip ' + rates);
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video canvas: 1:1 white, the picture dragged to the top; preview to scale, export, undo', async () => {
+  const { ctx, page } = await newApp();
+  await loadVideo(page, await makeClip(page, { frames: 30 }));
+  await page.click('[data-open-tool="vpad"]');
+  await page.click('#vpad-ratios [data-ratio="1:1"]');
+  await page.click('[data-vcolour="#FFFFFF"]');
+  assert((await page.textContent('#vpad-out')) === 'frame 320 × 320 · re-encode', 'strip ' + await page.textContent('#vpad-out'));
+  assert((await page.textContent('#vpad-note')) === 'Export will re-encode the picture to H.264 at 320 × 320.', 'note ' + await page.textContent('#vpad-note'));
+  assert(await page.isVisible('.hint[data-for="vpad"]'), 'the caption shows');
+  const fr = await page.locator('#vframe').boundingBox(), pv = await page.locator('#player').boundingBox();
+  near(fr.width, fr.height, 1, 'the frame is square on screen');
+  near(pv.width, fr.width, 1, 'the picture spans the frame'); near(pv.height, fr.width * 0.75, 1, 'at its own shape');
+  near(pv.y - fr.y, fr.width * 0.125, 1, 'centred to start');
+  assert((await page.evaluate(() => getComputedStyle(document.querySelector('#vframe')).backgroundColor)) === 'rgb(255, 255, 255)', 'white fill shown');
+  await page.mouse.move(pv.x + pv.width / 2, pv.y + pv.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(pv.x + pv.width / 2, pv.y - 200, { steps: 4 });
+  await page.mouse.up();
+  assert(await page.evaluate(() => retouch.tools.vpad.s.py === 0 && retouch.tools.vpad.s.px === 0.5), 'dragged to the top');
+  near((await page.locator('#player').boundingBox()).y, fr.y, 1, 'the picture sits at the top of the frame');
+  assert(await page.evaluate(() => retouch.player.paused), 'a drag does not start playback');
+  await applyTool(page, 'vpad');
+  assert((await page.textContent('#dims')) === '320 × 320 · 0:01.00', 'top bar ' + await page.textContent('#dims'));
+  assert(await page.isVisible('#vframe'), 'the frame stays on screen after apply');
+  const { bytes, note } = await reencodeVideo(page);
+  assert(/re-encoded to H\.264 at 320 × 320, 30 fps, because a 1:1 canvas is added\./.test(note), 'export note ' + note);
+  const v = vtrack(parseMp4(bytes));
+  assert(v.codedWidth === 320 && v.codedHeight === 320 && v.sampleCount === 30, 'picture ' + [v.codedWidth, v.codedHeight, v.sampleCount]);
+  const p = await probe(page, bytes, { at: [0.5], points: [[0.5, 0.1], [0.5, 0.6], [0.5, 0.9]] });
+  near(p.colors[0][0][0], 50, 8, 'picture at the top (frame 15 red)'); near(p.colors[0][1][2], 64, 8, 'picture down to 240 px');
+  assert(p.colors[0][2].every((c) => c > 245), 'white below ' + JSON.stringify(p.colors[0][2]));
+  await page.click('#btn-undo');
+  assert((await page.textContent('#dims')) === '320 × 240 · 0:01.00' && await page.isHidden('#vframe'), 'undo takes the canvas away');
+  await page.click('#btn-redo');
+  assert(await page.isVisible('#vframe'), 'redo brings it back');
+  await load(page, gradient());
+  assert(await page.isHidden('#vframe') && await page.isVisible('#view'), 'a photo opened next shows no video frame');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video canvas: 9:16 blurred fill, frame kept within the long edge; a joined clip of another shape gets the fill round it', async () => {
+  const { ctx, page } = await newApp();
+  const a = await makeClip(page, { frames: 30 }), b = await makeClip(page, { w: 160, h: 240, frames: 30, blue: 200 });
+  await loadVideo(page, a);
+  await page.click('[data-open-tool="cut"]');
+  await addClips(page, [b]);
+  await applyTool(page, 'cut');
+  await page.click('[data-open-tool="vpad"]');
+  await page.click('#vpad-ratios [data-ratio="9:16"]');
+  await page.click('[data-vfill="blur"]');
+  assert(await page.isVisible('#vpad-blur-row') && await page.isHidden('#vpad-colour-row'), 'blur slider instead of colours');
+  assert((await page.textContent('#vpad-note')) === 'Export will re-encode the picture to H.264 at 180 × 320. The frame keeps within the clip\'s size, so the picture shrinks to 180 × 135 inside it.', 'note ' + await page.textContent('#vpad-note'));
+  await page.waitForFunction(() => retouch.player.readyState >= 2);
+  await page.evaluate(() => retouch.player.dispatchEvent(new Event('seeked')));
+  const lit = await page.evaluate(() => { const c = document.querySelector('#vblur'); const d = c.getContext('2d').getImageData(c.width >> 1, 4, 1, 1).data; return [c.hidden, d[0], d[2]]; });
+  assert(!lit[0] && lit[2] > 30, 'the blurred frame is drawn behind the picture ' + lit);
+  await applyTool(page, 'vpad');
+  await page.click('[data-open-tool="cut"]');
+  assert(/a 9:16 canvas is added/.test(await page.textContent('#cut-note')), 'Cut knows about the canvas: ' + await page.textContent('#cut-note'));
+  await page.click('.sheet-panel[data-tool="cut"] [data-cancel]');
+  const { bytes, note } = await reencodeVideo(page);
+  assert(/at 180 × 320, 30 fps, because clip 2 is 160 × 240, not 320 × 240; a 9:16 canvas is added\. Clips of another shape sit inside the picture's place, with the canvas fill round them\./.test(note), 'export note ' + note);
+  const v = vtrack(parseMp4(bytes));
+  assert(v.codedWidth === 180 && v.codedHeight === 320 && v.sampleCount === 60, 'picture ' + [v.codedWidth, v.codedHeight, v.sampleCount]);
+  // The picture is 180 × 135 at y 93; clip 2 fits 90 × 135 in the middle of that.
+  const p = await probe(page, bytes, { at: [0.5, 1.5], points: [[0.5, 0.05], [0.5, 0.5], [0.1, 0.5]] });
+  near(p.colors[0][0][2], 64, 12, 'clip 1 blurred above the picture'); near(p.colors[0][0][0], 50, 12, 'its red too');
+  near(p.colors[0][1][2], 64, 8, 'clip 1 in the picture');
+  near(p.colors[1][1][2], 200, 8, 'clip 2 in the middle'); near(p.colors[1][2][2], 200, 14, 'clip 2 blurred beside it, not black');
+  near(p.colors[1][0][2], 200, 14, 'and above it');
   assert(page.errors.length === 0, page.errors.join('; '));
   await ctx.close();
 });

@@ -315,6 +315,26 @@ video: exact cut seen on every piece ||| if (!keysOf(p.clip).some((k) => Math.ab
 video: exact cut needs a hair-exact keyframe ||| if (!keysOf(p.clip).some((k) => Math.abs(k - p.start) <= core.video.EPS)) ||| if (!keysOf(p.clip).some((k) => k === p.start))
 video: exact cut counts from 0 ||| out.push(n + 1); }); ||| out.push(n); });
 video: exact cut reads the wrong clip's keyframes ||| keysOf(p.clip).some ||| keysOf(0).some
+video: rates below include the clip's own ||| core.video.RATE_CHOICES.filter((r) => r < rate * 0.995); ||| core.video.RATE_CHOICES.filter((r) => r <= rate);
+video: rates below the wrong way ||| core.video.RATE_CHOICES.filter((r) => r < rate * 0.995); ||| core.video.RATE_CHOICES.filter((r) => r > rate * 0.995);
+video: frame ignores the canvas ratio ||| ({ W, H } = core.padDims(w, h, pad.R, ||| ({ W, H } = core.padDims(w, h, null,
+video: frame ignores the canvas margin ||| Math.round((pad.margin || 0) * Math.max(w, h)) ||| 0
+video: frame ignores the picture position ||| ({ x: ox, y: oy } = core.padOffset(W, H, w, h, pad.px, pad.py)); ||| ({ x: ox, y: oy } = core.padOffset(W, H, w, h, 0.5, 0.5));
+video: frame grows past the long edge ||| let k = Math.min(1, Math.max(w, h) / Math.max(W, H)); ||| let k = 1;
+video: frame pixel cap missing ||| if (W * H * k * k > maxPixels) k = Math.sqrt(maxPixels / (W * H)); ||| void maxPixels;
+video: size scales up ||| s = Math.min(1, size.px / (Math.max(W, H) * k)); ||| s = size.px / (Math.max(W, H) * k);
+video: width mode reads the height ||| s = Math.min(1, size.px / (W * k)); ||| s = Math.min(1, size.px / (H * k));
+video: size with no mode still scales ||| if (size && size.mode === 'long' && size.px) ||| if (size && size.px)
+video: odd sides kept ||| const even = (n) => Math.max(2, n - (n % 2)); ||| const even = (n) => Math.max(2, n);
+video: picture offset not scaled ||| x: Math.min(FW - pw, Math.round(ox * t)) ||| x: Math.min(FW - pw, Math.round(ox))
+video: picture y read from x ||| y: Math.min(FH - ph, Math.round(oy * t)) ||| y: Math.min(FH - ph, Math.round(ox * t))
+video: sized flag always off ||| sized: s < 1, ||| sized: false,
+video: shrunk flag always off ||| shrunk: k < 1, ||| shrunk: false,
+video: padded flag ignores the height ||| padded: W !== w || H !== h ||| padded: W !== w
+video: fit-in crops instead ||| const k = Math.min(r.w / w, r.h / h); ||| const k = Math.max(r.w / w, r.h / h);
+video: fit-in leaves a hairline ||| if (bw >= r.w - 1) bw = r.w; ||| if (bw >= r.w) bw = r.w;
+video: fit-in not centred ||| x: r.x + Math.floor((r.w - bw) / 2) ||| x: r.x
+video: fit-in forgets the place's top ||| y: r.y + Math.floor((r.h - bh) / 2) ||| y: Math.floor((r.h - bh) / 2)
 EOF
 )
 
