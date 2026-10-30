@@ -2919,7 +2919,7 @@ test('spot: a tap fills a spot, a stroke fills a scratch; undo stroke; two finge
 // The file is written with the index (moov) last, so a test can add boxes to it.
 const VIDEO_INIT = () => {
   window.__makeClip = async (o = {}) => {
-    const { w = 320, h = 240, fps = 30, frames = 90, gop = 30, audio = true, rotation = 0, colorSpace = null } = o;
+    const { w = 320, h = 240, fps = 30, frames = 90, gop = 30, audio = true, rotation = 0, colorSpace = null, blue = 64, rate = 48000, channels = 1, mark = false } = o;
     const MB = await retouch.loadMediabunny();
     const target = new MB.BufferTarget();
     const out = new MB.Output({ format: new MB.Mp4OutputFormat({ fastStart: false }), target });
@@ -2933,7 +2933,8 @@ const VIDEO_INIT = () => {
     enc.configure({ codec: 'avc1.42001f', width: w, height: h, framerate: fps, bitrate: 1e6 });
     const cv = new OffscreenCanvas(w, h), cx = cv.getContext('2d');
     for (let i = 0; i < frames; i++) {
-      cx.fillStyle = 'rgb(' + (20 + 2 * i) + ',128,64)'; cx.fillRect(0, 0, w, h);
+      cx.fillStyle = 'rgb(' + (20 + 2 * i) + ',128,' + blue + ')'; cx.fillRect(0, 0, w, h);
+      if (mark) { cx.fillStyle = '#fff'; cx.fillRect(0, 0, w / 4, h / 4); }     // a white corner, top left as stored
       const f = new VideoFrame(cv, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
       enc.encode(f, { keyFrame: i % gop === 0 }); f.close();
     }
@@ -2941,12 +2942,12 @@ const VIDEO_INIT = () => {
     const ac = [];
     if (audio) {
       const ae = new AudioEncoder({ output: (c, m) => ac.push([c, m]), error: (e) => { throw e; } });
-      ae.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1, bitrate: 48000 });
-      const n = 960, total = Math.round(48000 * frames / fps);
+      ae.configure({ codec: 'opus', sampleRate: rate, numberOfChannels: channels, bitrate: 48000 });
+      const n = rate / 50, total = Math.round(rate * frames / fps);
       for (let s = 0; s < total; s += n) {
-        const d = new Float32Array(n);
-        for (let k = 0; k < n; k++) { const tau = (s + k) / 48000; d[k] = 0.3 * Math.sin(2 * Math.PI * (440 * tau + 150 * tau * tau)); }
-        const a = new AudioData({ format: 'f32', sampleRate: 48000, numberOfFrames: n, numberOfChannels: 1, timestamp: Math.round(s * 1e6 / 48000), data: d });
+        const d = new Float32Array(n * channels);
+        for (let k = 0; k < n; k++) { const tau = (s + k) / rate; for (let c = 0; c < channels; c++) d[k * channels + c] = 0.3 * Math.sin(2 * Math.PI * (440 * tau + 150 * tau * tau)); }
+        const a = new AudioData({ format: 'f32', sampleRate: rate, numberOfFrames: n, numberOfChannels: channels, timestamp: Math.round(s * 1e6 / rate), data: d });
         ae.encode(a); a.close();
       }
       await ae.flush(); ae.close();
@@ -2979,6 +2980,44 @@ const VIDEO_INIT = () => {
     samples.forEach((s, i) => dec.decode(new EncodedVideoChunk({ type: s.key ? 'key' : 'delta', timestamp: i * 33333, data: new Uint8Array(s.data) })));
     await dec.flush();
     return got;
+  };
+  // Read an export back with Mediabunny: its picture and sound facts, the mean colour
+  // of a 4 x 4 patch at each point (fractions of the width and height) in the frame
+  // on screen at each time, and the loudness (RMS) of the first sound channel in
+  // each time window.
+  window.__probe = async (arr, o = {}) => {
+    const MB = await retouch.loadMediabunny();
+    const input = new MB.Input({ source: new MB.BufferSource(new Uint8Array(arr).buffer), formats: [MB.MP4] });
+    const vt = await input.getPrimaryVideoTrack(), at = await input.getPrimaryAudioTrack();
+    const res = { w: vt.displayWidth, h: vt.displayHeight, codec: vt.codec, colors: [], rms: [], duration: await input.computeDuration(),
+      audio: at ? { codec: at.codec, rate: at.sampleRate, ch: at.numberOfChannels, duration: (await at.computeDuration()) } : null };
+    if (o.at) {
+      const sink = new MB.CanvasSink(vt, { poolSize: 1 });
+      for await (const wc of sink.canvasesAtTimestamps(o.at)) {
+        const x = wc.canvas.getContext('2d');
+        res.colors.push((o.points || [[0.5, 0.5]]).map(([u, v]) => {
+          const d = x.getImageData(Math.min(res.w - 4, Math.floor(u * res.w)), Math.min(res.h - 4, Math.floor(v * res.h)), 4, 4).data;
+          const m = [0, 0, 0];
+          for (let i = 0; i < d.length; i += 4) for (let c = 0; c < 3; c++) m[c] += d[i + c] / 16;
+          return m.map(Math.round);
+        }));
+      }
+    }
+    if (at && o.windows) {
+      const sink = new MB.AudioSampleSink(at);
+      for (const [a, b] of o.windows) {
+        let sum = 0, n = 0;
+        for await (const s of sink.samples(a, b)) {
+          const p = new Float32Array(s.numberOfFrames);
+          s.copyTo(p, { planeIndex: 0, format: 'f32-planar' });
+          for (const v of p) { sum += v * v; n++; }
+          s.close();
+        }
+        res.rms.push(Math.sqrt(sum / Math.max(1, n)));
+      }
+    }
+    input.dispose();
+    return res;
   };
   window.__csp = [];
   document.addEventListener('securitypolicyviolation', (e) => window.__csp.push(e.violatedDirective + ' ' + e.blockedURI));
@@ -3240,14 +3279,14 @@ test('video: opens from the picker, shows its facts, plays; photo tools give way
   await load(page, gradient());
   await loadVideo(page, await makeClip(page));
   const r = await page.evaluate(() => {
-    const v = retouch.app.video;
+    const v = retouch.app.video.clips[0];
     return { edits: retouch.app.edits, info: v.info, frames: v.vpk.length, keys: v.keys, audio: v.apk.length, first: v.first, end: v.end, mode: document.body.dataset.mode,
       toolsShown: Array.from(document.querySelectorAll('.tool')).filter((b) => b.offsetParent).map((b) => b.dataset.openTool),
       canvas: getComputedStyle(document.querySelector('#view')).display, player: getComputedStyle(document.querySelector('#player')).display };
   });
   assert(r.edits === null, 'the photo is closed');
   assert(r.mode === 'video' && r.canvas === 'none' && r.player === 'block', 'video mode ' + JSON.stringify([r.mode, r.canvas, r.player]));
-  assert(JSON.stringify(r.toolsShown) === JSON.stringify(['trim', 'sound', 'vcheck']), 'tools ' + r.toolsShown);
+  assert(JSON.stringify(r.toolsShown) === JSON.stringify(['trim', 'cut', 'sound', 'vcheck']), 'tools ' + r.toolsShown);
   assert(r.frames === 90 && r.keys.length === 3 && Math.abs(r.keys[1] - 1) < 1e-6 && r.audio >= 149, 'index ' + JSON.stringify([r.frames, r.keys, r.audio]));
   assert(Math.abs(r.first) < 1e-6 && Math.abs(r.end - 3) < 1e-3, 'length ' + [r.first, r.end]);
   assert(r.info.width === 320 && r.info.height === 240 && Math.abs(r.info.fps - 30) < 0.01 && r.info.codec === 'avc' && r.info.audio.codec === 'opus', 'facts ' + JSON.stringify(r.info));
@@ -3379,10 +3418,10 @@ test('video: HDR colour tags and rotation come through the copy', async () => {
   const hlg = { primaries: 'bt2020', transfer: 'hlg', matrix: 'bt2020-ncl', fullRange: false };
   const src = await makeClip(page, { rotation: 90, colorSpace: hlg, frames: 60 });
   await loadVideo(page, src);
-  const info = await page.evaluate(() => retouch.app.video.info);
+  const info = await page.evaluate(() => retouch.app.video.clips[0].info);
   assert(info.width === 240 && info.height === 320, 'displayed upright ' + info.width + ' x ' + info.height);
   assert(info.colorSpace.transfer === 'hlg' && info.colorSpace.primaries === 'bt2020', 'colour ' + JSON.stringify(info.colorSpace));
-  assert(/8-bit HDR HLG/.test(await page.evaluate(() => retouch.core.video.describe(retouch.app.video.info))), 'facts say HDR HLG');
+  assert(/8-bit HDR HLG/.test(await page.evaluate(() => retouch.core.video.describe(retouch.app.video.clips[0].info))), 'facts say HDR HLG');
   await page.click('[data-open-tool="trim"]');
   await page.evaluate(() => { retouch.tools.trim.setStart(1.1, false); retouch.tools.trim.setEnd(1.8); });
   await applyTool(page, 'trim');
@@ -3469,7 +3508,7 @@ test('video: a broken or unknown video says so plainly and keeps what was open',
   await page.waitForSelector('.notice.fail[data-id="open"]');
   const t = await page.textContent('.notice.fail[data-id="open"]');
   assert(/This video could not be opened: .*retouch opens MP4, MOV and WebM videos\./.test(t), 'message: ' + t);
-  assert(await page.evaluate(() => retouch.app.video && retouch.app.video.vpk.length === 30), 'the open clip stays');
+  assert(await page.evaluate(() => retouch.app.video && retouch.app.video.clips[0].vpk.length === 30), 'the open clip stays');
   await page.setInputFiles('#file', { name: 'notes.mov', mimeType: 'video/quicktime', buffer: Buffer.from('not a video at all') });
   await page.waitForFunction(() => /could not be opened/.test(document.querySelector('.notice[data-id="open"]')?.textContent || '') && retouch.app.busyCount === 0);
   assert(page.errors.length === 0, page.errors.join('; '));
@@ -3486,7 +3525,7 @@ test('video: phone layout, tap targets at least 44 px in every video sheet', asy
   const wide = () => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
   await loadVideo(page, await makeClip(page, { frames: 30 }));
   let s = await small(); assert(!s.length && await wide(), 'video view: ' + s);
-  for (const t of ['trim', 'sound', 'vcheck']) {
+  for (const t of ['trim', 'cut', 'sound', 'vcheck']) {
     await page.click('[data-open-tool="' + t + '"]');
     s = await small(); assert(!s.length && await wide(), t + ': ' + s);
     const stage = await page.locator('#stage').boundingBox();
@@ -3519,11 +3558,389 @@ test('service worker: a video shared from another app opens, offline too', async
     }, [Array.from(clip), field]);
     await page.waitForURL(/retouch\.html$/);
     await page.waitForFunction(() => window.retouch && window.retouch.app.video && window.retouch.app.busyCount === 0, null, { timeout: 15000 });
-    assert(await page.evaluate(() => retouch.app.video.vpk.length === 30 && retouch.app.fileName === 'PXL_shared.mp4'), field + ': shared video opened');
+    assert(await page.evaluate(() => retouch.app.video.clips[0].vpk.length === 30 && retouch.app.fileName === 'PXL_shared.mp4'), field + ': shared video opened');
   }
   const m = parseMp4((await exportVideo(page)).bytes);
   assert(vtrack(m).sampleCount === 30, 'exports offline');
   await ctx.setOffline(false);
+  await ctx.close();
+});
+
+/* ---------- Video phase V2: cut and join ---------- */
+
+// Put the player at t in the piece on screen and wait for it to get there.
+async function seekPlayer(page, t) {
+  await page.waitForFunction(() => retouch.pl.seek === null && retouch.player.readyState >= 1);
+  await page.evaluate((t) => { retouch.player.currentTime = t; }, t);
+  await page.waitForFunction((t) => Math.abs(retouch.player.currentTime - t) < 0.01, t);
+}
+// Add videos through the Cut sheet's Add tile (the sheet must be open).
+async function addClips(page, list) {
+  const before = await page.evaluate(() => retouch.app.video.clips.length);
+  await page.setInputFiles('#file-add', list.map((buffer, i) => ({ name: 'PXL_add_' + i + '.mp4', mimeType: 'video/mp4', buffer })));
+  await page.waitForFunction((n) => retouch.app.video.clips.length === n && retouch.app.busyCount === 0, before + list.length);
+}
+const pieces = (page, draft = true) => page.evaluate((draft) => (draft ? retouch.tools.cut.d : retouch.app.video.history.current).pieces
+  .map((p) => [p.clip, Math.round(p.start * 1000) / 1000, Math.round(p.end * 1000) / 1000]), draft);
+// Start a re-encode in the export sheet, wait for it, download, return the bytes.
+async function reencodeVideo(page) {
+  await page.click('#btn-export');
+  assert(await page.isVisible('#vexport-start') && !(await page.isVisible('#vexport-download')), 'a re-encode waits for a tap');
+  assert((await page.textContent('#vexport-size')) === 'not started', 'nothing done before the tap');
+  await page.click('#vexport-start');
+  await page.waitForFunction(() => !document.querySelector('#vexport-download').disabled || /Fail/.test(document.querySelector('#vexport-meta').textContent), null, { timeout: 60000 });
+  const meta = await page.textContent('#vexport-meta');
+  assert(!/Fail/.test(meta), 'export failed: ' + meta);
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#vexport-download')]);
+  const bytes = fs.readFileSync(await dl.path());
+  const note = await page.textContent('#vexport-note');
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  return { bytes, note };
+}
+const probe = (page, bytes, o) => page.evaluate(([arr, o]) => window.__probe(arr, o), [Array.from(bytes), o]);
+
+test('video core: frame rates, join and sound checks, frame grid, sound at a join, resampling, splits (independent check)', async () => {
+  const { ctx, page } = await newApp();
+  const r = await page.evaluate(() => {
+    const v = retouch.core.video;
+    const a = { name: 'clip 1', codec: 'avc', mp4: true, width: 1920, height: 1080, rotation: 0, rate: 30, hdr: null, setup: 'x' };
+    const why = (...bs) => v.joinCheck([a, ...bs.map((b, i) => ({ ...a, name: 'clip ' + (i + 2), ...b }))]);
+    const s = { name: 'clip 1', codec: 'aac', mp4: true, setup: 'aac 48000 2', label: 'AAC · 48 kHz · 2 ch' };
+    const snd = (keep, ...bs) => v.soundCheck([s, ...bs.map((b, i) => ({ ...s, name: 'clip ' + (i + 2), ...b }))], keep);
+    // A 1 kHz tone at 44.1 kHz, resampled to 48 kHz in one go and in chunks of 441.
+    const n = 4410, tone = new Float32Array(n);
+    for (let i = 0; i < n; i++) tone[i] = Math.sin(2 * Math.PI * 1000 * i / 44100);
+    const whole = v.reshaper(44100, 48000, 1)([tone])[0];
+    const sh = v.reshaper(44100, 48000, 1), parts = [];
+    for (let i = 0; i < n; i += 441) parts.push(...sh([tone.subarray(i, i + 441)])[0]);
+    let worst = 0;
+    for (let k = 0; k < whole.length; k++) worst = Math.max(worst, Math.abs(whole[k] - Math.sin(2 * Math.PI * 1000 * k / 48000)));
+    const two = v.reshaper(48000, 48000, 2)([new Float32Array([0.5, -0.25])]);
+    const one = v.reshaper(48000, 48000, 1)([new Float32Array([0.5, 0.1]), new Float32Array([-0.1, 0.3])]);
+    const down = v.reshaper(48000, 24000, 1)([new Float32Array([0, 1, 2, 3, 4, 5, 6, 7])])[0];
+    const ps = [{ clip: 0, start: 1, end: 2.5 }, { clip: 1, start: 0, end: 1 }];
+    return {
+      rates: [30, 29.97, 30.04, 24.93, 59.94, 60.2, 27.333, 23.98, 120, 26, 31].map(v.standardRate),
+      why: [why(), why({ codec: 'hevc' }), why({ width: 1080, height: 1920 }), why({ height: 1440 }), why({ rate: 25 }), why({ hdr: 'HLG' }), why({ setup: 'y' }), why({ rotation: 90 }),
+        v.joinCheck([{ ...a, mp4: false, codec: 'vp9' }]), why({ rate: 60 }, { width: 640, height: 480, rate: 25 })],
+      snd: [snd(true), snd(false), snd(true, {}), snd(true, { codec: null }), snd(true, { setup: 'opus', codec: 'opus', label: 'Opus · 48 kHz · 1 ch' }), snd(true, { setup: 'aac 44100 2', label: 'AAC · 44 kHz · 2 ch' }),
+        v.soundCheck([{ name: 'clip 1', codec: null }], true), v.soundCheck([{ name: 'clip 1', codec: null }, { ...s, name: 'clip 2' }], true), v.soundCheck([{ ...s, mp4: false, codec: 'vorbis' }], true)],
+      offsets: v.joinOffsets([{ from: 1, to: 2.5 }, { from: 0, to: 1.2 }, { from: 3, to: 3.5 }]),
+      grid: v.frameGrid([{ start: 1, end: 2.5 }, { start: 0, end: 1.5 }, { start: 2, end: 2.00001 }], 30),
+      grid25: v.frameGrid([{ start: 0, end: 1.5 }], 25).frames,
+      place: v.placeSound([{ ts: 0, dur: 0.02 }, { ts: 0.02, dur: 0.02 }, { ts: 0.035, dur: 0.02 }, { ts: 0.045, dur: 0.02 }, { ts: 0.06, dur: 0.02 }, { ts: 0.1, dur: 0.02 }]),
+      lens: [whole.length, parts.length], same: whole.every((x, k) => Math.abs(x - parts[k]) < 1e-6), worst,
+      two: two.map((p) => Array.from(p)), one: Array.from(one[0]).map((x) => Math.round(x * 1000) / 1000), down: Array.from(down),
+      bitrate: [v.encodeBitrate(1920, 1080, 30), v.encodeBitrate(3840, 2160, 60), v.encodeBitrate(320, 240, 30)],
+      at: [0, 1.4, 1.5, 2.2, 2.5, 9].map((t) => v.pieceAt(ps, t)), of: [v.timeOf(ps, 0, 1), v.timeOf(ps, 0, 2), v.timeOf(ps, 1, 0.5)],
+      split: [v.split([{ clip: 0, start: 0, end: 3 }, { clip: 1, start: 0, end: 2 }], 0, [0, 1, 2], 1.2), v.split([{ clip: 0, start: 0, end: 3 }, { clip: 1, start: 0, end: 2 }], 1, [0, 1], 1.6), v.split([{ clip: 1, start: 0, end: 2 }], 0, [0, 1], 0.6),
+        v.split([{ clip: 0, start: 1, end: 3 }], 0, [0, 1, 2], 1), v.split([{ clip: 0, start: 0, end: 2 }], 0, [0, 1, 2], 2.5), v.split([{ clip: 0, start: 0, end: 3 }], 0, [0, 1, 2], 2)],
+    };
+  });
+  assert(JSON.stringify(r.rates) === JSON.stringify([30, 29.97, 30, 25, 59.94, 60, 27.33, 23.976, 120, 26, 31]), 'rates ' + r.rates);
+  assert(JSON.stringify(r.why) === JSON.stringify([[], ['clip 2 is HEVC, not H.264'], ['clip 2 is 1080 × 1920, not 1920 × 1080'], ['clip 2 is 1920 × 1440, not 1920 × 1080'], ['clip 2 runs at 25 fps, not 30'],
+    ['clip 2 is HDR HLG, not SDR'], ['clip 2 was encoded with other settings'], ['clip 2 was encoded with other settings'],
+    ['clip 1 is VP9, which cannot go into an MP4 as it is'], ['clip 2 runs at 60 fps, not 30', 'clip 3 is 640 × 480, not 1920 × 1080']]), 'join reasons ' + JSON.stringify(r.why));
+  assert(JSON.stringify(r.snd) === JSON.stringify([{ mode: 'copy', why: [] }, { mode: 'none', why: [] }, { mode: 'copy', why: [] }, { mode: 'encode', why: ['clip 2 has no sound'] },
+    { mode: 'encode', why: ['clip 2 has other sound (Opus · 48 kHz · 1 ch, not AAC · 48 kHz · 2 ch)'] }, { mode: 'encode', why: ['clip 2 has other sound (AAC · 44 kHz · 2 ch, not AAC · 48 kHz · 2 ch)'] }, { mode: 'none', why: [] }, { mode: 'encode', why: ['clip 1 has no sound'] },
+    { mode: 'encode', why: ['Vorbis sound cannot go into an MP4 as it is'] }]), 'sound ' + JSON.stringify(r.snd));
+  assert(JSON.stringify(r.offsets.at) === JSON.stringify([0, 1.5, 2.7]) && Math.abs(r.offsets.total - 3.2) < 1e-9, 'offsets ' + JSON.stringify(r.offsets));
+  const g = r.grid;
+  assert(g.frames === 45 + 45 + 1 && g.pieces[0].times.length === 45 && g.pieces[2].times.length === 1, 'grid counts ' + g.frames);
+  near(g.pieces[0].times[0], 1, 1e-9, 'grid first'); near(g.pieces[0].times[44], 1 + 44 / 30, 1e-9, 'grid last');
+  near(g.pieces[0].to, 2.5, 1e-9, 'grid piece end'); near(g.pieces[2].to - g.pieces[2].from, 1 / 30, 1e-9, 'a sliver still makes one frame');
+  assert(r.grid25 === 38, 'grid at 25 fps ' + r.grid25);
+  assert(JSON.stringify(r.place.map((x) => (x === null ? null : Math.round(x * 1000)))) === JSON.stringify([0, 20, 40, null, 60, 100]), 'sound at a join ' + JSON.stringify(r.place));
+  assert(Math.abs(r.lens[0] - 4410 * 48000 / 44100) <= 2 && r.lens[0] === r.lens[1] && r.same, 'resampling in chunks matches one go ' + JSON.stringify(r.lens));
+  assert(r.worst < 0.01, 'resampled tone off by ' + r.worst);
+  assert(JSON.stringify(r.two) === JSON.stringify([[0.5, -0.25], [0.5, -0.25]]) && JSON.stringify(r.one) === JSON.stringify([0.2, 0.2]), 'channels ' + JSON.stringify([r.two, r.one]));
+  assert(JSON.stringify(r.down) === JSON.stringify([0, 2, 4, 6]), 'half rate ' + r.down);
+  assert(JSON.stringify(r.bitrate) === JSON.stringify([15552000, 60000000, 2000000]), 'bitrates ' + r.bitrate);
+  assert(JSON.stringify(r.at) === JSON.stringify([{ i: 0, at: 1 }, { i: 0, at: 2.4 }, { i: 1, at: 0 }, { i: 1, at: 0.7000000000000002 }, { i: 1, at: 1 }, { i: 1, at: 1 }]), 'piece at ' + JSON.stringify(r.at));
+  assert(JSON.stringify(r.of) === JSON.stringify([0, 1, 2]), 'time of ' + r.of);
+  assert(JSON.stringify(r.split) === JSON.stringify([[{ clip: 0, start: 0, end: 1 }, { clip: 0, start: 1, end: 3 }, { clip: 1, start: 0, end: 2 }],
+    [{ clip: 0, start: 0, end: 3 }, { clip: 1, start: 0, end: 1 }, { clip: 1, start: 1, end: 2 }], null, null, null, [{ clip: 0, start: 0, end: 2 }, { clip: 0, start: 2, end: 3 }]]), 'split ' + JSON.stringify(r.split));
+  await ctx.close();
+}, { core: true });
+
+test('video cut: split twice, delete the middle; the rest copies byte for byte and the sound follows', async () => {
+  const { ctx, page } = await newApp();
+  const src = await makeClip(page);         // 90 frames at 30 fps, keyframes at 0, 1 and 2 s
+  await loadVideo(page, src);
+  await page.click('[data-open-tool="cut"]');
+  assert(await page.isVisible('.hint[data-for="cut"]'), 'the caption shows');
+  assert((await page.textContent('#cut-out')) === '1 piece · copy, no re-encode', 'strip ' + await page.textContent('#cut-out'));
+  // No keyframe inside the first second after its start: it cannot split there.
+  await seekPlayer(page, 0.5);
+  await page.click('#cut-split');
+  assert(/No keyframe inside this piece before the playhead/.test(await page.textContent('#cut-note')), 'no split before the first keyframe');
+  await seekPlayer(page, 1.2);
+  await page.click('#cut-split');
+  assert(/Split at 0:01\.00 in clip 1, the keyframe before 0:01\.20, so both pieces copy without re-encoding\./.test(await page.textContent('#cut-note')), 'note ' + await page.textContent('#cut-note'));
+  await seekPlayer(page, 2.2);
+  await page.click('#cut-split');
+  assert(JSON.stringify(await pieces(page)) === JSON.stringify([[0, 0, 1], [0, 1, 2], [0, 2, 3]]), 'three pieces ' + JSON.stringify(await pieces(page)));
+  // Tap the middle block to pick it, then delete it.
+  const bar = await page.locator('#cut-line').boundingBox();
+  await page.mouse.click(bar.x + bar.width * 0.5, bar.y + bar.height / 2);
+  assert((await page.textContent('#cut-piece')) === '2 of 3' && await page.evaluate(() => retouch.tools.cut.sel === 1), 'middle piece picked');
+  assert(await page.isDisabled('#cut-delete') === false && await page.isDisabled('#cut-earlier') === false, 'tiles on');
+  await page.click('#cut-delete');
+  assert(JSON.stringify(await pieces(page)) === JSON.stringify([[0, 0, 1], [0, 2, 3]]), 'middle gone ' + JSON.stringify(await pieces(page)));
+  assert((await page.textContent('#cut-total')) === '0:02.00' && (await page.textContent('#cut-out')) === '2 pieces · copy, no re-encode', 'cells after delete');
+  await applyTool(page, 'cut');
+  assert((await page.textContent('#dims')) === '320 × 240 · 0:02.00' && /^1 edit ▸ /.test(await page.textContent('#top-code')), 'top bar ' + await page.textContent('#dims'));
+  assert((await page.evaluate(() => retouch.app.video.history.current.label)) === 'Cut', 'step label');
+  const { bytes } = await exportVideo(page);
+  assert(/Copied without re-encoding/.test(await page.textContent('.notice[data-id="export"]')), 'confirmation says copied');
+  const a = parseMp4(src), b = parseMp4(bytes), av = vtrack(a), bv = vtrack(b);
+  assert(bv.sampleCount === 60 && JSON.stringify(bv.sync) === JSON.stringify([0, 30]), 'frames and keyframes ' + [bv.sampleCount, JSON.stringify(bv.sync)]);
+  near(seconds(bv), 2, 0.002, 'video length');
+  for (let k = 0; k < 30; k++) assert(bv.sample(k).equals(av.sample(k)), 'frame ' + k + ' changed');
+  for (let k = 30; k < 60; k++) assert(bv.sample(k).equals(av.sample(k + 30)), 'frame ' + k + ' is not source frame ' + (k + 30));
+  const cols = await decodeTrack(page, bv);
+  assert(cols.length === 60 && typeof cols[0] !== 'string', 'all frames decode');
+  near(cols[29][0], 78, 6, 'last frame of the first piece is source frame 29');
+  near(cols[30][0], 140, 6, 'first frame after the cut is source frame 60');
+  // Sound: the packets of 0 to 1 s, then those from 2 s, each unchanged and in order.
+  const as_ = strack(a), bs = strack(b);
+  near(seconds(bs), 2, 0.03, 'sound length');
+  const src0 = Array.from({ length: as_.sampleCount }, (_, k) => as_.sample(k));
+  let k = 0;
+  while (k < bs.sampleCount && bs.sample(k).equals(src0[k])) k++;
+  const j = src0.findIndex((x) => x.equals(bs.sample(k)));
+  assert(k >= 49 && k <= 52 && j >= 98 && j <= 101, 'sound cut points ' + [k, j]);
+  for (let m = k; m < bs.sampleCount; m++) assert(bs.sample(m).equals(src0[j + m - k]), 'sound packet ' + m + ' changed');
+  assert(findVideoMetadata(bytes).length === 0, 'metadata: ' + findVideoMetadata(bytes));
+  await page.click('#btn-undo');
+  assert((await page.textContent('#dims')) === '320 × 240 · 0:03.00', 'undo brings the middle back');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+}, { core: true });
+
+test('video join: two clips recorded the same way copy end to end, in the order set', async () => {
+  const { ctx, page } = await newApp();
+  const a = await makeClip(page, { frames: 60 }), b = await makeClip(page, { frames: 45, blue: 200 });
+  await loadVideo(page, a);
+  await page.click('[data-open-tool="cut"]');
+  await addClips(page, [b]);
+  assert(JSON.stringify(await pieces(page)) === JSON.stringify([[0, 0, 2], [1, 0, 1.5]]), 'added after the picked piece ' + JSON.stringify(await pieces(page)));
+  assert((await page.textContent('#cut-piece')) === '2 of 2' && (await page.textContent('#cut-clip')) === '2 of 2', 'the new piece is picked');
+  assert((await page.textContent('#cut-out')) === '2 pieces · copy, no re-encode' && await page.isHidden('#cut-note'), 'same settings copy: ' + await page.textContent('#cut-out'));
+  assert(await page.isDisabled('#cut-later'), 'last piece cannot go later');
+  await page.click('#cut-earlier');
+  assert(JSON.stringify(await pieces(page)) === JSON.stringify([[1, 0, 1.5], [0, 0, 2]]) && await page.isDisabled('#cut-earlier'), 'moved first');
+  await applyTool(page, 'cut');
+  assert((await page.evaluate(() => retouch.app.video.history.current.label)) === 'Join', 'step label');
+  assert((await page.textContent('#dims')) === '320 × 240 · 0:03.50', 'top bar ' + await page.textContent('#dims'));
+  const { bytes } = await exportVideo(page);
+  const pa = vtrack(parseMp4(a)), pb = vtrack(parseMp4(b)), out = parseMp4(bytes), v = vtrack(out);
+  assert(v.sampleCount === 105 && JSON.stringify(v.sync) === JSON.stringify([0, 30, 45, 75]), 'frames ' + v.sampleCount + ' keys ' + JSON.stringify(v.sync));
+  near(seconds(v), 3.5, 0.002, 'length');
+  for (let k = 0; k < 45; k++) assert(v.sample(k).equals(pb.sample(k)), 'frame ' + k + ' is not clip 2 frame ' + k);
+  for (let k = 0; k < 60; k++) assert(v.sample(45 + k).equals(pa.sample(k)), 'frame ' + (45 + k) + ' is not clip 1 frame ' + k);
+  assert(v.entryChild('avcC').equals(pa.entryChild('avcC')), 'codec setup as recorded');
+  const s = strack(out);
+  assert(s && s.codec === 'Opus', 'sound copied');
+  near(seconds(s), 3.5, 0.04, 'sound length');
+  const cols = await decodeTrack(page, v);
+  near(cols[0][2], 200, 8, 'clip 2 first'); near(cols[45][2], 64, 8, 'then clip 1');
+  assert(findVideoMetadata(bytes).length === 0, 'metadata: ' + findVideoMetadata(bytes));
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video join: a silent clip recorded the same way still copies the picture; only the sound is encoded again', async () => {
+  const { ctx, page } = await newApp();
+  const a = await makeClip(page, { frames: 30, audio: false }), b = await makeClip(page, { frames: 30, blue: 200 });
+  await loadVideo(page, a);
+  assert(await page.isDisabled('[data-open-tool="sound"]'), 'no sound yet');
+  await page.click('[data-open-tool="cut"]');
+  await addClips(page, [b]);
+  assert((await page.textContent('#cut-out')) === '2 pieces · copy, no re-encode', 'picture copies');
+  await applyTool(page, 'cut');
+  assert(!(await page.isDisabled('[data-open-tool="sound"]')) && !/no sound/.test(await page.textContent('#dims')), 'sound arrives with clip 2');
+  await page.click('#btn-export');
+  assert((await page.textContent('#vexport-sound')) === 're-encoded' && (await page.textContent('#vexport-copy')) === 'copied, not re-encoded', 'cells');
+  assert(/The sound is re-encoded: clip 1 has no sound\./.test(await page.textContent('#vexport-note')), 'note ' + await page.textContent('#vexport-note'));
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  const { bytes } = await exportVideo(page);
+  const m = parseMp4(bytes), v = vtrack(m), pa = vtrack(parseMp4(a)), pb = vtrack(parseMp4(b));
+  assert(v.sampleCount === 60, 'frames ' + v.sampleCount);
+  for (let k = 0; k < 30; k++) assert(v.sample(k).equals(pa.sample(k)) && v.sample(30 + k).equals(pb.sample(k)), 'frame ' + k + ' changed');
+  near(seconds(strack(m)), 2, 0.05, 'sound length');
+  const p = await probe(page, bytes, { windows: [[0.1, 0.9], [1.1, 1.9]] });
+  assert(p.rms[0] < 0.01 && p.rms[1] > 0.1, 'silence, then the tone ' + p.rms);
+  // Sound removed: nothing to encode, and the copy carries no sound track.
+  await page.click('[data-open-tool="sound"]');
+  await page.click('[data-sound="remove"]');
+  await applyTool(page, 'sound');
+  const m2 = parseMp4((await exportVideo(page)).bytes);
+  assert(m2.tracks.length === 1 && vtrack(m2).sampleCount === 60, 'picture only');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video join: a clip of another shape is re-encoded to H.264 at the first size, with black bars', async () => {
+  const { ctx, page } = await newApp();
+  const a = await makeClip(page, { frames: 30 }), b = await makeClip(page, { w: 160, h: 240, frames: 30, blue: 200 });
+  await loadVideo(page, a);
+  await page.click('[data-open-tool="cut"]');
+  await addClips(page, [b]);
+  assert((await page.textContent('#cut-out')) === '2 pieces · re-encode to H.264', 'strip ' + await page.textContent('#cut-out'));
+  assert(/Export will re-encode the picture to H\.264 at 320 × 240, 30 fps: clip 2 is 160 × 240, not 320 × 240\./.test(await page.textContent('#cut-note')), 'note ' + await page.textContent('#cut-note'));
+  await applyTool(page, 'cut');
+  const t0 = Date.now();
+  const { bytes, note } = await reencodeVideo(page);
+  assert(/re-encoded to H\.264 at 320 × 240, 30 fps, because clip 2 is 160 × 240, not 320 × 240\. Clips of another shape get black bars\./.test(note) && !/HDR/.test(note), 'export note ' + note);
+  assert(/Re-encoded to H\.264\./.test(await page.textContent('.notice[data-id="export"]')), 'confirmation says re-encoded');
+  const m = parseMp4(bytes), v = vtrack(m);
+  assert(v.codec === 'avc1' && v.codedWidth === 320 && v.codedHeight === 240 && v.sampleCount === 60, 'picture ' + [v.codec, v.codedWidth, v.codedHeight, v.sampleCount]);
+  near(seconds(v), 2, 0.002, 'length');
+  const p = await probe(page, bytes, { at: [0.5, 1.5], points: [[0.5, 0.5], [0.1, 0.5], [0.3, 0.5], [0.9, 0.5]] });
+  // Clip 1 fills the frame; clip 2 (160 × 240) fits 160 wide in the middle, black either side.
+  near(p.colors[0][0][0], 50, 8, 'clip 1 frame 15 red'); near(p.colors[0][1][2], 64, 8, 'clip 1 reaches the edge');
+  near(p.colors[1][0][0], 50, 8, 'clip 2 frame 15 red'); near(p.colors[1][0][2], 200, 8, 'clip 2 blue');
+  near(p.colors[1][2][2], 200, 8, 'clip 2 inside its width');
+  for (const k of [1, 3]) assert(p.colors[1][k].every((c) => c < 12), 'black bar ' + JSON.stringify(p.colors[1][k]));
+  assert(p.audio && p.audio.codec === 'opus', 'both clips have the same sound, so it is copied: ' + JSON.stringify(p.audio));
+  near(seconds(strack(m)), 2, 0.05, 'sound length');
+  assert(findVideoMetadata(bytes).length === 0, 'metadata: ' + findVideoMetadata(bytes));
+  console.log('      60 frames re-encoded in ' + (Date.now() - t0) + ' ms');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video join: a portrait clip stored turned 90 degrees joins an upright one the right way up', async () => {
+  const { ctx, page } = await newApp();
+  // The phone's way: 320 × 240 frames with a quarter turn clockwise in the file, shown 240 × 320.
+  const a = await makeClip(page, { rotation: 90, frames: 30, mark: true }), b = await makeClip(page, { w: 240, h: 320, frames: 30, mark: true, blue: 200 });
+  await loadVideo(page, a);
+  await page.click('[data-open-tool="cut"]');
+  await addClips(page, [b]);
+  assert(/clip 2 was encoded with other settings/.test(await page.textContent('#cut-note')), 'same shape on screen, stored differently: ' + await page.textContent('#cut-note'));
+  await applyTool(page, 'cut');
+  assert((await page.textContent('#dims')) === '240 × 320 · 0:02.00', 'top bar ' + await page.textContent('#dims'));
+  const { bytes } = await reencodeVideo(page);
+  const v = vtrack(parseMp4(bytes));
+  assert(v.codedWidth === 240 && v.codedHeight === 320 && JSON.stringify(v.matrix.slice(0, 5)) === JSON.stringify([65536, 0, 0, 0, 65536]), 'stored upright ' + [v.codedWidth, v.codedHeight, v.matrix]);
+  const p = await probe(page, bytes, { at: [0.5, 1.5], points: [[0.9, 0.1], [0.1, 0.1], [0.5, 0.5]] });
+  // Clip 1's stored top-left corner turns to the top right; clip 2's stays top left.
+  assert(p.colors[0][0].every((c) => c > 230) && p.colors[0][1][2] < 120, 'clip 1 turned: ' + JSON.stringify(p.colors[0]));
+  assert(p.colors[1][1].every((c) => c > 230) && p.colors[1][0][2] > 150, 'clip 2 as it was: ' + JSON.stringify(p.colors[1]));
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video join: another frame rate and HDR re-encode to SDR at the first rate; a silent clip gets silence', async () => {
+  const { ctx, page } = await newApp();
+  const hlg = { primaries: 'bt2020', transfer: 'hlg', matrix: 'bt2020-ncl', fullRange: false };
+  const a = await makeClip(page, { frames: 30 }), b = await makeClip(page, { fps: 25, frames: 25, gop: 25, audio: false, colorSpace: hlg, blue: 200 });
+  await loadVideo(page, a);
+  await page.click('[data-open-tool="cut"]');
+  await addClips(page, [b]);
+  const cn = await page.textContent('#cut-note');
+  assert(/clip 2 runs at 25 fps, not 30\. HDR becomes SDR\./.test(cn), 'cut note ' + cn);
+  await applyTool(page, 'cut');
+  await page.click('#btn-export');
+  assert((await page.textContent('#vexport-sound')) === 're-encoded' && (await page.textContent('#vexport-copy')) === 're-encoded, H.264', 'export cells');
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  const { bytes, note } = await reencodeVideo(page);
+  assert(/HDR becomes SDR: this phone cannot encode 10-bit HDR video\./.test(note) && /The sound is re-encoded: clip 2 has no sound\./.test(note), 'export note ' + note);
+  const m = parseMp4(bytes), v = vtrack(m), s = strack(m);
+  assert(v.sampleCount === 60, 'one second of 25 fps becomes 30 frames: ' + v.sampleCount);
+  near(seconds(v), 2, 0.002, 'length');
+  assert(!v.colr || v.colr.transfer !== 18, 'not tagged HLG ' + JSON.stringify(v.colr));
+  assert(s && s.codec === 'Opus', 'sound encoded again (Opus here; AAC where the phone has it): ' + (s && s.codec));
+  near(seconds(s), 2, 0.05, 'sound as long as the picture');
+  const p = await probe(page, bytes, { at: [0.5, 1.5], windows: [[0.1, 0.9], [1.1, 1.9]] });
+  assert(p.rms[0] > 0.1 && p.rms[1] < 0.01, 'tone, then silence ' + p.rms);
+  near(p.colors[1][0][2], 200, 12, 'clip 2 shows in the second second');
+  assert(findVideoMetadata(bytes).length === 0, 'metadata: ' + findVideoMetadata(bytes));
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video join: Trim works on the picked piece; playback runs on into the next clip; hold and undo', async () => {
+  const { ctx, page } = await newApp();
+  const a = await makeClip(page, { frames: 45 }), b = await makeClip(page, { frames: 60, blue: 200 });
+  await loadVideo(page, a);
+  await page.click('[data-open-tool="cut"]');
+  await addClips(page, [b]);
+  await applyTool(page, 'cut');
+  await page.click('[data-open-tool="trim"]');
+  assert(/^piece 2 of 2 · keyframe every 1\.00 s$/.test(await page.textContent('#trim-out')), 'strip ' + await page.textContent('#trim-out'));
+  assert(await page.evaluate(() => retouch.pl.clip === 1), 'the player holds clip 2');
+  await page.evaluate(() => retouch.tools.trim.setEnd(1.2));
+  await applyTool(page, 'trim');
+  assert(JSON.stringify(await pieces(page, false)) === JSON.stringify([[0, 0, 1.5], [1, 0, 1.2]]), 'only piece 2 trimmed ' + JSON.stringify(await pieces(page, false)));
+  assert((await page.textContent('#dims')) === '320 × 240 · 0:02.70', 'top bar ' + await page.textContent('#dims'));
+  // Play from the start: it moves to clip 2's file after 1.5 s and stops at the end.
+  await page.evaluate(() => { const s = document.querySelector('#seek'); s.value = '0'; s.dispatchEvent(new Event('input')); });
+  await page.waitForFunction(() => retouch.pl.clip === 0 && retouch.pl.seek === null && retouch.player.readyState >= 2, null, { timeout: 10000 });
+  await page.click('#play');
+  await page.waitForFunction(() => retouch.pl.clip === 1 && retouch.pl.i === 1 && retouch.player.currentTime > 0.2, null, { timeout: 10000 });
+  assert(/^0:0[12]\.\d\d \/ 0:02\.70$/.test(await page.textContent('#clock')), 'clock runs on ' + await page.textContent('#clock'));
+  await page.waitForFunction(() => retouch.player.paused && retouch.pl.i === 0, null, { timeout: 10000 });
+  // Hold shows the original: clip 1 alone.
+  await page.click('#btn-export');
+  const hb = await page.locator('.sheet-panel[data-tool="vexport"] [data-hold]').boundingBox();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.mouse.down();
+  const held = await page.evaluate(() => [retouch.pl.clip, document.querySelector('#clock').textContent]);
+  await page.mouse.up();
+  assert(held[0] === 0 && /\/ 0:01\.50$/.test(held[1]), 'hold plays the original ' + held);
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  await page.click('#btn-undo');
+  assert((await page.textContent('#dims')) === '320 × 240 · 0:03.50', 'undo the trim');
+  await page.click('#btn-undo');
+  assert((await page.textContent('#dims')) === '320 × 240 · 0:01.50' && await page.evaluate(() => retouch.app.video.sel === 0), 'undo the join');
+  // A file that is not a video is not added, and says so.
+  await page.click('[data-open-tool="cut"]');
+  await page.setInputFiles('#file-add', { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('hello') });
+  await page.waitForSelector('.notice[data-id="add"]');
+  assert(/notes\.txt is not a video/.test(await page.textContent('.notice[data-id="add"]')), 'not a video');
+  await page.setInputFiles('#file-add', { name: 'broken.mp4', mimeType: 'video/mp4', buffer: Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(3000, 9)]) });
+  await page.waitForFunction(() => /broken\.mp4 could not be added/.test(document.querySelector('.notice[data-id="add"]').textContent) && retouch.app.busyCount === 0);
+  assert(JSON.stringify(await pieces(page)) === JSON.stringify([[0, 0, 1.5]]), 'nothing added');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video join: several videos picked or shared together open as one joined clip', async () => {
+  const { ctx, page } = await newApp({ sw: true });
+  await page.waitForFunction(() => navigator.serviceWorker.controller, null, { timeout: 15000 });
+  const a = await makeClip(page, { frames: 30 }), b = await makeClip(page, { frames: 15, blue: 200 });
+  // Picked together.
+  await page.setInputFiles('#file', [{ name: 'PXL_a.mp4', mimeType: 'video/mp4', buffer: a }, { name: 'PXL_b.mp4', mimeType: 'video/mp4', buffer: b }]);
+  await page.waitForFunction(() => retouch.app.video && retouch.app.video.clips.length === 2 && retouch.app.busyCount === 0);
+  assert(JSON.stringify(await pieces(page, false)) === JSON.stringify([[0, 0, 1], [1, 0, 0.5]]) && /^1 edit ▸ /.test(await page.textContent('#top-code')), 'joined as one step');
+  // Shared together from another app, offline.
+  await ctx.setOffline(true);
+  await page.reload();
+  await page.waitForFunction(() => window.retouch && window.retouch.app);
+  await page.evaluate(([x, y]) => {
+    const form = document.createElement('form');
+    form.method = 'POST'; form.action = 'share-target'; form.enctype = 'multipart/form-data';
+    const input = document.createElement('input'); input.type = 'file'; input.name = 'media'; input.multiple = true;
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array(x)], 'PXL_1.mp4', { type: 'video/mp4' }));
+    dt.items.add(new File([new Uint8Array(y)], 'PXL_2.mp4', { type: 'video/mp4' }));
+    input.files = dt.files;
+    form.append(input); document.body.append(form); form.submit();
+  }, [Array.from(a), Array.from(b)]);
+  await page.waitForURL(/retouch\.html$/);
+  await page.waitForFunction(() => window.retouch && window.retouch.app.video && window.retouch.app.video.clips.length === 2 && window.retouch.app.busyCount === 0, null, { timeout: 15000 });
+  assert(await page.evaluate(() => retouch.app.fileName === 'PXL_1.mp4'), 'named after the first');
+  const left = await page.evaluate(async () => (await (await caches.open('retouch-share')).keys()).length);
+  assert(left === 0, 'share cache emptied: ' + left);
+  const m = parseMp4((await exportVideo(page)).bytes);
+  assert(vtrack(m).sampleCount === 45, 'exports both: ' + vtrack(m).sampleCount);
+  // A photo first: only it opens, and the notice says why.
+  await ctx.setOffline(false);
+  await page.setInputFiles('#file', [{ name: 'a.png', mimeType: 'image/png', buffer: gradient() }, { name: 'PXL_b.mp4', mimeType: 'video/mp4', buffer: b }]);
+  await page.waitForSelector('.notice[data-id="add"]');
+  assert(await page.evaluate(() => !!retouch.app.edits && !retouch.app.video), 'the photo is open');
   await ctx.close();
 });
 

@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.8.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.9.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -61,11 +61,13 @@ How the file is laid out:
      b. CORE: pure image functions (geometry, crop, resize, add canvas,
         text layout and drawing, background mask refinement, brush and
         cut-out, skin smoothing, spot healing and inpainting, metadata strip, edit history),
-        and for video: which packets a trim copies, clip facts, video edit history,
-        MP4 dates and metadata, the video check list. Tests and the mutation runner
-        target this block. MediaPipe and Mediabunny sit outside it, in the app.
+        and for video: which packets a trim copies, clip facts, cut and join (when
+        clips can be copied together, splits, the frame grid and sound placement
+        for a join, resampling), video edit history, MP4 dates and metadata, the
+        video check list. Tests and the mutation runner target this block.
+        MediaPipe and Mediabunny sit outside it, in the app.
      c. App: view (zoom, pan), tools, open, export, video (check, player, trim,
-        sound, export), service worker.
+        cut and join, sound, export by copy or H.264 re-encode), service worker.
 -->
 <html lang="en">
 <head>
@@ -157,7 +159,7 @@ body[data-tool="crop"] .strip [data-for="crop"],body[data-tool="pad"] .strip [da
 body[data-tool="bg"] .strip [data-for="bg"],body[data-tool="skin"] .strip [data-for="skin"],
 body[data-tool="spot"] .strip [data-for="spot"],body[data-tool="trim"] .strip [data-for="trim"],
 body[data-tool="sound"] .strip [data-for="sound"],body[data-tool="vexport"] .strip [data-for="vexport"],
-body[data-tool="vcheck"] .strip [data-for="vcheck"]{display:inline}
+body[data-tool="vcheck"] .strip [data-for="vcheck"],body[data-tool="cut"] .strip [data-for="cut"]{display:inline}
 
 /* Stage: the photo fills everything between the bars. */
 #stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;touch-action:none;background:var(--stage)}
@@ -176,7 +178,8 @@ body[data-tool="vcheck"] .strip [data-for="vcheck"]{display:inline}
 .hint{position:absolute;left:14px;bottom:14px;max-width:calc(100% - 96px);padding:8px 10px;border-radius:4px;background:rgba(20,19,18,.86);color:var(--ink-2);font-size:11px;line-height:15px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;pointer-events:none;display:none;z-index:2}
 body[data-tool="pad"] .hint[data-for="pad"],body[data-tool="spot"] .hint[data-for="spot"],
 body[data-tool="bg"][data-brush] .hint[data-for="bg"],body[data-tool="skin"][data-brush] .hint[data-for="skin"],
-body[data-tool="bg"][data-bg-ready]:not([data-brush]) .hint[data-for="bg-view"],body[data-tool="trim"] .hint[data-for="trim"]{display:block}
+body[data-tool="bg"][data-bg-ready]:not([data-brush]) .hint[data-for="bg-view"],body[data-tool="trim"] .hint[data-for="trim"],
+body[data-tool="cut"] .hint[data-for="cut"]{display:block}
 
 /* Video mode: the player stands in for the photo canvas, with a play bar over its foot. */
 #player{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:var(--stage);display:none}
@@ -197,6 +200,14 @@ body[data-mode="video"] .tool[data-mode="photo"],body:not([data-mode="video"]) .
 .tl-head{position:absolute;top:-4px;bottom:-4px;width:2px;margin-left:-1px;background:var(--ink)}
 .tl-handle{position:absolute;top:0;width:44px;height:56px;margin-left:-22px;border:0;background:transparent;padding:0;display:flex;justify-content:center;align-items:center}
 .tl-handle::before{content:"";width:12px;height:40px;border-radius:3px;background:var(--amber);box-shadow:0 0 0 2px var(--chrome)}
+/* Cut: the pieces end to end, shaded by clip, the picked one outlined in amber. */
+.cut-piece{position:absolute;top:0;bottom:0;border-left:1px solid var(--chrome);display:flex;align-items:center;justify-content:center;overflow:hidden;font:500 12px/16px var(--font-mono);color:var(--muted)}
+.cut-piece[data-clip="0"]{background:var(--raised-2)}
+.cut-piece[data-clip="1"]{background:#3D352B}
+.cut-piece[data-clip="2"]{background:#26302A}
+.cut-piece[data-on]{box-shadow:inset 0 0 0 2px var(--amber);color:var(--amber)}
+#cut-pieces{position:absolute;inset:0}
+#cut-line .tl-head{z-index:1}
 /* Video check: one line per codec, verdict in its colour. */
 .checks{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:4px;overflow:hidden}
 .check-row{display:flex;gap:10px;align-items:baseline;padding:8px 12px;border-top:1px solid var(--line);background:var(--stage)}
@@ -339,6 +350,7 @@ fieldset:disabled{opacity:.4}
   <span class="edge status" id="skin-out" data-for="skin"></span>
   <span class="edge status" id="spot-out" data-for="spot"></span>
   <span class="edge status" id="trim-out" data-for="trim"></span>
+  <span class="edge status" id="cut-out" data-for="cut"></span>
   <span class="edge status" id="sound-out" data-for="sound"></span>
   <span class="edge status" id="vexport-out" data-for="vexport"></span>
   <span class="edge status" id="vcheck-out" data-for="vcheck"></span>
@@ -360,6 +372,7 @@ fieldset:disabled{opacity:.4}
   <div class="hint" data-for="skin">Blue is smoothed · 1 finger paints · 2 fingers move</div>
   <div class="hint" data-for="spot">Tap or brush a spot · 2 fingers move · small spots only</div>
   <div class="hint" data-for="trim">Start snaps back to a keyframe · nothing is re-encoded</div>
+  <div class="hint" data-for="cut">Tap a piece to pick it · split snaps back to a keyframe</div>
 
   <section class="empty" id="empty">
     <div class="band top">
@@ -702,6 +715,33 @@ fieldset:disabled{opacity:.4}
     </div>
   </div>
 
+  <div class="sheet-panel" data-tool="cut" hidden>
+    <div class="sheet-head">
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Cut &amp; join</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold for the original" title="Hold for the original"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+    </div>
+    <div class="timeline" id="cut-line" role="group" aria-label="Pieces">
+      <div class="tl-track"><div id="cut-pieces"></div><div class="tl-head" id="cut-head"></div></div>
+    </div>
+    <div class="cells">
+      <div class="cell"><span class="k">Piece</span><span class="v" id="cut-piece"></span></div>
+      <div class="cell"><span class="k">Clip</span><span class="v" id="cut-clip"></span></div>
+      <div class="cell"><span class="k">Total</span><span class="v key" id="cut-total"></span></div>
+    </div>
+    <p class="note" id="cut-note" hidden></p>
+    <div class="tiles">
+      <button class="tile" id="cut-play"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5z"/></svg>Play</button>
+      <button class="tile" id="cut-split"><svg viewBox="0 0 24 24"><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/><path d="M8.3 15.7L17 4M15.7 15.7L7 4"/></svg>Split</button>
+      <button class="tile" id="cut-delete"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V4.5h4V7M7 7l1 13h8l1-13"/></svg>Delete</button>
+      <button class="tile" id="cut-earlier"><svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>Earlier</button>
+      <button class="tile" id="cut-later"><svg viewBox="0 0 24 24"><path d="M10 6l6 6-6 6"/></svg>Later</button>
+      <button class="tile" id="cut-add"><svg viewBox="0 0 24 24"><rect x="3.5" y="6.5" width="13" height="11" rx="1"/><path d="M20 9v6M17 12h6"/></svg>Add</button>
+    </div>
+  </div>
+
   <div class="sheet-panel" data-tool="sound" hidden>
     <div class="sheet-head">
       <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
@@ -743,6 +783,7 @@ fieldset:disabled{opacity:.4}
     <div class="tiles" style="gap:10px">
       <button class="btn" id="vexport-download" disabled style="flex:1;min-height:54px">Download</button>
       <button class="btn btn-primary" id="vexport-share" disabled style="flex:1.3;min-height:54px">Share</button>
+      <button class="btn btn-primary" id="vexport-start" hidden style="flex:1;min-height:54px">Re-encode</button>
     </div>
   </div>
 
@@ -791,6 +832,9 @@ fieldset:disabled{opacity:.4}
     <button class="tool" data-mode="video" data-open-tool="trim" disabled>
       <svg viewBox="0 0 24 24"><rect x="3.5" y="7.5" width="17" height="9" rx="1"/><path d="M8 4.5v15M16 4.5v15"/></svg>Trim
     </button>
+    <button class="tool" data-mode="video" data-open-tool="cut" disabled>
+      <svg viewBox="0 0 24 24"><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/><path d="M8.3 15.7L17 4M15.7 15.7L7 4"/></svg>Cut
+    </button>
     <button class="tool" data-mode="video" data-open-tool="sound" disabled>
       <svg viewBox="0 0 24 24"><path d="M4 9.5h4l5-4v13l-5-4H4z"/><path d="M16.5 9a4 4 0 0 1 0 6M19 6.5a7.5 7.5 0 0 1 0 11"/></svg>Sound
     </button>
@@ -800,7 +844,8 @@ fieldset:disabled{opacity:.4}
   </div>
 </nav>
 
-<input type="file" id="file" accept="image/*,video/*,.avif,.heic,.heif,.webp,.mp4,.mov,.m4v,.webm" hidden>
+<input type="file" id="file" accept="image/*,video/*,.avif,.heic,.heif,.webp,.mp4,.mov,.m4v,.webm" multiple hidden>
+<input type="file" id="file-add" accept="video/*,.mp4,.mov,.m4v,.webm" multiple hidden>
 
 <script>
 'use strict';
@@ -809,7 +854,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.8.0';
+const APP_VERSION = '0.9.0';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -2597,9 +2642,170 @@ core.video.describe = (info) => {
   return parts.join(' · ');
 };
 
-/* Video edits: each step is the whole recipe { start, end, audio } (times in the
-   source clip, audio true to keep the sound). Nothing is rendered until export, so
-   a step costs nothing to keep. */
+/* Cut and join (phase V2). An edit is now a list of pieces, each a stretch
+   { clip, start, end } of one of the open clips, played one after another. A piece
+   starts on a keyframe, as a trim does, so the pieces can still be copied without
+   re-encoding. That holds only while every clip in the list was recorded the same
+   way (same codec setup, size, turn, frame rate and colour). Otherwise the picture
+   is re-encoded to H.264, at the first piece's size and frame rate, with the other
+   clips scaled to fit inside it (black bars, nothing cropped off). */
+
+// The usual frame rates. A measured rate within 0.5 % of one is taken as the
+// nearest one (a dropped frame makes 30 fps measure 29.98); otherwise it is kept
+// to two decimals.
+core.video.RATES = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 90, 120, 240];
+core.video.standardRate = (fps) => {
+  let best = null;
+  for (const r of core.video.RATES) {
+    if (Math.abs(fps - r) <= r * 0.005 && (best === null || Math.abs(fps - r) < Math.abs(fps - best))) best = r;
+  }
+  return best ?? Math.round(fps * 100) / 100;
+};
+
+// Why the pieces cannot simply be copied into one file: plain reasons, one per clip
+// at most, empty when they can. clips holds the facts of each clip the pieces use,
+// the first piece's clip first: { name, codec, mp4, width, height, rotation, rate,
+// hdr, setup }. mp4 says the codec can go into an MP4 as it is; setup stands for the
+// codec's setup bytes, so two clips with the same setup decode the same way.
+core.video.joinCheck = (clips) => {
+  const why = [];
+  const a = clips[0];
+  if (!a) return why;
+  const look = (c) => (c.hdr ? 'HDR ' + c.hdr : 'SDR');
+  if (!a.mp4) why.push(a.name + ' is ' + core.video.codecName(a.codec) + ', which cannot go into an MP4 as it is');
+  for (const b of clips.slice(1)) {
+    if (b.codec !== a.codec) why.push(b.name + ' is ' + core.video.codecName(b.codec) + ', not ' + core.video.codecName(a.codec));
+    else if (b.width !== a.width || b.height !== a.height) why.push(b.name + ' is ' + b.width + ' × ' + b.height + ', not ' + a.width + ' × ' + a.height);
+    else if (b.rate !== a.rate) why.push(b.name + ' runs at ' + b.rate + ' fps, not ' + a.rate);
+    else if (b.hdr !== a.hdr) why.push(b.name + ' is ' + look(b) + ', not ' + look(a));
+    else if (b.rotation !== a.rotation || b.setup !== a.setup) why.push(b.name + ' was encoded with other settings');
+  }
+  return why;
+};
+
+// How the sound gets into the export. sounds: per clip used, { name, codec, mp4,
+// setup, label }, codec null for a clip with no sound. Returns { mode, why }:
+// 'none' (sound removed, or no clip has any), 'copy' (every clip's sound packets go
+// in as they are) or 'encode' (decoded and encoded again, silence where a clip has none).
+core.video.soundCheck = (sounds, keep) => {
+  const a = sounds.find((s) => s.codec);
+  if (!keep || !a) return { mode: 'none', why: [] };
+  const why = [];
+  if (!a.mp4) why.push(core.video.codecName(a.codec) + ' sound cannot go into an MP4 as it is');
+  for (const s of sounds) {
+    if (!s.codec) why.push(s.name + ' has no sound');
+    else if (s.setup !== a.setup) why.push(s.name + ' has other sound (' + s.label + ', not ' + a.label + ')');
+  }
+  return { mode: why.length ? 'encode' : 'copy', why };
+};
+
+// Where each piece goes in the export: plans[i] runs from `from` to `to` in its
+// clip. Returns the export time each piece starts at, and the whole length.
+core.video.joinOffsets = (plans) => {
+  let t = 0;
+  const at = plans.map((p) => { const o = t; t += p.to - p.from; return o; });
+  return { at, total: t };
+};
+
+// Re-encoding: the frames of the export, evenly spaced at the export's rate. A piece
+// gives the frames at start, start + 1/rate and so on while they begin before its
+// end (at least one), each taken from the source frame on screen at that moment.
+// Returns per piece { from, to, times } (times in its clip) and the frame count.
+core.video.frameGrid = (pieces, rate) => {
+  let frames = 0;
+  const out = pieces.map((p) => {
+    const n = Math.max(1, Math.ceil((p.end - p.start) * rate - 1e-3));
+    frames += n;
+    return { from: p.start, to: p.start + n / rate, times: Array.from({ length: n }, (_, k) => p.start + k / rate) };
+  });
+  return { pieces: out, frames };
+};
+
+// Copied sound across a join. Each piece's packets keep their own spacing, moved to
+// the piece's place in the export. At a join the new piece's first packets overlap
+// the end of the piece before (both keep the packet that crosses the cut). A packet
+// that overlaps by more than half its length is left out; one that overlaps by less
+// starts when the one before ends, since sound times may never go back. list holds
+// { ts, dur } in export time, in order; returns each packet's time, or null if left out.
+core.video.placeSound = (list) => {
+  let end = -Infinity;
+  return list.map((p) => {
+    let t = p.ts;
+    if (t < end - core.video.EPS) {
+      if (end - t > p.dur / 2) return null;
+      t = end;
+    }
+    end = t + p.dur;
+    return t;
+  });
+};
+
+// Sound from a clip with another sample rate or channel count, made to fit the
+// export's: channels mixed down to one, or the last one repeated up to two, then the
+// rate changed by drawing a straight line between neighbouring samples. Made once
+// per piece and fed the decoded sound in order: it keeps its place between calls,
+// so there is no seam between chunks. planes: one Float32Array per channel.
+core.video.reshaper = (fromRate, toRate, toChannels) => {
+  const step = fromRate / toRate;
+  let pos = 1;           // where the next output sample falls, counted in input samples, 0 being the last sample of the call before
+  let prev = null;
+  return (planes) => {
+    const n = planes[0] ? planes[0].length : 0;
+    let ch;
+    if (planes.length === toChannels) ch = planes;
+    else if (toChannels === 1) {
+      const m = new Float32Array(n);
+      for (const p of planes) for (let i = 0; i < n; i++) m[i] += p[i] / planes.length;
+      ch = [m];
+    } else ch = Array.from({ length: toChannels }, (_, c) => planes[Math.min(c, planes.length - 1)]);
+    if (step === 1 || !n) return ch;
+    const src = ch.map((p, c) => { const a = new Float32Array(n + 1); a[0] = prev ? prev[c] : p[0]; a.set(p, 1); return a; });
+    const k = pos < n ? Math.ceil((n - pos) / step) : 0;    // output samples that fall before the last input sample
+    const res = src.map(() => new Float32Array(k));
+    for (let j = 0; j < k; j++) {
+      const x = pos + j * step, i = Math.floor(x), f = x - i;
+      for (let c = 0; c < src.length; c++) res[c][j] = src[c][i] + (src[c][i + 1] - src[c][i]) * f;
+    }
+    pos = Math.max(0, pos + k * step - n);
+    prev = src.map((a) => a[n]);
+    return res;
+  };
+};
+
+// Bits per second for re-encoded H.264: 0.25 bits per pixel per frame (close to what
+// the phone records at), between 2 and 60 Mbit/s (60 is what the video check ran 4K 60 at).
+core.video.encodeBitrate = (w, h, rate) => Math.round(Math.min(60e6, Math.max(2e6, w * h * rate * 0.25)));
+
+// The player's place in a list of pieces. pieceAt turns a time in the export into
+// { i, at }: which piece, and the time in its clip. timeOf goes back.
+core.video.pieceAt = (pieces, t) => {
+  let o = 0;
+  for (let i = 0; i < pieces.length; i++) {
+    const len = pieces[i].end - pieces[i].start;
+    if (t < o + len - core.video.EPS || i === pieces.length - 1) return { i, at: pieces[i].start + Math.min(len, Math.max(0, t - o)) };
+    o += len;
+  }
+  return null;
+};
+core.video.timeOf = (pieces, i, at) => {
+  let o = 0;
+  for (let k = 0; k < i; k++) o += pieces[k].end - pieces[k].start;
+  return o + at - pieces[i].start;
+};
+
+// Split piece i at time t in its clip. The cut goes back to the keyframe at or
+// before t, so both halves start on a keyframe and still copy. Returns the new list,
+// or null when the piece has no keyframe after its start to cut at.
+core.video.split = (pieces, i, keys, t) => {
+  const p = pieces[i], E = core.video.EPS;
+  const k = core.video.keyBefore(keys, t);
+  if (k <= p.start + E || k >= p.end - E) return null;
+  return [...pieces.slice(0, i), { ...p, end: k }, { ...p, start: k }, ...pieces.slice(i + 1)];
+};
+
+/* Video edits: each step is the whole recipe { pieces, audio } (pieces as above,
+   times in their clips; audio true to keep the sound). Nothing is rendered until
+   export, so a step costs nothing to keep. */
 class ClipHistory {
   constructor(recipe) {
     this.stack = [{ ...recipe, label: 'Original' }];
@@ -3072,14 +3278,15 @@ function afterHistoryChange() {
   $('#btn-redo').disabled = !h || !h.canRedo;
   $('#btn-export').disabled = !h;
   for (const b of $$('[data-open-tool]')) b.disabled = b.dataset.mode === 'video' ? !v : !e;
-  if (v && !v.at) $('[data-open-tool="sound"]').disabled = true;
+  if (v && !recipeHasSound(v, v.history.current)) $('[data-open-tool="sound"]').disabled = true;
   $('#hold-main').hidden = !e || !!app.tool;
   $('#empty').hidden = !!h;
   document.body.toggleAttribute('data-empty', !h);
   if (v) document.body.dataset.mode = 'video'; else delete document.body.dataset.mode;
   if (v) {
-    const r = v.history.current, plan = core.video.planTrim(v.vpk, r.start, r.end), d = new Date();
-    $('#dims').textContent = fmtDims(v.info.width, v.info.height) + ' · ' + core.video.fmtTime(plan.to - plan.from) + (r.audio && v.at ? '' : ' · no sound');
+    const r = v.history.current, j = joinPlan(v, r), d = new Date();
+    v.sel = Math.min(v.sel, r.pieces.length - 1);
+    $('#dims').textContent = fmtDims(j.w, j.h) + ' · ' + core.video.fmtTime(j.total) + (j.sound.mode === 'none' ? ' · no sound' : '');
     $('#top-code').textContent = editCount() + ' ▸ ' + pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + ' ' + pad2(d.getHours()) + pad2(d.getMinutes());
     playerRule();
     return;
@@ -3164,10 +3371,27 @@ async function openFile(file) {
   } finally { busy(false); }
 }
 
+// Several files at once (picked together, dropped or shared): the first opens, and
+// when it is a video the other videos are joined on after it, as one Join step.
+async function openFiles(files) {
+  if (!files.length) return false;
+  const ok = await openFile(files[0]);
+  const rest = files.slice(1);
+  if (!ok || !rest.length) return ok;
+  const v = app.video;
+  if (!v) { notify('Only the first file was opened. Several files can be opened together only when they are all videos, to join them.', 'watch', { id: 'add' }); return ok; }
+  const got = await readMore(rest);
+  if (app.video !== v || !got.length) return ok;
+  const r = v.history.current;
+  v.history.push({ pieces: [...r.pieces, ...got.map((i) => ({ clip: i, start: v.clips[i].first, end: v.clips[i].end }))] }, 'Join');
+  afterHistoryChange();
+  return ok;
+}
+
 $('#file').addEventListener('change', (e) => {
-  const f = e.target.files && e.target.files[0];
+  const files = Array.from(e.target.files || []);
   e.target.value = '';
-  if (f) openFile(f);
+  openFiles(files);
 });
 const pickFile = () => $('#file').click();
 $('#btn-open').addEventListener('click', pickFile);
@@ -3175,28 +3399,32 @@ $('#btn-open-empty').addEventListener('click', pickFile);
 document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => {
   e.preventDefault();
-  const f = e.dataTransfer && e.dataTransfer.files[0];
-  if (f) openFile(f);
+  openFiles(Array.from((e.dataTransfer && e.dataTransfer.files) || []));
 });
 
-// A photo shared from another app arrives through the service worker,
-// which parks it in a cache and opens retouch.html?shared=1.
+// A photo or video shared from another app arrives through the service worker,
+// which parks it in a cache and opens retouch.html?shared=1. Several shared at
+// once are parked one key each (the second as shared-image-2 and so on), and
+// ?shared= says how many.
 async function receiveShared() {
   const q = new URLSearchParams(location.search);
   if (!q.has('shared')) return;
   window.history.replaceState(null, '', location.pathname);
-  if (q.get('shared') !== '1' || !('caches' in window)) {
-    notify('The shared file did not arrive. Open it from the Open button instead.', 'fail', { sticky: true });
-    return;
-  }
+  const n = parseInt(q.get('shared'), 10);
+  const lost = () => notify('The shared file did not arrive. Open it from the Open button instead.', 'fail', { sticky: true });
+  if (!(n >= 1) || !('caches' in window)) { lost(); return; }
   const cache = await caches.open(SHARE_CACHE);
-  const key = new URL(SHARE_KEY, location.href).href;
-  const res = await cache.match(key);
-  await cache.delete(key);
-  if (!res) { notify('The shared file did not arrive. Open it from the Open button instead.', 'fail', { sticky: true }); return; }
-  const blob = await res.blob();
-  const name = decodeURIComponent(res.headers.get('x-filename') || 'shared');
-  await openFile(new File([blob], name, { type: blob.type }));
+  const files = [];
+  for (let i = 0; i < Math.min(n, 50); i++) {
+    const key = new URL(SHARE_KEY + (i ? '-' + (i + 1) : ''), location.href).href;
+    const res = await cache.match(key);
+    await cache.delete(key);
+    if (!res) continue;
+    const blob = await res.blob();
+    files.push(new File([blob], decodeURIComponent(res.headers.get('x-filename') || 'shared'), { type: blob.type }));
+  }
+  if (!files.length) { lost(); return; }
+  await openFiles(files);
 }
 
 /* ---------- Tools: shared sheet handling ---------- */
@@ -3237,7 +3465,7 @@ function closeTool() {
   $('#sheet').hidden = true;
   $('#toolbar').hidden = false;
   $('#hold-main').hidden = !app.edits;
-  if (app.video) playerRule();
+  if (app.video) { pl.i = app.video.sel; playerRule(); }
   view.fitMode = true;
   viewResize();
 }
@@ -4518,10 +4746,14 @@ $('#btn-export').addEventListener('click', () => openTool(app.video ? 'vexport' 
 /* How video works here, in plain words. Opening a clip reads its index: the time
    of every packet (an encoded frame or a slice of sound) and which ones are
    keyframes, but no picture data. Chrome's own player shows it. Edits are only a
-   recipe (start, end, keep sound or not), so they cost nothing until export.
-   Export copies the chosen packets into a new MP4 without decoding them, so it is
-   fast and the picture and sound are exactly as recorded. Mediabunny (vendored)
-   reads and writes the files; the core functions above choose the packets. */
+   recipe (which pieces of which clips, in what order, keep sound or not), so they
+   cost nothing until export. When every clip in the recipe was recorded the same
+   way, export copies the chosen packets into a new MP4 without decoding them, so
+   it is fast and the picture and sound are exactly as recorded. When they differ,
+   the picture is decoded frame by frame, drawn at the first piece's size and
+   encoded again as H.264. Mediabunny (vendored) reads and writes the files and
+   drives Chrome's decoders and encoders; the core functions above choose the
+   packets and the frames. */
 
 const VIDEO_EXPORT_TEMP = 'retouch-export.mp4';   // scratch file in the browser's private storage for the clip being written
 
@@ -4542,8 +4774,17 @@ function shortError(err) {
   const m = err && err.message ? err.message : String(err);
   return (err && err.name && err.name !== 'Error' && !m.startsWith(err.name) ? err.name + ': ' : '') + m.slice(0, 120);
 }
+function hex(d) {
+  if (!d) return '';
+  const b = ArrayBuffer.isView(d) ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : new Uint8Array(d);
+  return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+}
+const soundLabel = (a) => core.video.codecName(a.codec) + ' · ' + Math.round(a.sampleRate / 1000) + ' kHz · ' + a.channels + ' ch';
+const clipName = (i) => 'clip ' + (i + 1);
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-// Read a clip's index and plain facts. No picture data is read here.
+// Read a clip's index and plain facts. No picture data is read here. facts and
+// sfacts are what core.video.joinCheck and soundCheck compare between clips.
 async function readClip(file) {
   const MB = await loadMediabunny();
   const input = new MB.Input({ source: new MB.BlobSource(file), formats: videoFormats(MB) });
@@ -4574,8 +4815,80 @@ async function readClip(file) {
     colorSpace: await vt.getColorSpace(), duration: end - first, keyEvery: core.video.keyEvery(keys),
     audio: at ? { codec: at.codec, sampleRate: at.sampleRate, channels: at.numberOfChannels } : null,
   };
-  return { file, input, vt, at, vpk, apk, starts, first, end, keys, info, note, url: null,
-    history: new core.ClipHistory({ start: first, end, audio: !!at }) };
+  // The decoder configs carry the codec setup and the colour tags (HDR included) as recorded.
+  const vcfg = await vt.getDecoderConfig(), acfg = at ? await at.getDecoderConfig() : null;
+  const mp4 = new MB.Mp4OutputFormat(), cs = info.colorSpace || {};
+  const facts = {
+    codec: vt.codec, mp4: mp4.getSupportedVideoCodecs().includes(vt.codec), width: info.width, height: info.height,
+    rotation: vt.rotation, rate: core.video.standardRate(info.fps), hdr: core.video.hdrName(info.colorSpace),
+    setup: [vcfg && vcfg.codec, vcfg && vcfg.codedWidth, vcfg && vcfg.codedHeight, hex(vcfg && vcfg.description), cs.primaries, cs.transfer, cs.matrix, cs.fullRange].join(' '),
+  };
+  const sfacts = at ? {
+    codec: at.codec, mp4: mp4.getSupportedAudioCodecs().includes(at.codec), label: soundLabel(info.audio),
+    setup: [acfg && acfg.codec, at.sampleRate, at.numberOfChannels, hex(acfg && acfg.description)].join(' '),
+  } : { codec: null };
+  return { file, input, vt, at, vpk, apk, starts, first, end, keys, info, note, vcfg, acfg, facts, sfacts, url: URL.createObjectURL(file) };
+}
+
+function disposeClip(c) {
+  URL.revokeObjectURL(c.url);
+  try { c.input.dispose(); } catch (err) { /* already gone */ }
+}
+
+// The open video: the clips read so far (the one opened first; Cut adds more), the
+// edit history, and which piece Trim and Cut start on.
+function newVideo(clip) {
+  return { clips: [clip], sel: 0, history: new core.ClipHistory({ pieces: [{ clip: 0, start: clip.first, end: clip.end }], audio: true }) };
+}
+
+// Read more videos into the open one, for joining. Returns the index of each clip
+// that read; one that does not is named in a notice.
+async function readMore(files) {
+  const v = app.video, got = [];
+  busy(true, 'Reading');
+  try {
+    await nextFrame();
+    for (const f of files) {
+      if (!core.video.isVideoFile(f.name, f.type)) { notify((f.name || 'That file') + ' is not a video, so it was not added.', 'watch', { id: 'add' }); continue; }
+      let clip;
+      try { clip = await readClip(f); } catch (err) {
+        notify((f.name || 'That video') + ' could not be added: ' + shortError(err) + '.', 'fail', { sticky: true, id: 'add' });
+        continue;
+      }
+      if (app.video !== v) { disposeClip(clip); break; }
+      v.clips.push(clip);
+      if (clip.note) notify(clip.note, 'watch', { id: 'video-note', sticky: true });
+      got.push(v.clips.length - 1);
+    }
+  } finally { busy(false); }
+  return got;
+}
+
+// Does any clip in the recipe have sound?
+const recipeHasSound = (v, r) => r.pieces.some((p) => v.clips[p.clip].at);
+
+// What an export of recipe r will be: copied or re-encoded and why, the sound, the
+// size and rate, and where each piece runs from and to in its clip.
+function joinPlan(v, r) {
+  const E = core.video.EPS;
+  const used = [...new Set(r.pieces.map((p) => p.clip))];
+  const clips = used.map((i) => v.clips[i]);
+  const why = core.video.joinCheck(clips.map((c, k) => ({ name: clipName(used[k]), ...c.facts })));
+  const sound = core.video.soundCheck(clips.map((c, k) => ({ name: clipName(used[k]), ...c.sfacts })), r.audio);
+  const first = clips[0], encode = why.length > 0, rate = first.facts.rate;
+  const plans = encode
+    ? core.video.frameGrid(r.pieces, rate).pieces.map((g, n) => ({ ...g, whole: r.pieces[n].start <= v.clips[r.pieces[n].clip].keys[0] + E }))
+    : r.pieces.map((p) => core.video.planTrim(v.clips[p.clip].vpk, p.start, p.end));
+  const { at, total } = core.video.joinOffsets(plans);
+  const even = (n) => Math.max(2, n - (n % 2));         // H.264 wants whole 2 × 2 colour blocks
+  return {
+    used, encode, why, sound, rate, plans, at, total,
+    w: encode ? even(first.info.width) : first.info.width, h: encode ? even(first.info.height) : first.info.height,
+    frames: encode ? plans.reduce((n, p) => n + p.times.length, 0) : 0,
+    hdr: encode && clips.some((c) => c.facts.hdr),
+    soundClip: clips.find((c) => c.at) || null,
+    extra: encode ? 0 : plans.reduce((s, p, n) => s + Math.max(0, p.to - r.pieces[n].end), 0),
+  };
 }
 
 async function openVideo(file) {
@@ -4592,11 +4905,10 @@ async function openVideo(file) {
     for (const id of ['open', 'downscale', 'video-note']) { const n = document.querySelector('.notice[data-id="' + id + '"]'); if (n) n.remove(); }
     closeVideo();
     if (app.edits) { app.edits.dispose(); app.edits = null; }
-    app.video = clip;
+    app.video = newVideo(clip);
     app.fileName = file.name || 'video';
-    clip.url = URL.createObjectURL(file);
-    player.src = clip.url;
     if (clip.note) notify(clip.note, 'watch', { id: 'video-note', sticky: true });
+    showPiece(0, clip.first);
     afterHistoryChange();
     return true;
   } finally { busy(false); }
@@ -4609,18 +4921,23 @@ function closeVideo() {
   player.pause();
   player.removeAttribute('src');
   player.load();
-  if (v.url) URL.revokeObjectURL(v.url);
-  try { v.input.dispose(); } catch (err) { /* already gone */ }
-  for (const id of ['player', 'video-note']) { const n = document.querySelector('.notice[data-id="' + id + '"]'); if (n) n.remove(); }
+  Object.assign(pl, { i: 0, clip: -1, seek: null, play: false });
+  for (const c of v.clips) disposeClip(c);
+  for (const id of ['player', 'video-note', 'add']) { const n = document.querySelector('.notice[data-id="' + id + '"]'); if (n) n.remove(); }
 }
 
 player.addEventListener('error', () => {
   if (!app.video || !player.getAttribute('src')) return;
-  notify('Chrome on this phone cannot play this ' + core.video.codecName(app.video.info.codec) + ' video, so there is no picture. Trim and Sound still work by the numbers, and export copies it as it is.', 'watch', { sticky: true, id: 'player' });
+  const c = app.video.clips[pl.clip];
+  if (!c) return;
+  notify('Chrome on this phone cannot play this ' + core.video.codecName(c.info.codec) + ' video, so there is no picture. Trim, Cut and Sound still work by the numbers, and export copies it as it is.', 'watch', { sticky: true, id: 'player' });
 });
 
 /* The player follows the recipe: what a sheet is editing, else the current step.
-   While HOLD is pressed it plays the original clip, sound included. */
+   While HOLD is pressed it plays the original clip, sound included. A recipe is a
+   list of pieces, and Chrome's player holds one file at a time, so it shows one
+   piece and moves to the next when that one ends (loading the other clip's file
+   if the next piece comes from another clip). */
 function playerRecipe() {
   const v = app.video;
   if (!v) return null;
@@ -4628,41 +4945,87 @@ function playerRecipe() {
   return app.vpreview || v.history.current;
 }
 
+// Which piece is on screen, which clip's file the player holds, and a seek (and
+// play) waiting for that file to load.
+const pl = { i: 0, clip: -1, seek: null, play: false };
+
+function showPiece(i, at, play = false) {
+  const v = app.video, r = playerRecipe();
+  if (!r) return;
+  const p = r.pieces[i], c = v.clips[p.clip];
+  pl.i = i;
+  player.muted = !(r.audio && c.at);
+  if (pl.clip !== p.clip) {
+    pl.clip = p.clip; pl.seek = at; pl.play = play;
+    player.src = c.url;                 // loadedmetadata does the seek
+  } else {
+    if (pl.seek !== null) pl.seek = at; else player.currentTime = at;
+    if (play) { if (pl.seek !== null) pl.play = true; else if (player.paused) player.play().catch(() => {}); }
+  }
+  showClock();
+}
+// Move the playhead within the piece on screen.
+function seekTo(t) { if (pl.seek !== null) pl.seek = t; else player.currentTime = t; }
+const playerTime = () => pl.seek ?? player.currentTime;
+
 function playerRule() {
   const v = app.video, r = playerRecipe();
   if (!r) return;
-  player.muted = !(r.audio && v.at);
-  const t = player.currentTime;
-  if (t < r.start - 0.01 || t > r.end) player.currentTime = r.start;
+  const i = Math.min(pl.i, r.pieces.length - 1), p = r.pieces[i];
+  if (p.clip !== pl.clip || i !== pl.i) { showPiece(i, p.start); return; }
+  player.muted = !(r.audio && v.clips[p.clip].at);
+  const t = playerTime();
+  if (t < p.start - 0.01 || t > p.end) seekTo(p.start);
   showClock();
 }
 
 function showClock() {
   const r = playerRecipe();
   if (!r) return;
-  const len = Math.max(1e-6, r.end - r.start), at = Math.min(len, Math.max(0, player.currentTime - r.start));
+  const ps = r.pieces, i = Math.min(pl.i, ps.length - 1), p = ps[i];
+  const len = Math.max(1e-6, ps.reduce((s, q) => s + q.end - q.start, 0));
+  const at = Math.min(len, Math.max(0, core.video.timeOf(ps, i, Math.min(p.end, Math.max(p.start, playerTime())))));
   $('#clock').textContent = core.video.fmtTime(at) + ' / ' + core.video.fmtTime(len);
   $('#seek').value = String(Math.round(at / len * 1000));
   if (app.tool === tools.trim) tools.trim.showHead();
+  if (app.tool === tools.cut) tools.cut.showHead();
 }
 
-// While playing, stop at the end of the kept part (checked every screen frame).
+// While playing, move on at the end of each piece (checked every screen frame),
+// and stop at the end of the last one.
 function watchPlay() {
   if (player.paused || !app.video) return;
-  const r = playerRecipe();
-  if (r && player.currentTime >= r.end - 0.005) { player.pause(); player.currentTime = r.start; }
+  const r = playerRecipe(), p = r && r.pieces[pl.i];
+  if (p && pl.seek === null && player.currentTime >= p.end - 0.005) {
+    if (pl.i + 1 < r.pieces.length) showPiece(pl.i + 1, r.pieces[pl.i + 1].start, true);
+    else { player.pause(); showPiece(0, r.pieces[0].start); }
+  }
   showClock();
   requestAnimationFrame(watchPlay);
 }
 player.addEventListener('play', () => {
   const r = playerRecipe();
-  if (r && (player.currentTime < r.start - 0.01 || player.currentTime >= r.end - 0.02)) player.currentTime = r.start;
+  if (r && pl.seek === null) {
+    const i = Math.min(pl.i, r.pieces.length - 1), p = r.pieces[i], t = player.currentTime;
+    if (t < p.start - 0.01 || t >= p.end - 0.02) {
+      if (i > 0 && i === r.pieces.length - 1 && t >= p.end - 0.02) showPiece(0, r.pieces[0].start, true);
+      else player.currentTime = p.start;
+    }
+  }
   $('#play').toggleAttribute('data-playing', true);
   requestAnimationFrame(watchPlay);
 });
 player.addEventListener('pause', () => { $('#play').removeAttribute('data-playing'); showClock(); });
 player.addEventListener('seeked', showClock);
-player.addEventListener('loadedmetadata', playerRule);
+player.addEventListener('loadedmetadata', () => {
+  if (pl.seek !== null) {
+    player.currentTime = pl.seek;
+    pl.seek = null;
+    if (pl.play) player.play().catch(() => {});
+    pl.play = false;
+  }
+  playerRule();
+});
 const togglePlay = () => { if (!app.video) return; if (player.paused) player.play().catch(() => {}); else player.pause(); };
 $('#play').addEventListener('click', togglePlay);
 player.addEventListener('click', togglePlay);
@@ -4670,7 +5033,9 @@ $('#seek').addEventListener('input', (e) => {
   const r = playerRecipe();
   if (!r) return;
   player.pause();
-  player.currentTime = Math.min(r.end - 0.001, r.start + (+e.target.value / 1000) * (r.end - r.start));
+  const len = r.pieces.reduce((s, q) => s + q.end - q.start, 0);
+  const p = core.video.pieceAt(r.pieces, Math.min(len - 0.001, (+e.target.value / 1000) * len));
+  showPiece(p.i, Math.min(r.pieces[p.i].end - 0.001, p.at));
 });
 
 // The start of the last frame that begins before t (frame start times, earliest first).
@@ -4682,21 +5047,30 @@ function frameBefore(starts, t) {
 
 /* ---------- Tool: trim ---------- */
 
+// Trims one piece: the one picked in Cut (with a single piece, the whole recipe).
+// The bar is that piece's whole clip; the player plays the piece alone.
 tools.trim = {
   video: true,
   open() {
-    const v = app.video;
-    this.d = { ...v.history.current };
-    app.vpreview = this.d;
+    const v = app.video, c = v.history.current;
+    this.r = { pieces: c.pieces.map((p) => ({ ...p })), audio: c.audio };
+    this.i = Math.min(v.sel, this.r.pieces.length - 1);
+    this.d = this.r.pieces[this.i];
+    this.clip = v.clips[this.d.clip];
+    app.vpreview = { pieces: [this.d], audio: c.audio };
     this.picked = null;
     player.pause();
-    $('#trim-out').textContent = v.keys.length > 1 ? 'keyframe every ' + v.info.keyEvery.toFixed(2) + ' s' : 'one keyframe: the start cannot move';
+    pl.i = 0;
+    const k = this.clip;
+    $('#trim-out').textContent = (this.r.pieces.length > 1 ? 'piece ' + (this.i + 1) + ' of ' + this.r.pieces.length + ' · ' : '') +
+      (k.keys.length > 1 ? 'keyframe every ' + k.info.keyEvery.toFixed(2) + ' s' : 'one keyframe: the start cannot move');
+    playerRule();
     requestAnimationFrame(() => { this.drawTicks(); this.sync(); });
     this.sync();
   },
-  frac(t) { const v = app.video; return (t - v.first) / Math.max(1e-6, v.end - v.first); },
+  frac(t) { const v = this.clip; return (t - v.first) / Math.max(1e-6, v.end - v.first); },
   timeAt(clientX) {
-    const v = app.video, r = $('#trim-line').getBoundingClientRect();
+    const v = this.clip, r = $('#trim-line').getBoundingClientRect();
     return v.first + Math.min(1, Math.max(0, (clientX - r.left) / r.width)) * (v.end - v.first);
   },
   drawTicks() {
@@ -4704,11 +5078,11 @@ tools.trim = {
     c.width = Math.max(1, Math.round(r.width * dpr)); c.height = Math.max(1, Math.round(r.height * dpr));
     const x = c.getContext('2d');
     x.fillStyle = '#4A4640';
-    for (const k of app.video.keys) x.fillRect(Math.round(this.frac(k) * (c.width - 1)), 0, Math.max(1, Math.round(dpr)), c.height);
+    for (const k of this.clip.keys) x.fillRect(Math.round(this.frac(k) * (c.width - 1)), 0, Math.max(1, Math.round(dpr)), c.height);
   },
   // Start: the keyframe at or before t, and always before the end.
   setStart(t, fromPlayhead) {
-    const v = app.video, E = core.video.EPS;
+    const v = this.clip, E = core.video.EPS;
     let k = core.video.keyBefore(v.keys, t);
     if (k >= this.d.end - E) k = core.video.keyBefore(v.keys, frameBefore(v.starts, this.d.end));
     this.picked = fromPlayhead && k < t - 0.005 ? t : null;
@@ -4717,17 +5091,17 @@ tools.trim = {
   },
   // End: a frame edge, at least one frame after the start.
   setEnd(t) {
-    const v = app.video, E = core.video.EPS;
+    const v = this.clip, E = core.video.EPS;
     let e = core.video.snapToFrame(v.starts, v.end, t);
     if (e <= this.d.start + E) e = v.starts.find((s) => s > this.d.start + E) ?? v.end;
     this.d.end = e;
     this.picked = null;
     this.preview(frameBefore(v.starts, e));
   },
-  preview(t) { player.pause(); player.currentTime = t; this.sync(); },
-  showHead() { $('#trim-head').style.left = (this.frac(player.currentTime) * 100) + '%'; },
+  preview(t) { player.pause(); seekTo(t); this.sync(); },
+  showHead() { $('#trim-head').style.left = (this.frac(playerTime()) * 100) + '%'; },
   sync() {
-    const v = app.video, d = this.d;
+    const v = this.clip, d = this.d;
     const a = this.frac(d.start) * 100, b = this.frac(d.end) * 100;
     $('#trim-range').style.left = a + '%'; $('#trim-range').style.width = (b - a) + '%';
     $('#trim-start').style.left = a + '%'; $('#trim-end').style.left = b + '%';
@@ -4741,9 +5115,9 @@ tools.trim = {
     showClock();
   },
   apply() {
-    const v = app.video, c = v.history.current;
+    const v = app.video, c = v.history.current.pieces[this.i];
     if (this.d.start === c.start && this.d.end === c.end) return;
-    v.history.push({ start: this.d.start, end: this.d.end }, 'Trim');
+    v.history.push({ pieces: this.r.pieces }, 'Trim');
     afterHistoryChange();
   },
 };
@@ -4769,16 +5143,164 @@ tools.trim = {
     const time = t.timeAt(x);
     if (t.drag === 'start') t.setStart(time, false);
     else if (t.drag === 'end') t.setEnd(time);
-    else { player.pause(); player.currentTime = time; t.showHead(); }
+    else { player.pause(); seekTo(time); t.showHead(); }
   };
-  $('#trim-play').addEventListener('click', () => { player.currentTime = t.d.start; player.play().catch(() => {}); });
-  $('#trim-set-start').addEventListener('click', () => t.setStart(player.currentTime, true));
+  $('#trim-play').addEventListener('click', () => { showPiece(0, t.d.start, true); });
+  $('#trim-set-start').addEventListener('click', () => t.setStart(playerTime(), true));
   $('#trim-set-end').addEventListener('click', () => {
     // Keep the frame on screen: the end goes to the edge after it.
-    const v = app.video, cur = frameBefore(v.starts, player.currentTime + 0.0005);
+    const v = t.clip, cur = frameBefore(v.starts, playerTime() + 0.0005);
     t.setEnd(v.starts.find((s) => s > cur + core.video.EPS) ?? v.end);
   });
-  $('#trim-reset').addEventListener('click', () => { const v = app.video; t.d.start = v.first; t.d.end = v.end; t.picked = null; t.preview(v.first); });
+  $('#trim-reset').addEventListener('click', () => { const v = t.clip; t.d.start = v.first; t.d.end = v.end; t.picked = null; t.preview(v.first); });
+}
+
+/* ---------- Tool: cut and join ---------- */
+
+// The pieces as one bar, each block as long as it plays, numbered in order and
+// shaded by which clip it comes from; the picked one is outlined in amber. Split
+// cuts the piece under the playhead in two (at the keyframe at or before it, so
+// both halves still copy); Delete drops the picked piece; Earlier and Later move it;
+// Add reads more videos and puts each after the picked piece.
+tools.cut = {
+  video: true,
+  open() {
+    const v = app.video, c = v.history.current;
+    this.d = { pieces: c.pieces.map((p) => ({ ...p })), audio: c.audio };
+    this.sel = Math.min(v.sel, this.d.pieces.length - 1);
+    this.joined = false;
+    this.msg = null;
+    app.vpreview = this.d;
+    player.pause();
+    showPiece(this.sel, this.d.pieces[this.sel].start);
+    this.sync();
+  },
+  total() { return this.d.pieces.reduce((s, p) => s + p.end - p.start, 0); },
+  pick(i, at) {
+    this.sel = i;
+    player.pause();
+    showPiece(i, at ?? this.d.pieces[i].start);
+    this.sync();
+  },
+  showHead() {
+    if (playerRecipe() !== this.d) return;
+    const ps = this.d.pieces, i = Math.min(pl.i, ps.length - 1), p = ps[i];
+    const at = core.video.timeOf(ps, i, Math.min(p.end, Math.max(p.start, playerTime())));
+    $('#cut-head').style.left = (at / Math.max(1e-6, this.total()) * 100) + '%';
+    if (i !== this.sel && !player.paused) { this.sel = i; this.sync(); }   // while it plays, the pick follows the playhead
+  },
+  sync() {
+    const v = app.video, d = this.d, len = Math.max(1e-6, this.total());
+    const bar = $('#cut-pieces');
+    bar.textContent = '';
+    let o = 0;
+    d.pieces.forEach((p, i) => {
+      const b = document.createElement('div');
+      b.className = 'cut-piece';
+      b.dataset.clip = String(p.clip % 3);
+      if (i === this.sel) b.dataset.on = '';
+      b.style.left = (o / len * 100) + '%';
+      b.style.width = ((p.end - p.start) / len * 100) + '%';
+      b.textContent = String(i + 1);
+      bar.append(b);
+      o += p.end - p.start;
+    });
+    const p = d.pieces[this.sel], j = joinPlan(v, d);
+    $('#cut-piece').textContent = (this.sel + 1) + ' of ' + d.pieces.length;
+    $('#cut-clip').textContent = (p.clip + 1) + ' of ' + v.clips.length;
+    $('#cut-total').textContent = core.video.fmtTime(j.total);
+    $('#cut-delete').disabled = d.pieces.length < 2;
+    $('#cut-earlier').disabled = this.sel === 0;
+    $('#cut-later').disabled = this.sel === d.pieces.length - 1;
+    const lines = [];
+    if (this.msg) lines.push(this.msg);
+    if (j.encode) lines.push('Export will re-encode the picture to H.264 at ' + fmtDims(j.w, j.h) + ', ' + j.rate + ' fps: ' + j.why.join('; ') + '.' + (j.hdr ? ' HDR becomes SDR.' : ''));
+    const note = $('#cut-note');
+    note.hidden = !lines.length;
+    note.textContent = lines.join(' ');
+    $('#cut-out').textContent = d.pieces.length + (d.pieces.length > 1 ? ' pieces' : ' piece') + ' · ' + (j.encode ? 're-encode to H.264' : 'copy, no re-encode');
+    this.showHead();
+  },
+  split() {
+    const d = this.d, i = Math.min(pl.i, d.pieces.length - 1), p = d.pieces[i], clip = app.video.clips[p.clip];
+    const t = playerTime();
+    const next = core.video.split(d.pieces, i, clip.keys, t);
+    if (!next) {
+      this.msg = 'No keyframe inside this piece before the playhead, so it cannot be split there. Move the playhead later.';
+      this.sync();
+      return;
+    }
+    d.pieces.splice(0, d.pieces.length, ...next);       // the same list object: the player is watching it
+    const k = next[i + 1].start;
+    this.msg = k < t - 0.005 ? 'Split at ' + core.video.fmtTime(k - clip.first) + ' in ' + clipName(p.clip) + ', the keyframe before ' +
+      core.video.fmtTime(t - clip.first) + ', so both pieces copy without re-encoding.' : null;
+    this.pick(i + 1, k);
+  },
+  remove() {
+    const d = this.d;
+    if (d.pieces.length < 2) return;
+    d.pieces.splice(this.sel, 1);
+    this.msg = null;
+    this.pick(Math.min(this.sel, d.pieces.length - 1));
+  },
+  move(step) {
+    const d = this.d, i = this.sel, k = i + step;
+    if (k < 0 || k >= d.pieces.length) return;
+    [d.pieces[i], d.pieces[k]] = [d.pieces[k], d.pieces[i]];
+    this.msg = null;
+    this.pick(k);
+  },
+  // Read each file and put it after the picked piece, whole.
+  async add(files) {
+    const v = app.video;
+    const got = await readMore(files);
+    if (app.video !== v || app.tool !== this) return;
+    for (const i of got) {
+      this.d.pieces.splice(this.sel + 1, 0, { clip: i, start: v.clips[i].first, end: v.clips[i].end });
+      this.sel += 1;
+      this.joined = true;
+    }
+    this.msg = null;
+    this.pick(this.sel);
+  },
+  apply() {
+    const v = app.video, c = v.history.current;
+    v.sel = this.sel;
+    if (JSON.stringify(c.pieces) === JSON.stringify(this.d.pieces)) return;
+    v.history.push({ pieces: this.d.pieces }, this.joined ? 'Join' : 'Cut');
+    afterHistoryChange();
+  },
+};
+{
+  const line = $('#cut-line'), t = tools.cut;
+  const go = (x) => {
+    const r = line.getBoundingClientRect(), len = t.total();
+    const p = core.video.pieceAt(t.d.pieces, Math.min(len - 0.001, Math.min(1, Math.max(0, (x - r.left) / r.width)) * len));
+    t.msg = null;
+    t.pick(p.i, Math.min(t.d.pieces[p.i].end - 0.001, p.at));
+  };
+  line.addEventListener('pointerdown', (e) => {
+    if (app.tool !== t) return;
+    e.preventDefault();
+    try { line.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
+    t.drag = true;
+    go(e.clientX);
+  });
+  line.addEventListener('pointermove', (e) => { if (t.drag) go(e.clientX); });
+  const up = () => { t.drag = false; };
+  line.addEventListener('pointerup', up);
+  line.addEventListener('pointercancel', up);
+  $('#cut-play').addEventListener('click', () => { const p = t.d.pieces[t.sel]; showPiece(t.sel, Math.min(p.end - 0.02, Math.max(p.start, pl.i === t.sel ? playerTime() : p.start)), true); });
+  $('#cut-split').addEventListener('click', () => t.split());
+  $('#cut-delete').addEventListener('click', () => t.remove());
+  $('#cut-earlier').addEventListener('click', () => t.move(-1));
+  $('#cut-later').addEventListener('click', () => t.move(1));
+  $('#cut-add').addEventListener('click', () => $('#file-add').click());
+  $('#file-add').addEventListener('change', (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (files.length && app.tool === t) t.add(files);
+  });
 }
 
 /* ---------- Tool: sound ---------- */
@@ -4786,11 +5308,11 @@ tools.trim = {
 tools.sound = {
   video: true,
   open() {
-    const v = app.video;
-    this.d = { ...v.history.current };
+    const v = app.video, c = v.history.current;
+    this.d = { ...c };
     app.vpreview = this.d;
-    const a = v.info.audio;
-    $('#sound-what').textContent = core.video.codecName(a.codec) + ' · ' + Math.round(a.sampleRate / 1000) + ' kHz · ' + a.channels + ' ch';
+    const used = [...new Set(c.pieces.map((p) => p.clip))].map((i) => v.clips[i]);
+    $('#sound-what').textContent = [...new Set(used.filter((k) => k.at).map((k) => soundLabel(k.info.audio)))].join(' + ');
     this.sync();
   },
   sync() {
@@ -4808,7 +5330,7 @@ tools.sound = {
 };
 for (const b of $$('[data-sound]')) b.addEventListener('click', () => { tools.sound.d.audio = b.dataset.sound === 'keep'; tools.sound.sync(); });
 
-/* ---------- Video export: copy the packets into a new MP4 ---------- */
+/* ---------- Video export ---------- */
 
 // Where the new file is written: the browser's private storage on this phone when
 // it has some (a long 4K clip can be hundreds of MB, too much to hold in memory),
@@ -4870,39 +5392,165 @@ async function topBoxes(blob) {
   return out;
 }
 
-// Copy the recipe's packets into a new MP4. progress(share) is told how far it got;
-// wanted() going false stops it. Returns { file, plan, sound, where } or null if stopped.
+// Copy the pieces' packets into the new file, each piece moved to its place in the
+// export. vsrc or asrc is null when that track is not copied (it is re-encoded, or
+// there is no sound). The packets are written in the order they play, so the file
+// is written as it goes.
+async function copyPackets(MB, v, r, j, vsrc, asrc, progress, wanted) {
+  const vlist = [], alist = [];
+  r.pieces.forEach((p, n) => {
+    const c = v.clips[p.clip], plan = j.plans[n], o = j.at[n];
+    if (vsrc) for (const i of plan.keep) vlist.push({ n, i, ts: c.vpk[i].ts - plan.from + o });
+    if (asrc) for (const i of core.video.planAudio(c.apk, plan)) alist.push({ n, i, ts: c.apk[i].ts - plan.from + o, dur: c.apk[i].dur });
+  });
+  const times = core.video.placeSound(alist);
+  const akept = alist.map((a, k) => ({ ...a, ts: times[k] })).filter((a) => a.ts !== null);
+  const reader = (list, video) => (async function* () {
+    for (let n = 0; n < r.pieces.length; n++) {
+      const mine = list.filter((x) => x.n === n).map((x) => x.i);
+      const c = v.clips[r.pieces[n].clip];
+      yield* keptPackets(MB, video ? c.vt : c.at, video ? c.vpk : c.apk, mine, video);
+    }
+  })();
+  const first = v.clips[j.used[0]];
+  const lists = [vlist, akept], srcs = [vsrc, asrc], pos = [0, 0], firsts = [true, true];
+  const cfgs = [first.vcfg, j.soundClip && j.soundClip.acfg];
+  const reads = [reader(vlist, true), reader(akept, false)];
+  const order = core.video.interleave(vlist.map((x) => x.ts), akept.map((x) => x.ts));
+  let n = 0;
+  for (const [track] of order) {
+    if (!wanted()) return false;
+    const p = (await reads[track].next()).value;
+    if (!p) throw new Error('a packet listed in the index could not be read');
+    const x = lists[track][pos[track]++];
+    // Sound may start a hair before 0 when nothing is cut at the front; the MP4 allows it.
+    await srcs[track].add(p.clone({ timestamp: x.ts }), firsts[track] ? { decoderConfig: cfgs[track] } : undefined);
+    firsts[track] = false;
+    if (++n % 25 === 0) progress(n / order.length);
+  }
+  return true;
+}
+
+// Re-encode: every frame of the export, decoded from its clip, scaled to fit the
+// export's size (turned upright, black bars where the shape differs) and handed
+// to the H.264 encoder. The frames are evenly spaced at the export's rate; each
+// shows the clip's frame that is on screen at that moment.
+async function encodeFrames(MB, v, r, j, canvas, vsrc, progress, wanted) {
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let g = 0;
+  for (let n = 0; n < r.pieces.length; n++) {
+    const c = v.clips[r.pieces[n].clip];
+    const sink = new MB.CanvasSink(c.vt, { width: j.w, height: j.h, fit: 'contain', poolSize: 2 });
+    for await (const wc of sink.canvasesAtTimestamps(j.plans[n].times)) {
+      if (!wanted()) return false;
+      if (wc) {                         // none before the clip's first frame: the frame before stays
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, j.w, j.h);
+        ctx.drawImage(wc.canvas, 0, 0);
+      }
+      await vsrc.add(g / j.rate, 1 / j.rate);
+      if (++g % 5 === 0) progress(g / j.frames);
+    }
+  }
+  return true;
+}
+
+// Re-encode the sound: each piece's stretch of its clip's sound, decoded, made to
+// fit the export's rate and channels, or silence for a clip with none. Each piece
+// fills exactly its own length in the export, so picture and sound stay together.
+async function encodeSound(MB, v, r, j, audio, asrc, progress, wanted) {
+  const R = audio.rate, C = audio.channels, all = Math.max(1, Math.round(j.total * R));
+  let written = 0;
+  const emit = async (planes) => {
+    const n = planes[0].length;
+    if (!n) return;
+    const data = new Float32Array(n * C);
+    for (let c = 0; c < C; c++) data.set(planes[c], c * n);
+    const s = new MB.AudioSample({ data, format: 'f32-planar', numberOfChannels: C, sampleRate: R, timestamp: written / R });
+    await asrc.add(s);
+    s.close();
+    written += n;
+    progress(written / all);
+  };
+  const silence = async (upTo) => { while (written < upTo) await emit(Array.from({ length: C }, () => new Float32Array(Math.min(R / 10, upTo - written)))); };
+  for (let n = 0; n < r.pieces.length; n++) {
+    const c = v.clips[r.pieces[n].clip], plan = j.plans[n];
+    const goal = Math.round((j.at[n] + plan.to - plan.from) * R);      // where this piece ends, in samples
+    if (c.at) {
+      const shape = core.video.reshaper(c.at.sampleRate, R, C);
+      for await (const s of new MB.AudioSampleSink(c.at).samples(plan.from, plan.to)) {
+        if (!wanted()) { s.close(); return false; }
+        const sr = s.sampleRate, nf = s.numberOfFrames;
+        const a = Math.max(0, Math.round((plan.from - s.timestamp) * sr)), b = Math.min(nf, Math.round((plan.to - s.timestamp) * sr));
+        if (b > a && written < goal) {
+          await silence(Math.min(goal, Math.round((j.at[n] + s.timestamp + a / sr - plan.from) * R)));   // sound that starts late
+          const planes = [];
+          for (let ch = 0; ch < s.numberOfChannels; ch++) {
+            const p = new Float32Array(b - a);
+            s.copyTo(p, { planeIndex: ch, format: 'f32-planar', frameOffset: a, frameCount: b - a });
+            planes.push(p);
+          }
+          const room = goal - written;
+          const out = shape(planes).map((p) => (p.length > room ? p.subarray(0, room) : p));
+          await emit(out);
+        }
+        s.close();
+      }
+    }
+    await silence(goal);                 // no sound, or sound that stops before the piece ends
+  }
+  return true;
+}
+
+// Write the recipe into a new MP4. progress(share) is told how far it got; wanted()
+// going false stops it. Returns { file, j, sound, where, seconds } or null if stopped.
 async function exportClip(v, r, name, progress = () => {}, wanted = () => true) {
   const MB = await loadMediabunny();
-  const plan = core.video.planTrim(v.vpk, r.start, r.end);
-  const akeep = r.audio && v.at ? core.video.planAudio(v.apk, plan) : [];
-  const vcodec = v.vt.codec, acodec = akeep.length ? v.at.codec : null;
-  const format = new MB.Mp4OutputFormat({ fastStart: false });
-  if (!format.getSupportedVideoCodecs().includes(vcodec)) throw new Error('a ' + core.video.codecName(vcodec) + ' picture cannot go into an MP4 without re-encoding, which comes in a later version');
-  if (acodec && !format.getSupportedAudioCodecs().includes(acodec)) throw new Error(core.video.codecName(acodec) + ' sound cannot go into an MP4 without re-encoding; remove the sound to export');
+  const t0 = performance.now();
+  const j = joinPlan(v, r);
+  const first = v.clips[j.used[0]];
+  let bitrate = 0;
+  if (j.encode) {
+    bitrate = core.video.encodeBitrate(j.w, j.h, j.rate);
+    if (!(await MB.canEncodeVideo('avc', { width: j.w, height: j.h, bitrate, frameRate: j.rate }))) throw new Error('this phone cannot encode H.264 at ' + fmtDims(j.w, j.h) + ', ' + j.rate + ' fps');
+    for (const i of j.used) {
+      if (!(await v.clips[i].vt.canDecode())) throw new Error(clipName(i) + ' (' + core.video.codecName(v.clips[i].info.codec) + ') cannot be decoded on this phone, so it cannot be re-encoded');
+    }
+  }
+  // Sound encoded again: AAC where the phone has it (it does on the Pixel), else Opus.
+  let audio = null;
+  if (j.sound.mode === 'encode') {
+    const C = Math.min(2, Math.max(...j.used.map((i) => (v.clips[i].at ? v.clips[i].at.numberOfChannels : 1))));
+    for (const [codec, rate] of [['aac', C === 2 ? 192000 : 128000], ['opus', C === 2 ? 128000 : 96000]]) {
+      if (await MB.canEncodeAudio(codec, { numberOfChannels: C, sampleRate: 48000, bitrate: rate })) { audio = { codec, rate: 48000, channels: C, bitrate: rate }; break; }
+    }
+    if (!audio) throw new Error('this phone cannot encode AAC or Opus sound; remove the sound to export');
+  }
   const sink = await exportTarget(MB);
-  const out = new MB.Output({ format, target: sink.target });
-  const vsrc = new MB.EncodedVideoPacketSource(vcodec);
-  out.addVideoTrack(vsrc, { rotation: v.vt.rotation });
+  const out = new MB.Output({ format: new MB.Mp4OutputFormat({ fastStart: false }), target: sink.target });
+  let vsrc, canvas = null;
+  if (j.encode) {
+    canvas = document.createElement('canvas');
+    canvas.width = j.w; canvas.height = j.h;
+    vsrc = new MB.CanvasSource(canvas, { codec: 'avc', quality: new MB.Quality({ bitrate }), keyFrameInterval: 1 });
+    out.addVideoTrack(vsrc, { frameRate: j.rate });
+  } else {
+    vsrc = new MB.EncodedVideoPacketSource(first.vt.codec);
+    out.addVideoTrack(vsrc, { rotation: first.vt.rotation });
+  }
   let asrc = null;
-  if (acodec) { asrc = new MB.EncodedAudioPacketSource(acodec); out.addAudioTrack(asrc); }
+  if (j.sound.mode === 'copy') asrc = new MB.EncodedAudioPacketSource(j.soundClip.at.codec);
+  else if (audio) asrc = new MB.AudioSampleSource({ codec: audio.codec, quality: new MB.Quality({ bitrate: audio.bitrate }) });
+  if (asrc) out.addAudioTrack(asrc);
+  const part = (a, b) => (f) => progress(a + f * (b - a));
   try {
     await out.start();
-    // The decoder configs carry the codec setup and the colour tags (HDR included) as recorded.
-    const vcfg = await v.vt.getDecoderConfig(), acfg = acodec ? await v.at.getDecoderConfig() : null;
-    const order = core.video.interleave(plan.keep.map((i) => v.vpk[i].ts), akeep.map((i) => v.apk[i].ts));
-    const reads = [keptPackets(MB, v.vt, v.vpk, plan.keep, true), acodec ? keptPackets(MB, v.at, v.apk, akeep, false) : null];
-    const srcs = [vsrc, asrc], cfgs = [vcfg, acfg], firsts = [true, true];
-    let n = 0;
-    for (const [track] of order) {
-      if (!wanted()) { await out.cancel(); return null; }
-      const p = (await reads[track].next()).value;
-      if (!p) throw new Error('a packet listed in the index could not be read');
-      // Times move so the clip starts at 0 (sound may start a hair before; the MP4 allows it).
-      await srcs[track].add(p.clone({ timestamp: p.timestamp - plan.from }), firsts[track] ? { decoderConfig: cfgs[track] } : undefined);
-      firsts[track] = false;
-      if (++n % 25 === 0) progress(n / order.length);
-    }
+    const copySound = j.sound.mode === 'copy';
+    let ok = true;
+    if (j.encode) ok = await encodeFrames(MB, v, r, j, canvas, vsrc, part(0, audio ? 0.9 : 0.97), wanted);
+    if (ok && (!j.encode || copySound)) ok = await copyPackets(MB, v, r, j, j.encode ? null : vsrc, copySound ? asrc : null, part(j.encode ? 0.97 : 0, audio ? 0.5 : 1), wanted);
+    if (ok && audio) ok = await encodeSound(MB, v, r, j, audio, asrc, part(j.encode ? 0.9 : 0.5, 1), wanted);
+    if (!ok) { await out.cancel(); return null; }
     await out.finalize();
   } catch (err) {
     if (out.state !== 'finalized' && out.state !== 'canceled') { try { await out.cancel(); } catch (e) { /* already stopped */ } }
@@ -4919,44 +5567,68 @@ async function exportClip(v, r, name, progress = () => {}, wanted = () => true) 
   const blob = await sink.file();
   const found = core.video.findMeta(boxes.map((x) => x.type), new Uint8Array(await blob.slice(m.start, m.end).arrayBuffer()));
   if (found.length) throw new Error('Metadata survived: ' + found.join(', '));
-  return { file: new File([blob], name + '.mp4', { type: 'video/mp4' }), plan, sound: !!acodec, where: sink.where };
+  return { file: new File([blob], name + '.mp4', { type: 'video/mp4' }), j, sound: !!asrc, audio, where: sink.where, seconds: (performance.now() - t0) / 1000 };
 }
 
+// A copy starts as soon as the sheet opens. A re-encode is slow and changes the
+// picture (HDR becomes SDR), so the sheet says so and waits for a tap.
 tools.vexport = {
   video: true,
   holdOriginal: true,
   open() {
-    const v = app.video, r = v.history.current, plan = core.video.planTrim(v.vpk, r.start, r.end);
+    const v = app.video, r = v.history.current, j = joinPlan(v, r);
     this.result = null;
-    $('#vexport-len').textContent = core.video.fmtTime(plan.to - plan.from);
-    $('#vexport-dims').textContent = fmtDims(v.info.width, v.info.height);
-    $('#vexport-sound').textContent = !v.at ? 'none' : r.audio ? 'kept, ' + core.video.codecName(v.at.codec) : 'removed';
-    $('#vexport-copy').textContent = 'copied, not re-encoded';
+    this.j = j;
+    $('#vexport-len').textContent = core.video.fmtTime(j.total);
+    $('#vexport-dims').textContent = fmtDims(j.w, j.h);
+    $('#vexport-sound').textContent = j.sound.mode === 'copy' ? 'kept, ' + core.video.codecName(j.soundClip.at.codec)
+      : j.sound.mode === 'encode' ? 're-encoded' : recipeHasSound(v, r) ? 'removed' : 'none';
+    $('#vexport-copy').textContent = j.encode ? 're-encoded, H.264' : 'copied, not re-encoded';
+    const lines = [];
+    if (j.extra >= 0.001) {
+      lines.push(r.pieces.length > 1
+        ? 'The pieces run ' + core.video.fmtTime(j.extra) + ' past the ends you set, in all: the last frames before an end are built from a frame after it, so that frame comes too.'
+        : 'The clip runs ' + core.video.fmtTime(j.extra) + ' past your end: the last frames before it are built from a frame after it, so that frame comes too.');
+    }
+    if (j.encode) {
+      lines.push('The picture is re-encoded to H.264 at ' + fmtDims(j.w, j.h) + ', ' + j.rate + ' fps, because ' + j.why.join('; ') + '. Clips of another shape get black bars.' +
+        (j.hdr ? ' HDR becomes SDR: this phone cannot encode 10-bit HDR video.' : '') + ' This is slower than a copy and loses a little quality.');
+    }
+    if (j.sound.mode === 'encode') lines.push('The sound is re-encoded: ' + j.sound.why.join('; ') + '.');
     const note = $('#vexport-note');
-    const extra = plan.to - r.end;
-    note.hidden = extra < 0.001;
-    if (!note.hidden) note.textContent = 'The clip runs ' + core.video.fmtTime(extra) + ' past your end: the last frames before it are built from a frame after it, so that frame comes too.';
-    $('#vexport-share').hidden = !navigator.share;
-    this.run();
+    note.hidden = !lines.length;
+    note.textContent = lines.join(' ');
+    $('#vexport-share').hidden = !navigator.share || j.encode;
+    $('#vexport-download').hidden = j.encode;
+    $('#vexport-start').hidden = !j.encode;
+    $('#vexport-meta').textContent = '';
+    if (j.encode) {
+      $('#vexport-size').textContent = 'not started';
+      $('#vexport-out').textContent = 'tap Re-encode to start';
+    } else this.run();
   },
   close() { this.ticket = (this.ticket || 0) + 1; },
   run() {
     const ticket = (this.ticket = (this.ticket || 0) + 1);
+    const verb = this.j.encode ? 'encoding' : 'copying';
+    $('#vexport-start').hidden = true;
+    $('#vexport-download').hidden = false;
+    $('#vexport-share').hidden = !navigator.share;
     $('#vexport-download').disabled = true; $('#vexport-share').disabled = true;
-    $('#vexport-size').textContent = 'copying';
+    $('#vexport-size').textContent = verb;
     $('#vexport-meta').textContent = '';
-    $('#vexport-out').textContent = 'copying the packets';
+    $('#vexport-out').textContent = this.j.encode ? 'encoding ' + this.j.frames + ' frames' : 'copying the packets';
     const wanted = () => ticket === this.ticket && app.tool === this;
     this.pending = (async () => {
       await nextFrame();
       try {
         const r = await exportClip(app.video, app.video.history.current, exportName(),
-          (f) => { if (wanted()) $('#vexport-size').textContent = 'copying ' + Math.round(f * 100) + ' %'; }, wanted);
+          (f) => { if (wanted()) $('#vexport-size').textContent = verb + ' ' + Math.round(f * 100) + ' %'; }, wanted);
         if (!r || !wanted()) return null;
         this.result = r;
         $('#vexport-size').textContent = fmtBytes(r.file.size);
         $('#vexport-meta').innerHTML = '<span class="status-pass">Pass</span> none found';
-        $('#vexport-out').textContent = 'ready';
+        $('#vexport-out').textContent = 'ready' + (r.j.encode ? ' · encoded in ' + Math.round(r.seconds) + ' s' : '');
         $('#vexport-download').disabled = false; $('#vexport-share').disabled = false;
         return r;
       } catch (err) {
@@ -4971,9 +5643,10 @@ tools.vexport = {
     return this.pending;
   },
   confirm(how) {
-    const r = this.result, v = app.video;
-    notify(how + ' ' + r.file.name + ', ' + core.video.fmtTime(r.plan.to - r.plan.from) + ', ' + fmtDims(v.info.width, v.info.height) + ', ' + fmtBytes(r.file.size) +
-      (r.sound ? '' : ', no sound') + '. Copied without re-encoding. Metadata stripped: no location, dates or camera details.', 'pass', { id: 'export', timeout: 8000 });
+    const r = this.result;
+    notify(how + ' ' + r.file.name + ', ' + core.video.fmtTime(r.j.total) + ', ' + fmtDims(r.j.w, r.j.h) + ', ' + fmtBytes(r.file.size) +
+      (r.sound ? '' : ', no sound') + '. ' + (r.j.encode ? 'Re-encoded to H.264.' : 'Copied without re-encoding.') +
+      ' Metadata stripped: no location, dates or camera details.', 'pass', { id: 'export', timeout: 8000 });
   },
   download() {
     const r = this.result; if (!r) return;
@@ -4996,6 +5669,7 @@ tools.vexport = {
 };
 $('#vexport-download').addEventListener('click', () => tools.vexport.download());
 $('#vexport-share').addEventListener('click', () => tools.vexport.share());
+$('#vexport-start').addEventListener('click', () => tools.vexport.run());
 
 /* ---------- Tool: video check ---------- */
 
@@ -5096,7 +5770,7 @@ tools.vcheck = {
   report() {
     const c = app.check, v = app.video;
     return core.video.report(c.results, { version: APP_VERSION, when: c.when, browser: c.browser, hdrScreen: matchMedia('(dynamic-range: high)').matches,
-      clip: v ? core.video.describe(v.info) + ' (' + v.info.codecString + ')' : null });
+      clip: v ? v.clips.map((c) => core.video.describe(c.info) + ' (' + c.info.codecString + ')').join('; ') : null });
   },
   render() {
     const list = $('#vcheck-list');
@@ -5197,7 +5871,7 @@ window.retouch = {
   APP_VERSION, MAX_WORKING_PIXELS, HISTORY_DEPTH, CROP_ROTATE_MARGIN, RATIOS, TEXT_FONTS,
   BG_MIN_PERSON, BG_PREVIEW_LONG, BG_FEATHER_STEP, BG_VENDOR, SPOT_LARGE,
   core, app, view, tools, segmenter, openFile, openTool, closeTool, commit, commitTexts, encodeImage, fontsReady, undo, redo, draw,
-  player, loadMediabunny, readClip, exportClip, checkOne, VIDEO_EXPORT_TEMP,
+  player, pl, loadMediabunny, readClip, exportClip, joinPlan, checkOne, VIDEO_EXPORT_TEMP,
   readPixels(src, x = 0, y = 0, w = src.width, h = src.height) {
     const c = core.makeCanvas(src.width, src.height);
     const ctx = c.getContext('2d', { willReadFrequently: true });

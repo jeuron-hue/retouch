@@ -33,20 +33,23 @@ Open it at jeuron-hue.github.io/retouch, then use Chrome's menu, "Add to home sc
 
 ### Video
 
-- Open MP4, MOV or WebM videos, from the Open button or by sharing a video to retouch from Google Photos. The top bar shows the size and length; Chrome's own player plays it.
-- Trim: drag the start and end on the bar, or play to a point and tap Start here or End here. Undo and redo work as for photos.
+- Open MP4, MOV or WebM videos, from the Open button or by sharing a video to retouch from Google Photos. Pick or share several videos at once and they open joined end to end. The top bar shows the size and length; Chrome's own player plays it.
+- Trim: drag the start and end on the bar, or play to a point and tap Start here or End here. With several pieces, Trim works on the one picked in Cut. Undo and redo work as for photos.
+- Cut and join: the Cut sheet shows the video as a row of pieces. Split cuts the piece under the playhead in two; Delete drops the picked piece (split either side of a part, then delete it, to cut out the middle); Earlier and Later change the order; Add puts more videos after the picked piece. Tap a piece to pick it.
 - Sound: keep the sound or remove it.
-- Export copies the chosen part of the video into a new MP4 without decoding it, so it is fast and the picture and sound are exactly as recorded, 10-bit HDR included. Share or download it as with photos.
+- Export copies the chosen pieces into a new MP4 without decoding them, so it is fast and the picture and sound are exactly as recorded, 10-bit HDR included. Share or download it as with photos.
+- Joined videos are copied the same way when they were all recorded with the same settings (same size, frame rate, codec and HDR or not). When they differ, the picture is re-encoded to H.264 at the size and frame rate of the first piece; videos of another shape are scaled to fit inside it with black bars. Re-encoding is slower and loses a little quality, and the phone cannot encode 10-bit HDR, so HDR video becomes SDR. The export sheet says why and waits for a tap on Re-encode before it starts. Sound is copied when every video's sound matches, and re-encoded otherwise (with silence for a video that has none).
 - Why the start snaps: a video stores a whole picture only now and then (a keyframe, about once a second on a Pixel), and the frames in between only as changes from it. A copied clip has to begin on a keyframe, so the start moves back to the keyframe at or before the point you pick, and the Trim sheet says when it has. The end can be any frame.
 - Video check: a button on the start screen (and Check in the video tools) lists what this phone's Chrome can encode and decode (H.264 at 1080p and 4K, 30 and 60 fps, HEVC, AAC, Opus), with a short trial run of each encoder, and copies a plain report.
 
 ## Known limitations
 
-- Video trims start on a keyframe (see above), so a clip can begin up to about a second before the chosen point. Cutting exactly between keyframes would mean re-encoding the first second, which is planned for a later version.
+- Video trims and splits start on a keyframe (see above), so a piece can begin up to about a second before the chosen point. This holds even when a join is re-encoded, so a piece starts in the same place either way.
 - Right after a cut, the first fraction of a second of sound can click faintly, because sound packets lean on the one before them.
 - Video exports are written to the browser's private storage on the phone first (a long 4K clip can be hundreds of MB). The copy is replaced by the next export.
 - HDR10 (PQ) videos with separate brightness boxes (mdcv, clli) lose those boxes on export; the colour tags are kept. HLG video, the other HDR kind, does not use them.
-- A video whose picture cannot go into an MP4 without re-encoding cannot be exported yet. If only its sound cannot (Vorbis, in some WebM files), remove the sound to export it.
+- Re-encoding takes time on the phone: 4K runs slower than real time, so a minute of 4K 60 takes two minutes or more.
+- Where two pieces meet, the sound can be nudged by up to half a sound packet (about 10 ms) so it never runs backwards.
 
 - Pixel photos are Ultra HDR JPEGs. Re-encoding drops the HDR gain map, so exports look slightly flatter on HDR screens than the original does.
 - Editing happens in the sRGB colour space.
