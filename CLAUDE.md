@@ -84,7 +84,7 @@ After Phase 5: the darkroom UI redesign (v0.6.0, 24/10/26). Gary then uses retou
 - retouch_mutate.sh: mutation runner over the core image functions. Survivors mean the fixtures get tightened.
 - Everything green before any commit.
 - Phone testing: after each merge, Gary opens jeuron-hue.github.io/retouch on the Pixel. Optional earlier check from the rig: serve locally, connect the Pixel by USB and use adb reverse so the phone opens it as localhost (a secure context for the service worker).
-- Service worker updates: version the cache name in sw.js and bump it with every release, and show an "update available, reload" prompt, so the installed app on the phone never sits on a stale copy.
+- Service worker updates: version the cache name in sw.js and bump it with every release, and show an "update available, reload" prompt, so the installed app on the phone never sits on a stale copy. Found 30/10/26: right after tapping Reload, Chrome on the Pixel laid the page out about one navigation bar taller than the screen (the empty screen's bottom band, with the version line, went out of sight; the middle sat half a band lower), fixed by opening the app again. Since v0.9.3 the page height comes from the window's own measures (fitHeight: the smallest of innerHeight, the root's clientHeight and the visual viewport), with 100dvh only as the fallback, and the Video check report ends with a Screen line giving those measures.
 
 ## Working with Gary
 - Gary is a process chemist learning to code. Explain each layer in plain words as you build it: what it does and why, not just the code.

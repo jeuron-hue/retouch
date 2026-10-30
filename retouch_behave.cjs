@@ -967,6 +967,27 @@ test('service worker: share target opens the shared photo', async () => {
   await ctx.close();
 });
 
+test('screen: the page is as tall as the window shows, and follows it when it changes', async () => {
+  const { ctx, page } = await newApp();
+  const h = () => page.evaluate(() => [document.body.getBoundingClientRect().height, document.documentElement.style.getPropertyValue('--app-h'),
+    document.querySelector('#version').getBoundingClientRect().bottom, innerHeight]);
+  let r = await h();
+  assert(r[0] === 915 && r[1] === '915px' && r[2] <= 915 - 16, 'page and version line ' + r);
+  await page.setViewportSize({ width: 412, height: 800 });
+  await page.waitForFunction(() => document.body.getBoundingClientRect().height === 800);
+  r = await h();
+  assert(r[1] === '800px' && r[2] <= 800 - 16, 'after the window shrinks ' + r);
+  // The height comes from the window's own measure, not from CSS 100dvh, which
+  // Chrome on the Pixel got wrong after an update reload (cannot be made to go
+  // wrong here, so this checks the page reads the window instead).
+  await page.evaluate(() => document.documentElement.style.setProperty('--app-h', '700px'));
+  assert((await page.evaluate(() => document.body.getBoundingClientRect().height)) === 700, 'body follows --app-h');
+  await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+  assert((await page.evaluate(() => document.body.getBoundingClientRect().height)) === 800, 'a resize measures the window again');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
 test('service worker: new version shows "Update available" and reloads into it', async () => {
   const { ctx, page } = await newApp({ sw: true });
   await page.waitForFunction(() => navigator.serviceWorker.controller, null, { timeout: 15000 });
@@ -3211,6 +3232,7 @@ test('video core: edit history, MP4 dates and metadata finder, check report (ind
       opus: { supported: true, ran: null, error: 'EncodingError: boom' }, 'aac-dec': { supported: true, ran: null, error: null },
       'hevc-dec': { supported: false, ran: null, error: 'TypeError: bad' }, 'h264-1080p60': { supported: true, ran: { seconds: 1, chunks: 47 }, error: null } };
     return { text: v.report(res, { version: '9.9.9', when: '29/10/26 · 1630 hrs', browser: 'Chrome 141, Android 15, Pixel 9 Pro XL', hdrScreen: true, clip: null }),
+      withScreen: v.report({}, { version: '9.9.9', when: 'x', browser: 'y', hdrScreen: false, clip: null, screen: 'window 412 × 869' }).split('\n').slice(-2),
       verdicts: Object.values(res).map(v.verdict), ids: v.CHECKS.map((c) => c.id), labels: v.CHECKS.map((c) => c.label), configs: v.CHECKS.map((c) => c.config) };
   });
   assert(rep.text === ['retouch 9.9.9 video check, 29/10/26 · 1630 hrs', 'Browser: Chrome 141, Android 15, Pixel 9 Pro XL', 'HDR screen: yes',
@@ -3218,6 +3240,7 @@ test('video core: edit history, MP4 dates and metadata finder, check report (ind
     'FAIL AAC encode 48 kHz stereo: not supported', 'WATCH Opus encode 48 kHz stereo: says yes, but the trial failed: EncodingError: boom',
     'FAIL HEVC decode 4K 60 fps: not supported (TypeError: bad)', 'PASS AAC decode 48 kHz stereo: supported', 'Open clip: none'].join('\n'), 'report:\n' + rep.text);
   assert(JSON.stringify(rep.verdicts) === JSON.stringify(['pass', 'fail', 'watch', 'pass', 'fail', 'pass']), 'verdicts ' + rep.verdicts);
+  assert(JSON.stringify(rep.withScreen) === JSON.stringify(['Open clip: none', 'Screen: window 412 × 869']), 'screen line ' + rep.withScreen);
   // What the brief asks the check to cover: H.264 at the Pixel's sizes and rates, and AAC.
   const need = { 'H.264 encode 1080p 30 fps': [1920, 1080, 30], 'H.264 encode 1080p 60 fps': [1920, 1080, 60], 'H.264 encode 4K 30 fps': [3840, 2160, 30], 'H.264 encode 4K 60 fps': [3840, 2160, 60] };
   for (const [label, [w, hh, fr]] of Object.entries(need)) {
@@ -3261,6 +3284,7 @@ test('video check: opens from the empty screen, runs every check, copies a plain
   const shown = await page.textContent('#vcheck-report');
   assert(clip === shown && /^retouch \d+\.\d+\.\d+ video check, \d\d\/\d\d\/\d\d/.test(clip), 'copied report: ' + clip.slice(0, 80));
   for (const l of ['H.264 encode 1080p 30 fps', 'H.264 encode 1080p 60 fps', 'H.264 encode 4K 30 fps', 'H.264 encode 4K 60 fps', 'AAC encode 48 kHz stereo', 'HDR screen:', 'Open clip: none']) assert(clip.includes(l), 'report lacks ' + l);
+  assert(/\nScreen: window 412 × 915, visible 412 × 915, layout 915, 100dvh 915, bottom inset 0, page 915$/.test(clip), 'screen line: ' + clip.split('\n').pop());
   assert(!clip.includes('—'), 'no em dashes');
   const strip = await page.textContent('#vcheck-out');
   assert(/working/.test(strip), 'status strip: ' + strip);
