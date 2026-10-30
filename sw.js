@@ -16,7 +16,7 @@
 // in retouch.html (retouch_checks.cjs fails if they differ). A new version makes
 // the browser install a fresh worker, and the app shows "Update available".
 
-const CACHE_VERSION = '0.9.2';
+const CACHE_VERSION = '0.9.3';
 const CACHE = 'retouch-v' + CACHE_VERSION;
 const SHARE_CACHE = 'retouch-share';
 const SHARE_KEY = 'shared-image';

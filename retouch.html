@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.9.2 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.9.3 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -112,7 +112,7 @@ How the file is laid out:
 html,body{margin:0;height:100%;background:var(--stage);color:var(--ink)}
 body{
   font:15px/20px var(--font-ui);
-  display:flex;flex-direction:column;height:100dvh;overflow:hidden;
+  display:flex;flex-direction:column;height:var(--app-h,100dvh);overflow:hidden;   /* --app-h: see fitHeight() */
   overscroll-behavior:none;-webkit-tap-highlight-color:transparent;
   user-select:none;-webkit-user-select:none;
 }
@@ -856,7 +856,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.9.2';
+const APP_VERSION = '0.9.3';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -2938,6 +2938,7 @@ core.video.report = (results, env) => {
     lines.push(core.video.verdict(r).toUpperCase() + ' ' + c.label + ': ' + core.video.resultText(r));
   }
   lines.push('Open clip: ' + (env.clip || 'none'));
+  if (env.screen) lines.push('Screen: ' + env.screen);
   return lines.join('\n');
 };
 // CORE:END
@@ -5838,7 +5839,7 @@ tools.vcheck = {
   report() {
     const c = app.check, v = app.video;
     return core.video.report(c.results, { version: APP_VERSION, when: c.when, browser: c.browser, hdrScreen: matchMedia('(dynamic-range: high)').matches,
-      clip: v ? v.clips.map((c) => core.video.describe(c.info) + ' (' + c.info.codecString + ')').join('; ') : null });
+      clip: v ? v.clips.map((c) => core.video.describe(c.info) + ' (' + c.info.codecString + ')').join('; ') : null, screen: screenFacts() });
   },
   render() {
     const list = $('#vcheck-list');
@@ -5923,8 +5924,40 @@ $('#btn-install').addEventListener('click', async () => {
   $('#btn-install').hidden = true;
 });
 
+/* ---------- Screen height ---------- */
+
+// The page is as tall as the window really shows. CSS alone (100dvh) is not enough:
+// on the Pixel, right after the app reloads itself for an update, Chrome sized
+// 100dvh as if the navigation bar were not there, so the bottom of the page (the
+// version line, or the tool bar) sat hidden below it until the app was opened
+// again (seen 30/10/26). The window's own measures are read instead, the smallest
+// that is not zero, and again whenever the window changes size.
+function fitHeight() {
+  const vv = window.visualViewport;
+  const hs = [window.innerHeight, document.documentElement.clientHeight, vv ? vv.height * vv.scale : 0].filter((h) => h > 0);
+  if (hs.length) document.documentElement.style.setProperty('--app-h', Math.round(Math.min(...hs)) + 'px');
+}
+window.addEventListener('resize', fitHeight);
+window.addEventListener('pageshow', fitHeight);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', fitHeight);
+
+// The same measures in one line, for the video check report, in case the page
+// ever sits wrong again: window, visible area, layout, what CSS calls 100dvh, the
+// bottom safe area, and the page height in use.
+function screenFacts() {
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:100dvh;padding-bottom:env(safe-area-inset-bottom);visibility:hidden;pointer-events:none';
+  document.body.append(probe);
+  const dvh = probe.clientHeight - parseFloat(getComputedStyle(probe).paddingBottom), inset = parseFloat(getComputedStyle(probe).paddingBottom);
+  probe.remove();
+  const vv = window.visualViewport, r = (x) => Math.round(x);
+  return 'window ' + innerWidth + ' × ' + innerHeight + ', visible ' + (vv ? r(vv.width * vv.scale) + ' × ' + r(vv.height * vv.scale) : 'unknown') +
+    ', layout ' + document.documentElement.clientHeight + ', 100dvh ' + r(dvh) + ', bottom inset ' + r(inset) + ', page ' + r(document.body.getBoundingClientRect().height);
+}
+
 /* ---------- Start ---------- */
 
+fitHeight();
 $('#empty-date').textContent = stamp();
 $('#version').textContent = 'v' + APP_VERSION + ' · working limit ' + (MAX_WORKING_PIXELS / 1e6).toFixed(1) + ' MP';
 new ResizeObserver(() => viewResize()).observe($('#stage'));
