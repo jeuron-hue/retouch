@@ -2940,7 +2940,7 @@ test('spot: a tap fills a spot, a stroke fills a scratch; undo stroke; two finge
 // The file is written with the index (moov) last, so a test can add boxes to it.
 const VIDEO_INIT = () => {
   window.__makeClip = async (o = {}) => {
-    const { w = 320, h = 240, fps = 30, frames = 90, gop = 30, audio = true, rotation = 0, colorSpace = null, blue = 64, rate = 48000, channels = 1, mark = false, step = 2 } = o;
+    const { w = 320, h = 240, fps = 30, frames = 90, gop = 30, audio = true, rotation = 0, colorSpace = null, blue = 64, rate = 48000, channels = 1, mark = false, step = 2, face = false, bitrate = 1e6 } = o;
     const MB = await retouch.loadMediabunny();
     const target = new MB.BufferTarget();
     const out = new MB.Output({ format: new MB.Mp4OutputFormat({ fastStart: false }), target });
@@ -2951,10 +2951,22 @@ const VIDEO_INIT = () => {
     await out.start();
     const vc = [];
     const enc = new VideoEncoder({ output: (c, m) => vc.push([c, m]), error: (e) => { throw e; } });
-    enc.configure({ codec: w * h > 921600 ? 'avc1.420028' : 'avc1.42001f', width: w, height: h, framerate: fps, bitrate: 1e6 });   // Baseline 4.0 above 720p, else 3.1
+    enc.configure({ codec: w * h > 921600 ? 'avc1.420028' : 'avc1.42001f', width: w, height: h, framerate: fps, bitrate });   // Baseline 4.0 above 720p, else 3.1
     const cv = new OffscreenCanvas(w, h), cx = cv.getContext('2d');
+    let seed = 11;
     for (let i = 0; i < frames; i++) {
       cx.fillStyle = 'rgb(' + (20 + step * i) + ',128,' + blue + ')'; cx.fillRect(0, 0, w, h);
+      if (face) {
+        // A "face": a skin-coloured oval in the middle on a blue ground, both with fresh
+        // grain every frame (+/- 18), like a camera's noise.
+        const img = cx.createImageData(w, h), d = img.data;
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          seed = (seed * 16807) % 2147483647;
+          const n = (seed % 37) - 18, k = (y * w + x) * 4, on = ((x - w / 2) / (w * 0.28)) ** 2 + ((y - h / 2) / (h * 0.36)) ** 2 < 1;
+          d[k] = (on ? 205 : 40) + n; d[k + 1] = (on ? 150 : 90) + n; d[k + 2] = (on ? 125 : 200) + n; d[k + 3] = 255;
+        }
+        cx.putImageData(img, 0, 0);
+      }
       if (mark) { cx.fillStyle = '#fff'; cx.fillRect(0, 0, w / 4, h / 4); }     // a white corner, top left as stored
       const f = new VideoFrame(cv, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
       enc.encode(f, { keyFrame: i % gop === 0 }); f.close();
@@ -3039,6 +3051,27 @@ const VIDEO_INIT = () => {
     }
     input.dispose();
     return res;
+  };
+  // Grain in an export: at each time, for each box (fractions x0, y0, x1, y1 of the
+  // frame), the mean distance of the green channel from its 3 x 3 neighbourhood.
+  window.__grain = async (arr, times, boxes) => {
+    const MB = await retouch.loadMediabunny();
+    const input = new MB.Input({ source: new MB.BufferSource(new Uint8Array(arr).buffer), formats: [MB.MP4] });
+    const vt = await input.getPrimaryVideoTrack(), out = [];
+    for await (const wc of new MB.CanvasSink(vt, { poolSize: 1 }).canvasesAtTimestamps(times)) {
+      const W = wc.canvas.width, H = wc.canvas.height, d = wc.canvas.getContext('2d').getImageData(0, 0, W, H).data, G = (x, y) => d[(y * W + x) * 4 + 1];
+      out.push(boxes.map(([a, b, c, e]) => {
+        let s = 0, n = 0;
+        for (let y = Math.round(b * H) + 1; y < Math.round(e * H) - 1; y++) for (let x = Math.round(a * W) + 1; x < Math.round(c * W) - 1; x++) {
+          let m = 0;
+          for (let v = -1; v <= 1; v++) for (let u = -1; u <= 1; u++) m += G(x + u, y + v);
+          s += Math.abs(G(x, y) - m / 9); n++;
+        }
+        return s / n;
+      }));
+    }
+    input.dispose();
+    return out;
   };
   window.__csp = [];
   document.addEventListener('securitypolicyviolation', (e) => window.__csp.push(e.violatedDirective + ' ' + e.blockedURI));
@@ -3258,6 +3291,8 @@ test('video check: opens from the empty screen, runs every check, copies a plain
   const { ctx, page } = await newApp();
   await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
   assert(await page.isVisible('#btn-check-empty'), 'Video check button on the empty screen');
+  // The skin trials are sized for a phone; the software graphics here would take minutes.
+  await page.evaluate(() => { for (const c of retouch.core.video.CHECKS) if (c.kind === 'skin-filter') Object.assign(c.config, { width: c.config.width / 8, height: c.config.height / 8, frames: 1 }); });
   await page.click('#btn-check-empty');
   assert((await page.textContent('#strip-code')) === 'Video check', 'no edit count with nothing open: ' + await page.textContent('#strip-code'));
   await page.waitForFunction(() => retouch.app.check && retouch.app.check.done, null, { timeout: 120000 });
@@ -3269,11 +3304,14 @@ test('video check: opens from the empty screen, runs every check, copies a plain
     const out = {};
     for (const c of retouch.core.video.CHECKS) {
       const api = { 'video-encode': VideoEncoder, 'audio-encode': AudioEncoder, 'video-decode': VideoDecoder, 'audio-decode': AudioDecoder }[c.kind];
-      out[c.id] = (await api.isConfigSupported(c.config)).supported;
+      if (api) out[c.id] = (await api.isConfigSupported(c.config)).supported;
     }
     return out;
   });
-  for (const [id, cls, text] of rows) {
+  // The skin rows: the model and the filter (this browser has WebGL2 with float targets) both ran.
+  const skinRows = rows.filter((r) => r[0].startsWith('skin'));
+  assert(skinRows.length === 3 && skinRows.every((r) => /pass/.test(r[1]) && /works, \d frames? at \d+ fps/.test(r[2])), 'skin rows ' + JSON.stringify(skinRows));
+  for (const [id, cls, text] of rows.filter((r) => !r[0].startsWith('skin'))) {
     if (direct[id]) assert(/pass|watch/.test(cls) && /works|supported|says yes/.test(text), id + ' says yes here, row: ' + text);
     else assert(/fail/.test(cls) && /not supported/.test(text), id + ' says no here, row: ' + text);
   }
@@ -3283,7 +3321,8 @@ test('video check: opens from the empty screen, runs every check, copies a plain
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   const shown = await page.textContent('#vcheck-report');
   assert(clip === shown && /^retouch \d+\.\d+\.\d+ video check, \d\d\/\d\d\/\d\d/.test(clip), 'copied report: ' + clip.slice(0, 80));
-  for (const l of ['H.264 encode 1080p 30 fps', 'H.264 encode 1080p 60 fps', 'H.264 encode 4K 30 fps', 'H.264 encode 4K 60 fps', 'AAC encode 48 kHz stereo', 'HDR screen:', 'Open clip: none']) assert(clip.includes(l), 'report lacks ' + l);
+  for (const l of ['H.264 encode 1080p 30 fps', 'H.264 encode 1080p 60 fps', 'H.264 encode 4K 30 fps', 'H.264 encode 4K 60 fps', 'AAC encode 48 kHz stereo', 'HDR screen:', 'Open clip: none',
+    'Skin model, one frame', 'Skin filter on the graphics chip 1080 × 1920', 'Skin filter on the graphics chip 2160 × 3840']) assert(clip.includes(l), 'report lacks ' + l);
   assert(/\nScreen: window 412 × 915, visible 412 × 915, layout 915, 100dvh 915, bottom inset 0, page 915$/.test(clip), 'screen line: ' + clip.split('\n').pop());
   assert(!clip.includes('—'), 'no em dashes');
   const strip = await page.textContent('#vcheck-out');
@@ -3310,7 +3349,7 @@ test('video: opens from the picker, shows its facts, plays; photo tools give way
   });
   assert(r.edits === null, 'the photo is closed');
   assert(r.mode === 'video' && r.canvas === 'none' && r.player === 'block', 'video mode ' + JSON.stringify([r.mode, r.canvas, r.player]));
-  assert(JSON.stringify(r.toolsShown) === JSON.stringify(['trim', 'cut', 'vsize', 'vpad', 'sound', 'vcheck']), 'tools ' + r.toolsShown);
+  assert(JSON.stringify(r.toolsShown) === JSON.stringify(['trim', 'cut', 'vsize', 'vpad', 'vskin', 'sound', 'vcheck']), 'tools ' + r.toolsShown);
   assert(r.frames === 90 && r.keys.length === 3 && Math.abs(r.keys[1] - 1) < 1e-6 && r.audio >= 149, 'index ' + JSON.stringify([r.frames, r.keys, r.audio]));
   assert(Math.abs(r.first) < 1e-6 && Math.abs(r.end - 3) < 1e-3, 'length ' + [r.first, r.end]);
   assert(r.info.width === 320 && r.info.height === 240 && Math.abs(r.info.fps - 30) < 0.01 && r.info.codec === 'avc' && r.info.audio.codec === 'opus', 'facts ' + JSON.stringify(r.info));
@@ -3549,7 +3588,7 @@ test('video: phone layout, tap targets at least 44 px in every video sheet', asy
   const wide = () => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
   await loadVideo(page, await makeClip(page, { frames: 30 }));
   let s = await small(); assert(!s.length && await wide(), 'video view: ' + s);
-  for (const t of ['trim', 'cut', 'vsize', 'vpad', 'sound', 'vcheck']) {
+  for (const t of ['trim', 'cut', 'vsize', 'vpad', 'vskin', 'sound', 'vcheck']) {
     await page.click('[data-open-tool="' + t + '"]');
     s = await small(); assert(!s.length && await wide(), t + ': ' + s);
     const stage = await page.locator('#stage').boundingBox();
@@ -4265,6 +4304,230 @@ test('video canvas: 9:16 blurred fill, frame kept within the long edge; a joined
   near(p.colors[0][1][2], 64, 8, 'clip 1 in the picture');
   near(p.colors[1][1][2], 200, 8, 'clip 2 in the middle'); near(p.colors[1][2][2], 200, 14, 'clip 2 blurred beside it, not black');
   near(p.colors[1][0][2], 200, 14, 'and above it');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+/* ---------- Video V4: skin smoothing ---------- */
+
+test('video skin core: the mask and face size are steadied from frame to frame (independent check)', async () => {
+  const { ctx, page } = await newApp();
+  const r = await page.evaluate(() => {
+    const v = retouch.core.video, k30 = v.steadyShare(30), k60 = v.steadyShare(60), k24 = v.steadyShare(24);
+    const r6 = (a) => Array.from(a, (x) => Math.round(x * 1e6) / 1e6);
+    // A mask that flickers 0.6, 0.8, 0.6, ... around 0.7, steadied for 40 frames.
+    let m = null;
+    const swing = [];
+    for (let i = 0; i < 40; i++) { m = v.steadyMask(m, [i % 2 ? 0.8 : 0.6], k30); if (i >= 30) swing.push(m[0]); }
+    return {
+      k30, k60, k24, two60: 1 - (1 - k60) ** 2,
+      fresh: r6(v.steadyMask(null, [0.2, 0.8], k30)), resized: r6(v.steadyMask(new Float32Array(3), [0.4, 0.6], k30)),
+      step: r6(v.steadyMask(Float32Array.from([0.5, 0.5, 0.5, 0, 1]), [0.6, 0.4, 1, 0.9, 0], k30)),
+      swing: Math.max(...swing) - Math.min(...swing), mid: swing.reduce((a, b) => a + b, 0) / swing.length,
+      vals: [v.steadyValue(null, 10, k30), v.steadyValue(10, 20, k30), v.steadyValue(undefined, 7, k30)],
+      shares: v.maskShares(Float32Array.from([0.2, 0.5, 0.9, 0])), none: v.maskShares(new Float32Array(0)),
+      model: retouch.core.SKIN_MODEL_LONG,
+    };
+  });
+  near(r.k30, 0.35, 1e-9, 'share per frame at 30 fps');
+  near(r.two60, r.k30, 1e-9, 'two frames at 60 fps settle as far as one at 30');
+  assert(r.k60 < r.k30 && r.k24 > r.k30, 'faster clips take less per frame ' + [r.k24, r.k30, r.k60]);
+  assert(JSON.stringify(r.fresh) === '[0.2,0.8]' && JSON.stringify(r.resized) === '[0.4,0.6]', 'a new mask is taken as it is ' + r.fresh + ' / ' + r.resized);
+  // Small changes move 0.35 of the way; a change larger than that follows by its own size.
+  assert(JSON.stringify(r.step) === JSON.stringify([0.535, 0.465, 0.75, 0.81, 0]), 'steadied step ' + r.step);
+  assert(r.swing < 0.06 && Math.abs(r.mid - 0.7) < 0.01, 'a flicker of 0.2 is held to ' + r.swing.toFixed(3) + ' around ' + r.mid.toFixed(3));
+  assert(JSON.stringify(r.vals) === JSON.stringify([10, 13.5, 7]), 'face size ' + r.vals);
+  near(r.shares.coverage, 0.4, 1e-6, 'mean of the mask');
+  assert(r.shares.found === 0.5 && r.none.coverage === 0 && r.none.found === 0, 'shares ' + JSON.stringify([r.shares, r.none]));
+  assert(r.model === 256, 'model input long edge');
+  await ctx.close();
+}, { core: true });
+
+// A noisy "face" (an oval of skin colour) on a noisy blue ground, and a mask of it.
+const SKIN_FRAME = () => {
+  window.__skinFrame = (W, H, seed = 7) => {
+    const c = retouch.core.makeCanvas(W, H), x = c.getContext('2d', { willReadFrequently: true }), img = x.createImageData(W, H);
+    for (let y = 0; y < H; y++) for (let X = 0; X < W; X++) {
+      seed = (seed * 16807) % 2147483647;
+      const n = (seed % 31) - 15, i = (y * W + X) * 4, on = ((X - W / 2) / (W * 0.28)) ** 2 + ((y - H / 2) / (H * 0.32)) ** 2 < 1;
+      img.data[i] = (on ? 205 : 60) + n; img.data[i + 1] = (on ? 150 : 90) + n; img.data[i + 2] = (on ? 125 : 140) + n; img.data[i + 3] = 255;
+    }
+    x.putImageData(img, 0, 0);
+    const pw = Math.ceil(W / 10), ph = Math.ceil(H / 10), data = new Float32Array(pw * ph);
+    for (let y = 0; y < ph; y++) for (let X = 0; X < pw; X++) data[y * pw + X] = (((X + 0.5) * 10 - W / 2) / (W * 0.28)) ** 2 + (((y + 0.5) * 10 - H / 2) / (H * 0.32)) ** 2 < 1 ? 0.9 : 0.05;
+    return { c, prob: { w: pw, h: ph, data } };
+  };
+  window.__read = (cv, W, H) => { const t = retouch.core.makeCanvas(W, H), tx = t.getContext('2d', { willReadFrequently: true }); tx.drawImage(cv, 0, 0); return Array.from(tx.getImageData(0, 0, W, H).data); };
+};
+
+test('video skin: the graphics chip filter matches the photo filter in JavaScript, in tiles too', async () => {
+  const { ctx, page } = await newApp({ init: SKIN_FRAME });
+  const r = await page.evaluate(() => {
+    const { core, skinGPU, skinCPU } = retouch, W = 700, H = 500;
+    const { c, prob } = window.__skinFrame(W, H);
+    const o = { ...core.skinRadii(150), eps: core.SKIN_EPS, strength: 0.8, texture: 0.3 };
+    const src = window.__read(c, W, H);
+    const cpu = window.__read(skinCPU.smooth(c, W, H, prob, o), W, H);
+    const can = skinGPU.can(W, H);
+    const gpu = window.__read(skinGPU.smooth(c, W, H, prob, o), W, H);
+    skinGPU.tile = 128;                 // many tiles, some with no skin in them
+    const tiled = window.__read(skinGPU.smooth(c, W, H, prob, o), W, H);
+    skinGPU.tile = retouch.SKIN_GPU_TILE;
+    const off = window.__read(skinGPU.smooth(c, W, H, prob, { ...o, strength: 0 }), W, H);
+    const none = window.__read(skinGPU.smooth(c, W, H, { w: 2, h: 2, data: new Float32Array(4) }, o), W, H);
+    const cmp = (a, b) => { let mx = 0, sum = 0, n = 0; for (let i = 0; i < a.length; i++) { if (i % 4 === 3) continue; const d = Math.abs(a[i] - b[i]); mx = Math.max(mx, d); sum += d; n++; } return { max: mx, mean: sum / n }; };
+    // Grain (green, distance from the 3 x 3 mean) in a patch of face and of background.
+    const grain = (d, x0, y0) => { let s = 0, n = 0; for (let y = y0; y < y0 + 40; y++) for (let x = x0; x < x0 + 40; x++) { let m = 0; for (let v = -1; v <= 1; v++) for (let u = -1; u <= 1; u++) m += d[((y + v) * W + x + u) * 4 + 1]; s += Math.abs(d[(y * W + x) * 4 + 1] - m / 9); n++; } return s / n; };
+    return { can, cpuGpu: cmp(cpu, gpu), tiles: cmp(gpu, tiled), off: cmp(off, src), none: cmp(none, src),
+      face: [grain(src, 330, 230), grain(gpu, 330, 230)], ground: [grain(src, 20, 20), grain(gpu, 20, 20)] };
+  });
+  assert(r.can, 'WebGL2 with float targets in this browser');
+  assert(r.cpuGpu.max <= 1 && r.cpuGpu.mean < 0.05, 'graphics chip against JavaScript ' + JSON.stringify(r.cpuGpu));
+  assert(r.tiles.max === 0, 'tiles join without a seam ' + JSON.stringify(r.tiles));
+  assert(r.off.max === 0 && r.none.max === 0, 'strength 0 or no skin leaves the frame as it was ' + JSON.stringify([r.off, r.none]));
+  assert(r.face[1] < 0.6 * r.face[0], 'grain on the face goes down ' + r.face);
+  assert(Math.abs(r.ground[1] - r.ground[0]) < 0.01, 'the background is untouched ' + r.ground);
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video skin: frame by frame, the model sees a 256 px frame and the mask settles; a new run starts afresh', async () => {
+  const { ctx, page } = await newApp({ init: SKIN_FRAME });
+  const r = await page.evaluate(async () => {
+    const { skinRun, skinFrame } = retouch, W = 320, H = 240;
+    const { c, prob } = window.__skinFrame(W, H);
+    const seen = [];
+    let t = 0;
+    // The stand-in model: the oval, at 0.9 and 0.5 on alternate frames.
+    retouch.segmenter.skinOverride = (cv) => { seen.push([cv.width, cv.height]); const k = t++ % 2 ? 0.5 : 0.9; return { ...prob, data: prob.data.map((v) => (v > 0.5 ? k : v)), face: 0.2 }; };
+    const run = skinRun(30), vals = [], found = [];
+    for (let i = 0; i < 20; i++) {
+      const f = await skinFrame(run, c, W, H, { strength: 60, texture: 35 });
+      vals.push(Math.max(...run.prob)); found.push(f.found);
+    }
+    const fresh = skinRun(30);
+    t = 1;
+    await skinFrame(fresh, c, W, H, { strength: 60, texture: 35 });
+    return { seen: seen[0], vals, last: vals.slice(-6), fresh: Math.max(...fresh.prob), face: [run.face, fresh.face] };
+  });
+  assert(JSON.stringify(r.seen) === '[256,192]', 'the model sees ' + r.seen);
+  const sw = Math.max(...r.last) - Math.min(...r.last);
+  assert(sw < 0.1 && r.last.every((v) => v > 0.6 && v < 0.8), 'the flicker of 0.4 is steadied to ' + sw.toFixed(3) + ': ' + r.last.map((v) => v.toFixed(3)));
+  near(r.vals[0], 0.9, 1e-6, 'the first frame is taken as it is');
+  near(r.fresh, 0.5, 1e-6, 'a new run does not carry the last one');
+  assert(r.face[0] > 0 && Math.abs(r.face[0] - r.face[1]) < 1e-6, 'face size from the model ' + r.face);
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+// The Skin sheet's overlay, read back, and its grain in the face (green channel).
+const overlayGrain = (page) => page.evaluate(() => {
+  const c = document.querySelector('#vskin'), W = c.width, H = c.height, d = c.getContext('2d').getImageData(0, 0, W, H).data, G = (x, y) => d[(y * W + x) * 4 + 1];
+  let s = 0, n = 0;
+  for (let y = Math.round(H * 0.4); y < Math.round(H * 0.6); y++) for (let x = Math.round(W * 0.4); x < Math.round(W * 0.6); x++) {
+    let m = 0; for (let v = -1; v <= 1; v++) for (let u = -1; u <= 1; u++) m += G(x + u, y + v); s += Math.abs(G(x, y) - m / 9); n++;
+  }
+  return s / n;
+});
+const vskinReady = (page) => page.waitForFunction(() => retouch.tools.vskin.frame && !document.querySelector('#vskin').hidden && retouch.app.busyCount === 0, null, { timeout: 30000 });
+
+test('video skin: the sheet smooths the paused frame; strength, hold, play; apply, undo, redo', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  await loadVideo(page, await makeClip(page, { face: true, frames: 30, bitrate: 6e6 }));
+  await page.evaluate(() => window.__fakeSkin([205, 150, 125], 80));
+  await page.waitForFunction(() => retouch.player.readyState >= 2);
+  await page.click('[data-open-tool="vskin"]');
+  await vskinReady(page);
+  // The oval is 0.56 x 0.72 of the frame: 32 % of it.
+  assert(/^Skin found in (29|3\d) % of this frame\.$/.test(await page.textContent('#vskin-out')), 'status ' + await page.textContent('#vskin-out'));
+  assert(await page.isVisible('#transport'), 'play and seek stay on screen in this sheet');
+  assert((await page.textContent('#vskin-note')) === 'Export will re-encode the picture to H.264 and run the skin model and filter on all 30 frames, so it takes a while.', 'note ' + await page.textContent('#vskin-note'));
+  // The overlay sits exactly over the picture.
+  const box = await page.evaluate(() => { const a = document.querySelector('#vskin').getBoundingClientRect(), p = retouch.player.getBoundingClientRect(), k = Math.min(p.width / 320, p.height / 240);
+    return [a.width - 320 * k, a.height - 240 * k, a.left - (p.left + (p.width - 320 * k) / 2), a.top - (p.top + (p.height - 240 * k) / 2)]; });
+  assert(box.every((d) => Math.abs(d) < 0.5), 'overlay over the picture ' + box);
+  const smooth = await overlayGrain(page);
+  await page.fill('#vskin-strength', '0');
+  await page.dispatchEvent('#vskin-strength', 'input');
+  await page.waitForFunction(() => /^0 /.test(document.querySelector('#vskin-strength-out').textContent) && retouch.tools.vskin.frame.shown.endsWith(' 0 35'));
+  const plain = await overlayGrain(page);
+  assert((await page.textContent('#vskin-out')) === 'Off: strength 0.' && await page.isHidden('#vskin-note'), 'strength 0 is off');
+  assert(smooth < 0.8 * plain, 'the face is smoother at 60 % than at 0: ' + smooth.toFixed(2) + ' / ' + plain.toFixed(2));
+  await page.fill('#vskin-strength', '80');
+  await page.dispatchEvent('#vskin-strength', 'input');
+  await page.waitForFunction(() => retouch.tools.vskin.frame.shown.endsWith(' 80 35'));
+  // Hold shows the frame as it is; letting go brings the smoothing back.
+  const hold = page.locator('.sheet-panel[data-tool="vskin"] [data-hold]');
+  await hold.dispatchEvent('pointerdown');
+  assert(await page.isHidden('#vskin'), 'hold hides the smoothing');
+  await hold.dispatchEvent('pointerup');
+  assert(await page.isVisible('#vskin'), 'and it comes back');
+  // Playing shows the clip as it is, with a caption; pausing smooths again.
+  await page.click('#play');
+  await page.waitForFunction(() => document.body.hasAttribute('data-vskin-playing'));
+  assert(await page.isHidden('#vskin') && await page.isVisible('.hint[data-for="vskin"]'), 'playing: no overlay, a caption');
+  assert((await page.textContent('#vskin-out')) === 'Playing: pause to see the smoothing.', 'status while playing');
+  await page.click('#play');
+  await vskinReady(page);
+  assert(await page.isHidden('.hint[data-for="vskin"]'), 'caption gone when paused');
+  await applyTool(page, 'vskin');
+  const h = await page.evaluate(() => { const c = retouch.app.video.history.current; return [c.label, JSON.stringify(c.skin)]; });
+  assert(h[0] === 'Smooth skin' && h[1] === '{"strength":80,"texture":35}', 'history ' + h);
+  assert(/^1 edit/.test(await page.textContent('#top-code')), 'edit count ' + await page.textContent('#top-code'));
+  assert(await page.isHidden('#vskin'), 'no overlay outside the sheet');
+  await page.click('[data-open-tool="cut"]');
+  assert(/re-encode the picture to H\.264 at 320 × 240, 30 fps: the skin is smoothed\./.test(await page.textContent('#cut-note')), 'Cut knows: ' + await page.textContent('#cut-note'));
+  await page.click('.sheet-panel[data-tool="cut"] [data-cancel]');
+  // Reopened, the sheet starts from the recipe; strength 0 applied turns it off.
+  await page.click('[data-open-tool="vskin"]');
+  assert((await page.inputValue('#vskin-strength')) === '80', 'reopens at the applied strength');
+  await page.fill('#vskin-strength', '0');
+  await page.dispatchEvent('#vskin-strength', 'input');
+  await applyTool(page, 'vskin');
+  assert(await page.evaluate(() => retouch.app.video.history.current.skin === null && retouch.app.video.history.current.label === 'No skin smoothing'), 'off is a step too');
+  await page.click('#btn-undo');
+  assert(await page.evaluate(() => retouch.app.video.history.current.skin.strength === 80), 'undo');
+  await page.click('#btn-undo');
+  assert(await page.evaluate(() => retouch.app.video.history.current.skin === null), 'undo to the original');
+  await page.click('#btn-redo');
+  assert(await page.evaluate(() => retouch.app.video.history.current.skin.strength === 80), 'redo');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
+test('video skin: export re-encodes with the face smoothed in every frame and the ground left alone; JavaScript gives the same', async () => {
+  const { ctx, page } = await newApp({ init: BG_INIT });
+  await loadVideo(page, await makeClip(page, { face: true, frames: 30, bitrate: 6e6 }));
+  await page.evaluate(() => window.__fakeSkin([205, 150, 125], 80));
+  // Without smoothing (Size to the same frame forces a re-encode, so both go through H.264 the same way).
+  await page.evaluate(() => { retouch.app.video.history.push({ size: { mode: null, px: null, rate: 25 } }, 'Size'); });
+  const plain = await reencodeVideo(page);
+  await page.waitForFunction(() => retouch.player.readyState >= 2);
+  await page.click('[data-open-tool="vskin"]');
+  await vskinReady(page);
+  for (const [id, v] of [['#vskin-strength', '100'], ['#vskin-texture', '0']]) { await page.fill(id, v); await page.dispatchEvent(id, 'input'); }
+  await applyTool(page, 'vskin');
+  const gpu = await reencodeVideo(page);
+  assert(/because the frame rate drops to 25 fps; the skin is smoothed\./.test(gpu.note), 'export note ' + gpu.note);
+  assert(/The skin model and filter run on every frame \(25\), which takes a while\./.test(gpu.note), 'skin note ' + gpu.note);
+  await page.evaluate(() => { retouch.skinGPU.disabled = true; });
+  const cpu = await reencodeVideo(page);
+  assert(/graphics chip cannot run the filter .*, so it runs in JavaScript, much slower\./.test(cpu.note), 'fallback note ' + cpu.note);
+  const v = vtrack(parseMp4(gpu.bytes));
+  assert(v.codedWidth === 320 && v.codedHeight === 240 && v.sampleCount === 25, 'picture ' + [v.codedWidth, v.codedHeight, v.sampleCount]);
+  const times = [0.02, 0.5, 0.98], boxes = [[0.4, 0.4, 0.6, 0.6], [0.02, 0.02, 0.15, 0.2]];
+  const g = {};
+  for (const [k, x] of Object.entries({ plain, gpu, cpu })) g[k] = await page.evaluate(([a, t, b]) => window.__grain(a, t, b), [Array.from(x.bytes), times, boxes]);
+  for (let i = 0; i < times.length; i++) {
+    assert(g.gpu[i][0] < 0.6 * g.plain[i][0], 'frame ' + i + ': face grain ' + g.gpu[i][0].toFixed(2) + ' against ' + g.plain[i][0].toFixed(2));
+    // Not smoothed. (It can come out grainier: H.264 spends the bits saved on the face there.)
+    assert(g.gpu[i][1] > 0.9 * g.plain[i][1], 'frame ' + i + ': ground grain ' + g.gpu[i][1].toFixed(2) + ' against ' + g.plain[i][1].toFixed(2));
+    near(g.cpu[i][0], g.gpu[i][0], 0.1 * g.gpu[i][0] + 0.1, 'frame ' + i + ': JavaScript smooths the face as much');
+  }
+  const p = await probe(page, gpu.bytes, { at: [0.5], points: [[0.5, 0.5], [0.05, 0.05]] });
+  near(p.colors[0][0][0], 205, 8, 'face colour kept'); near(p.colors[0][1][2], 200, 8, 'ground colour kept');
+  assert(p.audio && p.audio.codec === 'opus', 'the sound is still copied');
+  assert(findVideoMetadata(gpu.bytes).length === 0, 'metadata: ' + findVideoMetadata(gpu.bytes));
   assert(page.errors.length === 0, page.errors.join('; '));
   await ctx.close();
 });

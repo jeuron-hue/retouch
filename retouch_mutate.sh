@@ -47,6 +47,11 @@ pad: photo drawn transposed ||| if (k === 1) ctx.drawImage(src, o.x, o.y); ||| i
 pad: colour fill skipped ||| if (o.fill === 'colour') { ||| if (o.fill === 'transparent') {
 pad: blur switched off ||| sctx.filter = 'blur(' + radius + 'px)'; ||| sctx.filter = 'none';
 alpha: reads the red channel ||| for (let i = 3; i < d.length; i += 4) if (d[i] !== 255) return true; ||| for (let i = 0; i < d.length; i += 4) if (d[i] !== 255) return true;
+steady: no catch-up on large changes ||| out[i] = prev[i] + Math.max(k, Math.abs(d)) * d; ||| out[i] = prev[i] + k * d;
+steady: share ignores the frame rate ||| 1 - Math.pow(1 - core.SKIN_STEADY, 30 / Math.max(1, fps)); ||| core.SKIN_STEADY;
+steady: a new mask is blended with nothing ||| if (!prev || prev.length !== cur.length) return Float32Array.from(cur); ||| if (!prev) return Float32Array.from(cur);
+steady: face size jumps ||| (prev === null || prev === undefined ? cur : prev + k * (cur - prev)) ||| (prev === null || prev === undefined ? cur : cur)
+steady: found share counts haze ||| for (let i = 0; i < p.length; i++) { sum += p[i]; if (p[i] >= core.BG_FOUND) hit++; } ||| for (let i = 0; i < p.length; i++) { sum += p[i]; if (p[i] > 0) hit++; }
 meta: keeps comments ||| if (m === 0xFE) return false; ||| if (m === 0xFE) return true;
 meta: keeps every APP2 ||| if (m === 0xE2) return core.meta.ascii(seg, 4, 12) === 'ICC_PROFILE\0'; ||| if (m === 0xE2) return true;
 meta: keeps EXIF and XMP ||| return false;                                                         // EXIF ||| return true;                                                         // EXIF

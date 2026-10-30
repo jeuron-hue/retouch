@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.10.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.11.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -64,11 +64,13 @@ How the file is laid out:
         and for video: which packets a trim copies, clip facts, cut and join (when
         clips can be copied together, splits, the frame grid and sound placement
         for a join, resampling), size and canvas (the frame, rates to drop to,
-        a clip fitted in), video edit history, MP4 dates and metadata, the
-        video check list. Tests and the mutation runner target this block.
-        MediaPipe and Mediabunny sit outside it, in the app.
+        a clip fitted in), skin smoothing for video (the mask and face size
+        steadied from frame to frame), video edit history, MP4 dates and
+        metadata, the video check list. Tests and the mutation runner target
+        this block. MediaPipe and Mediabunny sit outside it, in the app.
      c. App: view (zoom, pan), tools, open, export, video (check, player, trim,
-        cut and join, size, canvas, sound, export by copy or H.264 re-encode),
+        cut and join, size, canvas, skin smoothing with its filter on the
+        graphics chip (WebGL2), sound, export by copy or H.264 re-encode),
         service worker.
 -->
 <html lang="en">
@@ -162,7 +164,8 @@ body[data-tool="bg"] .strip [data-for="bg"],body[data-tool="skin"] .strip [data-
 body[data-tool="spot"] .strip [data-for="spot"],body[data-tool="trim"] .strip [data-for="trim"],
 body[data-tool="sound"] .strip [data-for="sound"],body[data-tool="vexport"] .strip [data-for="vexport"],
 body[data-tool="vcheck"] .strip [data-for="vcheck"],body[data-tool="cut"] .strip [data-for="cut"],
-body[data-tool="vsize"] .strip [data-for="vsize"],body[data-tool="vpad"] .strip [data-for="vpad"]{display:inline}
+body[data-tool="vsize"] .strip [data-for="vsize"],body[data-tool="vpad"] .strip [data-for="vpad"],
+body[data-tool="vskin"] .strip [data-for="vskin"]{display:inline}
 
 /* Stage: the photo fills everything between the bars. */
 #stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;touch-action:none;background:var(--stage)}
@@ -182,7 +185,9 @@ body[data-tool="vsize"] .strip [data-for="vsize"],body[data-tool="vpad"] .strip 
 body[data-tool="pad"] .hint[data-for="pad"],body[data-tool="spot"] .hint[data-for="spot"],
 body[data-tool="bg"][data-brush] .hint[data-for="bg"],body[data-tool="skin"][data-brush] .hint[data-for="skin"],
 body[data-tool="bg"][data-bg-ready]:not([data-brush]) .hint[data-for="bg-view"],body[data-tool="trim"] .hint[data-for="trim"],
-body[data-tool="cut"] .hint[data-for="cut"],body[data-tool="vpad"][data-vpad-move] .hint[data-for="vpad"]{display:block}
+body[data-tool="cut"] .hint[data-for="cut"],body[data-tool="vpad"][data-vpad-move] .hint[data-for="vpad"],
+body[data-tool="vskin"][data-vskin-playing] .hint[data-for="vskin"]{display:block}
+.hint[data-for="vskin"]{bottom:64px}
 
 /* Video mode: the player stands in for the photo canvas, with a play bar over its foot. */
 #player{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:var(--stage);display:none}
@@ -194,8 +199,9 @@ body[data-mode="video"] #view{display:none}
 body:not([data-mode="video"]) #vframe{display:none}
 #vblur{position:absolute;inset:0;width:100%;height:100%}
 #player[data-framed]{inset:auto;background:transparent}
+#vskin{position:absolute;pointer-events:none;z-index:1}
 .transport{position:absolute;left:8px;right:8px;bottom:8px;display:none;align-items:center;gap:8px;padding:0 10px 0 2px;border-radius:6px;background:rgba(20,19,18,.86);z-index:3}
-body[data-mode="video"]:not([data-tool]) .transport{display:flex}
+body[data-mode="video"]:not([data-tool]) .transport,body[data-mode="video"][data-tool="vskin"] .transport{display:flex}
 .transport .readout{min-width:0}
 .icon-btn .pause{display:none}
 .icon-btn[data-playing] .play{display:none}
@@ -363,6 +369,7 @@ fieldset:disabled{opacity:.4}
   <span class="edge status" id="vsize-out" data-for="vsize"></span>
   <span class="edge status" id="vpad-out" data-for="vpad"></span>
   <span class="edge status" id="sound-out" data-for="sound"></span>
+  <span class="edge status" id="vskin-out" data-for="vskin"></span>
   <span class="edge status" id="vexport-out" data-for="vexport"></span>
   <span class="edge status" id="vcheck-out" data-for="vcheck"></span>
 </div>
@@ -371,6 +378,7 @@ fieldset:disabled{opacity:.4}
   <canvas id="view" aria-label="Photo"></canvas>
   <div id="vframe" hidden><canvas id="vblur"></canvas></div>
   <video id="player" playsinline preload="auto" aria-label="Video"></video>
+  <canvas id="vskin" hidden aria-label="Smoothed frame"></canvas>
   <div class="transport" id="transport">
     <button class="icon-btn" id="play" aria-label="Play" title="Play"><svg viewBox="0 0 24 24"><path class="play" d="M8 5.5v13l10-6.5z"/><path class="pause" d="M8.5 5.5v13M15.5 5.5v13"/></svg></button>
     <input type="range" id="seek" min="0" max="1000" step="1" value="0" aria-label="Position">
@@ -386,6 +394,7 @@ fieldset:disabled{opacity:.4}
   <div class="hint" data-for="trim">Start snaps back to a keyframe · nothing is re-encoded</div>
   <div class="hint" data-for="cut">Tap a piece to pick it · split snaps back to a keyframe</div>
   <div class="hint" data-for="vpad">Drag the picture to move it in the frame</div>
+  <div class="hint" data-for="vskin">Pause to see the smoothing on this frame</div>
 
   <section class="empty" id="empty">
     <div class="band top">
@@ -836,6 +845,27 @@ fieldset:disabled{opacity:.4}
     <p class="small" style="margin:0">The picture is copied as it is; only the sound track is left out.</p>
   </div>
 
+  <div class="sheet-panel" data-tool="vskin" hidden>
+    <div class="sheet-head">
+      <button class="icon-btn" data-cancel aria-label="Cancel"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="gap"></span>
+      <h2>Smooth skin</h2>
+      <button class="icon-btn hold" data-hold aria-label="Hold for the original" title="Hold for the original"><svg viewBox="0 0 24 24"><circle class="ring" cx="12" cy="12" r="8.5"/><path class="half" d="M12 3.5 A8.5 8.5 0 0 0 12 20.5 Z"/></svg><span class="hold-label">Hold</span></button>
+      <button class="apply" data-apply aria-label="Apply"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+    </div>
+    <div class="row">
+      <label for="vskin-strength">Strength</label>
+      <input type="range" id="vskin-strength" min="0" max="100" step="1" value="60">
+      <span class="readout" id="vskin-strength-out">60 %</span>
+    </div>
+    <div class="row">
+      <label for="vskin-texture">Texture</label>
+      <input type="range" id="vskin-texture" min="0" max="100" step="1" value="35">
+      <span class="readout" id="vskin-texture-out">35 %</span>
+    </div>
+    <p class="note" id="vskin-note" hidden></p>
+  </div>
+
   <div class="sheet-panel" data-tool="vexport" hidden>
     <div class="sheet-head">
       <button class="icon-btn" data-cancel aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
@@ -870,7 +900,7 @@ fieldset:disabled{opacity:.4}
       <span class="gap"></span>
       <span class="gap"></span>
     </div>
-    <p class="small" style="margin:0">What Chrome on this phone can encode and decode, for the later video phases. Each encoder that says yes also gets a short trial run.</p>
+    <p class="small" style="margin:0">What Chrome on this phone can encode and decode, and how fast the skin model and filter run. Each encoder that says yes also gets a short trial run.</p>
     <div class="checks" id="vcheck-list"></div>
     <div class="tiles" style="gap:10px">
       <button class="btn" id="vcheck-run" style="flex:1;min-height:54px">Run again</button>
@@ -916,6 +946,9 @@ fieldset:disabled{opacity:.4}
     <button class="tool" data-mode="video" data-open-tool="vpad" disabled>
       <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1"/><rect x="7.5" y="8.5" width="9" height="7" rx="0.5"/></svg>Canvas
     </button>
+    <button class="tool" data-mode="video" data-open-tool="vskin" disabled>
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="13" r="7"/><path d="M8.5 15.5c1.4 1.1 3.6 1.1 5 0"/><path d="M19 2.5v5M16.5 5h5"/></svg>Skin
+    </button>
     <button class="tool" data-mode="video" data-open-tool="sound" disabled>
       <svg viewBox="0 0 24 24"><path d="M4 9.5h4l5-4v13l-5-4H4z"/><path d="M16.5 9a4 4 0 0 1 0 6M19 6.5a7.5 7.5 0 0 1 0 11"/></svg>Sound
     </button>
@@ -935,7 +968,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.10.0';
+const APP_VERSION = '0.11.0';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -3024,12 +3057,52 @@ core.video.findMeta = (top, moov) => {
   return found;
 };
 
+/* Skin smoothing on video (V4). The skin model looks at every frame, but on its own
+   its mask jumps a little from one frame to the next, and smoothing that follows it
+   makes the skin flicker. So the mask is steadied: each pixel moves only part of the
+   way (SKIN_STEADY) towards what the model says now, unless the change is large, when
+   it follows at once (a face that moves or turns must not leave the mask behind).
+   The face size, which sets the filter's window, is steadied the same way, so the
+   amount of smoothing does not pulse. Everything starts again at each piece, since a
+   cut can show another face. */
+
+core.SKIN_STEADY = 0.35;        // share of a small frame-to-frame change taken in each frame, at 30 fps
+core.SKIN_MODEL_LONG = 256;     // video frames go to the skin model at this long edge (its own input size)
+
+// The share for one frame at fps frames a second, so a clip at 60 fps settles as fast
+// (in seconds) as one at 30.
+core.video.steadyShare = (fps) => 1 - Math.pow(1 - core.SKIN_STEADY, 30 / Math.max(1, fps));
+
+// The steadied mask: prev moved towards cur by k, or by the size of the change when that
+// is larger. A new mask (prev missing or another size) is taken as it is.
+core.video.steadyMask = (prev, cur, k) => {
+  if (!prev || prev.length !== cur.length) return Float32Array.from(cur);
+  const out = new Float32Array(cur.length);
+  for (let i = 0; i < cur.length; i++) {
+    const d = cur[i] - prev[i];
+    out[i] = prev[i] + Math.max(k, Math.abs(d)) * d;
+  }
+  return out;
+};
+
+// A steadied number (the face size): the first one as it is, then k of the way each frame.
+core.video.steadyValue = (prev, cur, k) => (prev === null || prev === undefined ? cur : prev + k * (cur - prev));
+
+// Mean and found share (at BG_FOUND or more) of a probability map.
+core.video.maskShares = (p) => {
+  let sum = 0, hit = 0;
+  for (let i = 0; i < p.length; i++) { sum += p[i]; if (p[i] >= core.BG_FOUND) hit++; }
+  return { coverage: sum / Math.max(1, p.length), found: hit / Math.max(1, p.length) };
+};
+
 /* The video check: what this phone's Chrome can encode and decode with WebCodecs.
    Sizes and rates are the ones a Pixel 9 Pro XL records. Each encoder that says
    yes is also run on a few frames (or a second of tone), because a yes on paper
    does not always mean it works. The codec strings name the profile and level the
    size needs: H.264 High at level 4.0 (1080p 30), 4.2 (1080p 60), 5.1 (4K 30) and
-   5.2 (4K 60); HEVC Main and Main 10 at level 5.1. */
+   5.2 (4K 60); HEVC Main and Main 10 at level 5.1. The last three time video skin
+   smoothing: the skin model on one frame, and the filter on the graphics chip on a
+   frame that is skin all over (the most work it can get), in frames per second. */
 core.video.CHECKS = [
   { id: 'h264-1080p30', kind: 'video-encode', label: 'H.264 encode 1080p 30 fps', config: { codec: 'avc1.640028', width: 1920, height: 1080, framerate: 30, bitrate: 16e6 } },
   { id: 'h264-1080p60', kind: 'video-encode', label: 'H.264 encode 1080p 60 fps', config: { codec: 'avc1.64002A', width: 1920, height: 1080, framerate: 60, bitrate: 24e6 } },
@@ -3043,6 +3116,9 @@ core.video.CHECKS = [
   { id: 'hevc-dec', kind: 'video-decode', label: 'HEVC decode 4K 60 fps', config: { codec: 'hvc1.1.6.L153.B0', codedWidth: 3840, codedHeight: 2160 } },
   { id: 'hevc10-dec', kind: 'video-decode', label: 'HEVC 10-bit decode 4K 60 fps', config: { codec: 'hvc1.2.4.L153.B0', codedWidth: 3840, codedHeight: 2160 } },
   { id: 'aac-dec', kind: 'audio-decode', label: 'AAC decode 48 kHz stereo', config: { codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2 } },
+  { id: 'skin-model', kind: 'skin-model', label: 'Skin model, one frame', config: { frames: 5 } },
+  { id: 'skin-1080', kind: 'skin-filter', label: 'Skin filter on the graphics chip 1080 × 1920', config: { width: 1080, height: 1920, frames: 5 } },
+  { id: 'skin-2160', kind: 'skin-filter', label: 'Skin filter on the graphics chip 2160 × 3840', config: { width: 2160, height: 3840, frames: 3 } },
 ];
 
 // One result: { supported, ran, error }. ran is { frames, fps } or { seconds, chunks } when a trial ran.
@@ -4990,7 +5066,7 @@ function disposeClip(c) {
 // The open video: the clips read so far (the one opened first; Cut adds more), the
 // edit history, and which piece Trim and Cut start on.
 function newVideo(clip) {
-  return { clips: [clip], sel: 0, history: new core.ClipHistory({ pieces: [{ clip: 0, start: clip.first, end: clip.end }], audio: true, size: null, pad: null }) };
+  return { clips: [clip], sel: 0, history: new core.ClipHistory({ pieces: [{ clip: 0, start: clip.first, end: clip.end }], audio: true, size: null, pad: null, skin: null }) };
 }
 
 // Read more videos into the open one, for joining. Returns the index of each clip
@@ -5050,6 +5126,7 @@ function joinPlan(v, r) {
   if (f.padded) why.push(padName(r.pad) + ' is added');
   if (f.sized) why.push('the size changes to ' + fmtDims(f.W, f.H));
   if (f.rate !== f.base) why.push('the frame rate drops to ' + f.rate + ' fps');
+  if (r.skin) why.push('the skin is smoothed');
   const first = clips[0], encode = why.length > 0, rate = f.rate;
   const plans = encode
     ? core.video.frameGrid(r.pieces, rate).pieces.map((g, n) => ({ ...g, whole: r.pieces[n].start <= v.clips[r.pieces[n].clip].keys[0] + E }))
@@ -5060,6 +5137,7 @@ function joinPlan(v, r) {
     w: encode ? f.W : first.info.width, h: encode ? f.H : first.info.height,
     pic: { x: f.x, y: f.y, w: f.w, h: f.h },
     fill: r.pad && f.padded ? r.pad : { fill: 'colour', colour: '#000000' },
+    skin: r.skin || null,
     shapes: clips.some((c) => c.info.width * first.info.height !== c.info.height * first.info.width),
     frames: encode ? plans.reduce((n, p) => n + p.times.length, 0) : 0,
     hdr: encode && clips.some((c) => c.facts.hdr),
@@ -5101,6 +5179,8 @@ function closeVideo() {
   Object.assign(pl, { i: 0, clip: -1, seek: null, play: false });
   showFrame();                          // no video: the frame goes and the player fills the stage again
   for (const c of v.clips) disposeClip(c);
+  skinGPU.release();
+  if (skinCPU.out) { core.release(skinCPU.out); skinCPU.out = null; }
   for (const id of ['player', 'video-note', 'add']) { const n = document.querySelector('.notice[data-id="' + id + '"]'); if (n) n.remove(); }
 }
 
@@ -5156,6 +5236,7 @@ function playerRule() {
   if (t < p.start - 0.01 || t > p.end) seekTo(p.start);
   showFrame();
   showClock();
+  if (app.tool === tools.vskin) tools.vskin.refresh();   // HOLD hides the smoothed frame
 }
 
 function showClock() {
@@ -5769,6 +5850,503 @@ tools.sound = {
 };
 for (const b of $$('[data-sound]')) b.addEventListener('click', () => { tools.sound.d.audio = b.dataset.sound === 'keep'; tools.sound.sync(); });
 
+/* ---------- Skin smoothing for video: the filter on the graphics chip ---------- */
+
+/* The photo Skin tool's sums, done on the phone's graphics chip (WebGL2) so a whole
+   clip can be smoothed in reasonable time. In JavaScript a 4K frame takes seconds;
+   here every pixel is worked on at once. The steps are the photo tool's, one for one:
+   1. Mask: the skin model's rough mask is fitted to the frame's own edges by the
+      colour guided filter on a guide copy (up to 1024 px), twice (core.bgModel),
+      read back at full size with the ramp (core.bgGuided), then feathered
+      (core.bgFeather).
+   2. Smoothing: each colour channel through the guided filter with itself as guide,
+      the grain put back by Texture, mixed in by Strength times the mask
+      (core.skinFilter, core.skinMix).
+   The frame is smoothed in tiles (SKIN_GPU_TILE square, with a margin wide enough
+   that the tiles join without a seam, as in core.renderSmooth), so a 4K frame does
+   not need gigabytes of graphics memory; tiles with no skin are skipped. Nothing
+   leaves the phone: the chip only draws into a canvas on this page. The tests check
+   the result against the JavaScript version, pixel for pixel. */
+
+const SKIN_GPU_TILE = 1024;     // tile side, px
+const SKIN_GPU_BLOCK = 64;      // skin is looked for in blocks of this side, to skip empty tiles
+
+const GL_HEAD = '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n';
+const GL_VERT = '#version 300 es\nvoid main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }';
+// The ramp from filtered mask to alpha (core.bgCurve).
+const GL_CURVE = 'uniform float u_lo, u_hi;\nfloat curve(float q) { float t = clamp((q - u_lo) / (u_hi - u_lo), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }\n';
+
+// Window mean along one direction (u_dir), over n textures at once, cut off at the
+// edges of a u_size area and divided by what is left (core.boxMean, one direction).
+const glBox = (n) => GL_HEAD +
+  Array.from({ length: n }, (_, i) => 'uniform sampler2D u_s' + i + ';\nlayout(location = ' + i + ') out vec4 o' + i + ';\n').join('') +
+  'uniform ivec2 u_dir; uniform int u_r; uniform ivec2 u_size;\nvoid main() {\n' +
+  '  ivec2 c = ivec2(gl_FragCoord.xy);\n  int pos = u_dir.x == 1 ? c.x : c.y, len = u_dir.x == 1 ? u_size.x : u_size.y;\n' +
+  '  int a = max(0, pos - u_r), b = min(len - 1, pos + u_r);\n' +
+  Array.from({ length: n }, (_, i) => '  vec4 s' + i + ' = vec4(0.0);\n').join('') +
+  '  for (int k = a; k <= b; k++) {\n    ivec2 p = u_dir.x == 1 ? ivec2(k, c.y) : ivec2(c.x, k);\n' +
+  Array.from({ length: n }, (_, i) => '    s' + i + ' += texelFetch(u_s' + i + ', p, 0);\n').join('') +
+  '  }\n  float m = float(b - a + 1);\n' +
+  Array.from({ length: n }, (_, i) => '  o' + i + ' = s' + i + ' / m;\n').join('') + '}';
+
+const GL_SRC = {
+  box1: glBox(1), box2: glBox(2), box4: glBox(4),
+  // Mask, step 1: the products the colour guided filter needs, from the guide and the
+  // mask: the rough one (u_from 0), or the last pass's coefficients read with the ramp.
+  mprod: GL_HEAD + GL_CURVE + `uniform sampler2D u_g, u_p, u_c; uniform int u_from;
+layout(location = 0) out vec4 o0; layout(location = 1) out vec4 o1; layout(location = 2) out vec4 o2; layout(location = 3) out vec4 o3;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec3 I = texelFetch(u_g, c, 0).rgb;
+  float p;
+  if (u_from == 0) p = texelFetch(u_p, c, 0).r;
+  else { vec4 k = texelFetch(u_c, c, 0); p = curve(dot(k.rgb, I) + k.a); }
+  o0 = vec4(I, p); o1 = vec4(I * p, I.r * I.r); o2 = vec4(I.r * I.g, I.r * I.b, I.g * I.g, I.g * I.b); o3 = vec4(I.b * I.b, 0.0, 0.0, 0.0);
+}`,
+  // Mask, step 2: the coefficients, by the same cofactor inverse as core.guidedCoeffs.
+  mcoef: GL_HEAD + `uniform sampler2D u_s0, u_s1, u_s2, u_s3; uniform float u_eps; out vec4 o;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec4 a = texelFetch(u_s0, c, 0), b = texelFetch(u_s1, c, 0), d = texelFetch(u_s2, c, 0), e = texelFetch(u_s3, c, 0);
+  float mR = a.r, mG = a.g, mB = a.b, mP = a.a;
+  float cR = b.r - mR * mP, cG = b.g - mG * mP, cB = b.b - mB * mP;
+  float rr = b.a - mR * mR + u_eps, rg = d.r - mR * mG, rb = d.g - mR * mB;
+  float gg = d.b - mG * mG + u_eps, gb = d.a - mG * mB, bb = e.r - mB * mB + u_eps;
+  float i00 = gg * bb - gb * gb, i01 = gb * rb - rg * bb, i02 = rg * gb - gg * rb;
+  float i11 = rr * bb - rb * rb, i12 = rg * rb - rr * gb, i22 = rr * gg - rg * rg;
+  float det = rr * i00 + rg * i01 + rb * i02;
+  float ar = (i00 * cR + i01 * cG + i02 * cB) / det, ag = (i01 * cR + i11 * cG + i12 * cB) / det, ab = (i02 * cR + i12 * cG + i22 * cB) / det;
+  o = vec4(ar, ag, ab, mP - ar * mR - ag * mG - ab * mB);
+}`,
+  // Mask, step 3: alpha at full size, the coefficients read bilinearly (core.guidedApply).
+  alpha: GL_HEAD + GL_CURVE + `uniform sampler2D u_f, u_c; uniform ivec2 u_msize, u_size; out vec4 o;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec2 s = vec2(u_msize) / vec2(u_size);
+  float fx = clamp((float(c.x) + 0.5) * s.x - 0.5, 0.0, float(u_msize.x - 1)), fy = clamp((float(c.y) + 0.5) * s.y - 0.5, 0.0, float(u_msize.y - 1));
+  int x0 = int(floor(fx)), y0 = int(floor(fy)), x1 = min(u_msize.x - 1, x0 + 1), y1 = min(u_msize.y - 1, y0 + 1);
+  float tx = fx - float(x0), ty = fy - float(y0);
+  vec4 k = mix(mix(texelFetch(u_c, ivec2(x0, y0), 0), texelFetch(u_c, ivec2(x1, y0), 0), tx),
+               mix(texelFetch(u_c, ivec2(x0, y1), 0), texelFetch(u_c, ivec2(x1, y1), 0), tx), ty);
+  o = vec4(curve(dot(k.rgb, texelFetch(u_f, c, 0).rgb) + k.a), 0.0, 0.0, 0.0);
+}`,
+  // Which blocks have any skin at all.
+  blocks: GL_HEAD + `uniform sampler2D u_a; uniform int u_b; uniform ivec2 u_size; out vec4 o;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy) * u_b;
+  float m = 0.0;
+  for (int y = 0; y < u_b; y++) for (int x = 0; x < u_b; x++) {
+    ivec2 p = c + ivec2(x, y);
+    if (p.x < u_size.x && p.y < u_size.y) m = max(m, texelFetch(u_a, p, 0).r);
+  }
+  o = vec4(m > 0.0 ? 1.0 : 0.0);
+}`,
+  // Smoothing, step 1: the window mean of each channel and of its square, across.
+  sH: GL_HEAD + `uniform sampler2D u_f; uniform ivec2 u_o, u_size; uniform int u_r;
+layout(location = 0) out vec4 o0; layout(location = 1) out vec4 o1;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  int a = max(0, c.x - u_r), b = min(u_size.x - 1, c.x + u_r);
+  vec3 s = vec3(0.0), q = vec3(0.0);
+  for (int k = a; k <= b; k++) { vec3 I = texelFetch(u_f, u_o + ivec2(k, c.y), 0).rgb; s += I; q += I * I; }
+  float m = float(b - a + 1);
+  o0 = vec4(s / m, 0.0); o1 = vec4(q / m, 0.0);
+}`,
+  // Smoothing, step 2: how much of each pixel to keep (a) and the rest (b).
+  sAB: GL_HEAD + `uniform sampler2D u_s0, u_s1; uniform float u_eps;
+layout(location = 0) out vec4 o0; layout(location = 1) out vec4 o1;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  vec3 m = texelFetch(u_s0, c, 0).rgb, m2 = texelFetch(u_s1, c, 0).rgb;
+  vec3 v = m2 - m * m, a = v / (v + u_eps);
+  o0 = vec4(a, 0.0); o1 = vec4(m - a * m, 0.0);
+}`,
+  // Smoothing, step 3: what the smoothing takes away, E = I - S, its window mean across.
+  sEH: GL_HEAD + `uniform sampler2D u_f, u_s0, u_s1; uniform ivec2 u_o, u_size; uniform int u_r; out vec4 o;
+void main() {
+  ivec2 c = ivec2(gl_FragCoord.xy);
+  int a = max(0, c.x - u_r), b = min(u_size.x - 1, c.x + u_r);
+  vec3 s = vec3(0.0);
+  for (int k = a; k <= b; k++) {
+    ivec2 p = ivec2(k, c.y);
+    vec3 I = texelFetch(u_f, u_o + p, 0).rgb;
+    s += I - (texelFetch(u_s0, p, 0).rgb * I + texelFetch(u_s1, p, 0).rgb);
+  }
+  o = vec4(s / float(b - a + 1), 0.0);
+}`,
+  // Smoothing, step 4: the mix, written upright into the output canvas (whose rows run
+  // bottom to top). pixel = I + strength x alpha x (S + texture x grain - I).
+  mix: GL_HEAD + `uniform sampler2D u_f, u_a, u_s0, u_s1, u_low; uniform ivec2 u_o; uniform int u_h; uniform float u_strength, u_texture; out vec4 o;
+void main() {
+  ivec2 c = ivec2(int(gl_FragCoord.x), u_h - 1 - int(gl_FragCoord.y)), p = c - u_o;
+  vec3 I = texelFetch(u_f, c, 0).rgb;
+  vec3 S = texelFetch(u_s0, p, 0).rgb * I + texelFetch(u_s1, p, 0).rgb;
+  vec3 D = I - S - texelFetch(u_low, p, 0).rgb;
+  float m = u_strength * texelFetch(u_a, c, 0).r;
+  o = vec4(I + m * (S + u_texture * D - I), 1.0);
+}`,
+  copy: GL_HEAD + `uniform sampler2D u_f; uniform int u_h; out vec4 o;
+void main() { o = vec4(texelFetch(u_f, ivec2(int(gl_FragCoord.x), u_h - 1 - int(gl_FragCoord.y)), 0).rgb, 1.0); }`,
+};
+
+const skinGPU = {
+  gl: null, canvas: null, why: null, progs: {}, tex: {}, fbo: null,
+  disabled: false,                // test seam: true sends every frame to the JavaScript filter
+  tile: SKIN_GPU_TILE,            // test seam: smaller tiles, to check that they join
+  // Set up WebGL2 once. Returns null when it works, else why it cannot.
+  init() {
+    if (this.gl && !this.gl.isContextLost()) return null;
+    this.gl = null; this.progs = {}; this.tex = {}; this.fbo = null;
+    try {
+      const canvas = document.createElement('canvas');
+      const gl = canvas.getContext('webgl2', { alpha: false, depth: false, stencil: false, antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: true });
+      if (!gl) return (this.why = 'WebGL2 is not available');
+      if (!gl.getExtension('EXT_color_buffer_float')) return (this.why = 'it cannot draw into float textures');
+      for (const [name, src] of Object.entries(GL_SRC)) {
+        const p = gl.createProgram();
+        for (const [type, text] of [[gl.VERTEX_SHADER, GL_VERT], [gl.FRAGMENT_SHADER, src]]) {
+          const s = gl.createShader(type);
+          gl.shaderSource(s, text); gl.compileShader(s);
+          if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(name + ': ' + gl.getShaderInfoLog(s));
+          gl.attachShader(p, s);
+        }
+        gl.linkProgram(p);
+        if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(name + ': ' + gl.getProgramInfoLog(p));
+        this.progs[name] = { p, u: {} };
+      }
+      this.fbo = gl.createFramebuffer();
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST);
+      this.canvas = canvas; this.gl = gl; this.why = null;
+      return null;
+    } catch (err) { return (this.why = 'the skin filter would not start (' + shortError(err) + ')'); }
+  },
+  // Can a W x H frame be smoothed here?
+  can(W, H) {
+    if (this.disabled) return false;
+    if (this.init()) return false;
+    const gl = this.gl, max = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE), ...gl.getParameter(gl.MAX_VIEWPORT_DIMS));
+    if (Math.max(W, H) > max) { this.why = fmtDims(W, H) + ' is larger than this graphics chip takes'; return false; }
+    return true;
+  },
+  // A texture of at least w x h, kept between frames and grown when needed.
+  texture(name, w, h, kind) {
+    const gl = this.gl, f = { rgba32f: [gl.RGBA32F, gl.RGBA, gl.FLOAT], r32f: [gl.R32F, gl.RED, gl.FLOAT], rgba8: [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE] }[kind];
+    let t = this.tex[name];
+    if (t && t.w >= w && t.h >= h) return t;
+    if (t) gl.deleteTexture(t.t);
+    t = { t: gl.createTexture(), w: Math.max(w, t ? t.w : 0), h: Math.max(h, t ? t.h : 0) };
+    gl.bindTexture(gl.TEXTURE_2D, t.t);
+    for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, f[0], t.w, t.h);
+    this.tex[name] = t;
+    return t;
+  },
+  // Upload a picture (canvas) or a float map into a texture of its own size.
+  upload(name, src, w, h, data = null) {
+    const gl = this.gl;
+    let t = this.tex[name];
+    if (!t || t.w !== w || t.h !== h) {
+      if (t) gl.deleteTexture(t.t);
+      t = this.tex[name] = { t: gl.createTexture(), w, h };
+      gl.bindTexture(gl.TEXTURE_2D, t.t);
+      for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
+      for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+    } else gl.bindTexture(gl.TEXTURE_2D, t.t);
+    if (data) gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, w, h, 0, gl.RED, gl.FLOAT, data);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    return t;
+  },
+  // One pass: program name, input textures by uniform, other uniforms, output
+  // textures (none: the canvas), and the w x h area drawn (x, y on the canvas).
+  pass(name, inputs, uniforms, outs, w, h, x = 0, y = 0) {
+    const gl = this.gl, pr = this.progs[name];
+    gl.useProgram(pr.p);
+    const loc = (k) => (k in pr.u ? pr.u[k] : (pr.u[k] = gl.getUniformLocation(pr.p, k)));
+    Object.entries(inputs).forEach(([k, t], i) => {
+      gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t.t); gl.uniform1i(loc(k), i);
+    });
+    for (const [k, v] of Object.entries(uniforms)) {
+      const l = loc(k);
+      if (l === null) continue;
+      if (Array.isArray(v)) gl.uniform2i(l, v[0], v[1]);
+      else if (k === 'u_eps' || k === 'u_lo' || k === 'u_hi' || k === 'u_strength' || k === 'u_texture') gl.uniform1f(l, v);
+      else gl.uniform1i(l, v);
+    }
+    if (outs.length) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+      for (let i = 0; i < 4; i++) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, i < outs.length ? outs[i].t : null, 0);
+      gl.drawBuffers(outs.map((_, i) => gl.COLOR_ATTACHMENT0 + i));
+    } else gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(x, y, w, h);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  },
+  // A window mean in both directions, through a spare set of textures and back.
+  box(ins, tmp, r, w, h) {
+    const n = ins.length, name = 'box' + n;
+    const map = (ts) => Object.fromEntries(ts.map((t, i) => ['u_s' + i, t]));
+    this.pass(name, map(ins), { u_dir: [1, 0], u_r: r, u_size: [w, h] }, tmp, w, h);
+    this.pass(name, map(tmp), { u_dir: [0, 1], u_r: r, u_size: [w, h] }, ins, w, h);
+  },
+  // src: a W x H canvas. prob: the skin model's mask { w, h, data }. o: { strength,
+  // texture, r, g, eps } as for core.renderSmooth. Returns this engine's canvas, which
+  // holds the smoothed frame until the next call.
+  smooth(src, W, H, prob, o) {
+    if (!this.can(W, H)) throw new Error(this.why);
+    const gl = this.gl, c = this.canvas;
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    if (gl.drawingBufferWidth !== W || gl.drawingBufferHeight !== H) throw new Error(fmtDims(W, H) + ' is larger than this graphics chip takes');
+    const F = this.upload('frame', src, W, H);
+    this.pass('copy', { u_f: F }, { u_h: H }, [], W, H);
+    if (o.strength > 0) {
+      // 1. The mask, as core.bgModel, core.bgGuided and core.bgFeather.
+      const guide = core.bgGuide(src), gw = guide.width, gh = guide.height;
+      const G = this.upload('guide', guide, gw, gh);
+      core.release(guide);
+      const p = prob.w === gw && prob.h === gh ? prob.data : core.resampleMask(prob.data, prob.w, prob.h, gw, gh);
+      const P = this.upload('prob', null, gw, gh, p instanceof Float32Array ? p : Float32Array.from(p));
+      const M = [0, 1, 2, 3].map((i) => this.texture('m' + i, gw, gh, 'rgba32f'));
+      const Q = [0, 1, 2, 3].map((i) => this.texture('q' + i, gw, gh, 'rgba32f'));
+      const C = this.texture('coef', gw, gh, 'rgba32f');
+      const curve = { u_lo: core.BG_EDGE_LO, u_hi: core.BG_EDGE_HI };
+      const gr = Math.max(1, Math.round(core.BG_GUIDE_RADIUS * Math.max(gw, gh)));
+      for (let k = 0; k < core.BG_GUIDE_PASSES; k++) {
+        this.pass('mprod', { u_g: G, u_p: P, u_c: C }, { u_from: k ? 1 : 0, ...curve }, M, gw, gh);
+        this.box(M, Q, gr, gw, gh);
+        this.pass('mcoef', { u_s0: M[0], u_s1: M[1], u_s2: M[2], u_s3: M[3] }, { u_eps: core.BG_GUIDE_EPS }, [C], gw, gh);
+        this.box([C], [Q[0]], gr, gw, gh);
+      }
+      const A = this.texture('alpha', W, H, 'r32f'), A2 = this.texture('alpha2', W, H, 'r32f');
+      this.pass('alpha', { u_f: F, u_c: C }, { u_msize: [gw, gh], u_size: [W, H], ...curve }, [A], W, H);
+      const fr = Math.round(core.SKIN_FEATHER * Math.max(W, H) / 2);
+      if (fr > 0) { this.box([A], [A2], fr, W, H); this.box([A], [A2], fr, W, H); }
+      // Which tiles have skin in them.
+      const B = SKIN_GPU_BLOCK, bw = Math.ceil(W / B), bh = Math.ceil(H / B);
+      const BL = this.texture('blocks', bw, bh, 'rgba8');
+      this.pass('blocks', { u_a: A }, { u_b: B, u_size: [W, H] }, [BL], bw, bh);
+      const flags = new Uint8Array(bw * bh * 4);
+      gl.readPixels(0, 0, bw, bh, gl.RGBA, gl.UNSIGNED_BYTE, flags);
+      const T = Math.max(B, Math.floor(this.tile / B) * B), m = 2 * o.r + o.g;
+      const any = (t) => {
+        for (let y = t.y0 / B; y < Math.ceil(t.y1 / B); y++) for (let x = t.x0 / B; x < Math.ceil(t.x1 / B); x++) if (flags[(y * bw + x) * 4]) return true;
+        return false;
+      };
+      // 2. The smoothing, tile by tile, as core.skinFilter and core.skinMix.
+      for (let ty = 0; ty < H; ty += T) {
+        for (let tx = 0; tx < W; tx += T) {
+          const t = { x0: tx, y0: ty, x1: Math.min(W, tx + T), y1: Math.min(H, ty + T) };
+          if (!any(t)) continue;
+          const r = { x0: Math.max(0, t.x0 - m), y0: Math.max(0, t.y0 - m), x1: Math.min(W, t.x1 + m), y1: Math.min(H, t.y1 + m) };
+          const rw = r.x1 - r.x0, rh = r.y1 - r.y0, at = [r.x0, r.y0], size = [rw, rh];
+          const S = [0, 1, 2, 3].map((i) => this.texture('s' + i, rw, rh, 'rgba32f'));
+          this.pass('sH', { u_f: F }, { u_o: at, u_size: size, u_r: o.r }, [S[0], S[1]], rw, rh);
+          this.pass('box2', { u_s0: S[0], u_s1: S[1] }, { u_dir: [0, 1], u_r: o.r, u_size: size }, [S[2], S[3]], rw, rh);
+          this.pass('sAB', { u_s0: S[2], u_s1: S[3] }, { u_eps: o.eps }, [S[0], S[1]], rw, rh);
+          this.box([S[0], S[1]], [S[2], S[3]], o.r, rw, rh);
+          this.pass('sEH', { u_f: F, u_s0: S[0], u_s1: S[1] }, { u_o: at, u_size: size, u_r: o.g }, [S[2]], rw, rh);
+          this.pass('box1', { u_s0: S[2] }, { u_dir: [0, 1], u_r: o.g, u_size: size }, [S[3]], rw, rh);
+          this.pass('mix', { u_f: F, u_a: A, u_s0: S[0], u_s1: S[1], u_low: S[3] },
+            { u_o: at, u_h: H, u_strength: o.strength, u_texture: o.texture }, [], t.x1 - t.x0, t.y1 - t.y0, t.x0, H - t.y1);
+        }
+      }
+    }
+    if (gl.isContextLost()) throw new Error('the graphics chip dropped the skin filter');
+    return c;
+  },
+  // Free the textures (closing a video); the set-up stays for next time.
+  release() {
+    const gl = this.gl;
+    if (!gl) return;
+    for (const t of Object.values(this.tex)) gl.deleteTexture(t.t);
+    this.tex = {};
+    if (this.canvas) { this.canvas.width = 1; this.canvas.height = 1; }
+  },
+};
+
+// The same filter in JavaScript (the photo tool's own functions), for a phone whose
+// graphics chip cannot run it. Much slower, but the result is the same.
+const skinCPU = {
+  out: null,
+  smooth(src, W, H, prob, o) {
+    const guide = core.bgGuide(src);
+    let model;
+    try { model = core.bgModel(guide, prob); } finally { core.release(guide); }
+    const a = core.bgFeather(core.bgGuided(src, W, H, model), W, H, core.SKIN_FEATHER);
+    if (this.out) core.release(this.out);
+    return (this.out = core.renderSmooth(src, a, W, H, o));
+  },
+};
+
+// The engine for a W x H frame: the graphics chip when it can, else JavaScript.
+const skinEngine = (W, H) => (skinGPU.can(W, H) ? skinGPU : skinCPU);
+
+/* One frame of a clip, smoothed. run carries the steadied mask and face size from
+   frame to frame (skinRun starts one: at each piece of an export, and for each frame
+   the sheet previews). src is the frame as a W x H canvas; s is the recipe's
+   { strength, texture } in per cent. Returns { canvas, found }: found is the share of
+   the frame that is skin. */
+function skinRun(fps) {
+  return { k: core.video.steadyShare(fps), prob: null, face: null, small: null };
+}
+// The skin model on a W x H frame, drawn into small at the model's own size.
+function skinModel(src, W, H, small) {
+  const k = Math.min(1, core.SKIN_MODEL_LONG / Math.max(W, H));
+  const w = Math.max(1, Math.round(W * k)), h = Math.max(1, Math.round(H * k));
+  if (small.width !== w || small.height !== h) { small.width = w; small.height = h; }
+  const x = small.getContext('2d', { willReadFrequently: true });
+  x.imageSmoothingQuality = 'high';
+  x.drawImage(src, 0, 0, w, h);
+  return segmenter.skin(small);
+}
+async function skinFrame(run, src, W, H, s) {
+  if (!run.small) run.small = core.makeCanvas(1, 1);
+  const m = await skinModel(src, W, H, run.small);
+  if (run.prob && (run.mw !== m.w || run.mh !== m.h)) run.prob = null;
+  run.prob = core.video.steadyMask(run.prob, m.data, run.k);
+  run.mw = m.w; run.mh = m.h;
+  const sh = core.video.maskShares(run.prob);
+  run.face = core.video.steadyValue(run.face, core.skinFaceSize(m.face, sh.coverage, W, H), run.k);
+  const o = { ...core.skinRadii(run.face), eps: core.SKIN_EPS, strength: s.strength / 100, texture: s.texture / 100 };
+  const canvas = skinEngine(W, H).smooth(src, W, H, { w: m.w, h: m.h, data: run.prob }, o);
+  return { canvas, found: sh.found };
+}
+
+/* ---------- Tool: smooth skin (video) ---------- */
+
+// Strength and Texture, as for a photo, for the whole edit, applied at export to every
+// frame. The sheet shows the paused frame smoothed (the player cannot smooth as it
+// plays); playing shows the clip as it is.
+tools.vskin = {
+  video: true,
+  s: null,          // the last settings, kept for the next time the sheet opens
+  open() {
+    const c = app.video.history.current;
+    this.s = c.skin ? { ...c.skin } : { ...(this.s && this.s.strength ? this.s : { strength: 60, texture: 35 }) };
+    this.d = { ...c, skin: this.s };
+    app.vpreview = this.d;
+    this.frame = null;
+    this.found = null;
+    player.pause();
+    this.sync();
+    this.refresh();
+  },
+  close() {
+    this.ticket = (this.ticket || 0) + 1;
+    $('#vskin').hidden = true;
+    document.body.removeAttribute('data-vskin-playing');
+    if (this.frame) core.release(this.frame.src);
+    this.frame = null;
+  },
+  // The frame on screen, at most screen size, as a canvas.
+  grab() {
+    const vw = player.videoWidth, vh = player.videoHeight;
+    const k = Math.min(1, Math.max(BG_PREVIEW_LONG, Math.max(view.cssW, view.cssH) * view.dpr) / Math.max(vw, vh));
+    const W = Math.max(1, Math.round(vw * k)), H = Math.max(1, Math.round(vh * k));
+    const c = core.makeCanvas(W, H), x = c.getContext('2d', { willReadFrequently: true });
+    x.imageSmoothingQuality = 'high';
+    x.drawImage(player, 0, 0, W, H);
+    return { src: c, W, H, key: pl.clip + ':' + player.currentTime + ':' + vw + 'x' + vh };
+  },
+  // Show the smoothing on the paused frame; hide it while playing or holding.
+  async refresh() {
+    if (app.tool !== this) return;
+    const playing = !player.paused, ready = player.readyState >= 2 && player.videoWidth > 0;
+    document.body.toggleAttribute('data-vskin-playing', playing);
+    if (playing || app.holding || !ready) { $('#vskin').hidden = true; this.sync(); return; }
+    const ticket = (this.ticket = (this.ticket || 0) + 1);
+    const key = pl.clip + ':' + player.currentTime + ':' + player.videoWidth + 'x' + player.videoHeight;
+    if (!this.frame || this.frame.key !== key) {
+      if (this.frame) core.release(this.frame.src);
+      this.frame = null;
+      this.found = null;
+      this.sync();
+      busy(true, segmenter.promise || segmenter.skinOverride ? 'Finding the skin' : 'Loading model');
+      try {
+        await nextFrame();
+        const f = this.grab(), small = core.makeCanvas(1, 1);
+        let m;
+        try { m = await skinModel(f.src, f.W, f.H, small); } finally { core.release(small); }
+        if (ticket !== this.ticket || app.tool !== this) { core.release(f.src); return; }
+        const sh = core.video.maskShares(m.data);
+        this.frame = { ...f, prob: m, face: core.skinFaceSize(m.face, sh.coverage, f.W, f.H) };
+        this.found = sh.found;
+      } catch (err) {
+        if (ticket === this.ticket) notify('Skin smoothing could not start: ' + shortError(err), 'fail', { sticky: true, id: 'vskin' });
+        return;
+      } finally { busy(false); }
+    }
+    this.render();
+  },
+  // Smooth the kept frame with the sliders as they stand and lay it over the player.
+  render() {
+    const f = this.frame;
+    if (!f || app.tool !== this || app.holding || !player.paused) return;
+    const c = $('#vskin'), shown = f.key + ' ' + this.s.strength + ' ' + this.s.texture;
+    if (f.shown !== shown) {                // the same frame and settings are not smoothed twice
+      const o = { ...core.skinRadii(f.face), eps: core.SKIN_EPS, strength: this.s.strength / 100, texture: this.s.texture / 100 };
+      const out = skinEngine(f.W, f.H).smooth(f.src, f.W, f.H, f.prob, o);
+      if (c.width !== f.W) c.width = f.W;
+      if (c.height !== f.H) c.height = f.H;
+      c.getContext('2d').drawImage(out, 0, 0);
+      f.shown = shown;
+    }
+    this.place();
+    c.hidden = false;
+    this.sync();
+  },
+  // Lay the overlay exactly over the picture the player shows.
+  place() {
+    const c = $('#vskin'), vw = player.videoWidth, vh = player.videoHeight;
+    if (!vw || !vh) return;
+    const st = $('#stage').getBoundingClientRect(), pr = player.getBoundingClientRect();
+    const k = Math.min(pr.width / vw, pr.height / vh), w = vw * k, h = vh * k;
+    Object.assign(c.style, { left: (pr.left - st.left + (pr.width - w) / 2) + 'px', top: (pr.top - st.top + (pr.height - h) / 2) + 'px', width: w + 'px', height: h + 'px' });
+  },
+  // Sliders re-mix at most once a screen frame.
+  set(key, v) {
+    this.s[key] = v;
+    this.sync();
+    if (this.queued) return;
+    this.queued = true;
+    requestAnimationFrame(() => { this.queued = false; this.render(); });
+  },
+  sync() {
+    const s = this.s, v = app.video, j = joinPlan(v, { ...this.d, skin: s.strength ? s : null });
+    $('#vskin-strength').value = String(s.strength);
+    $('#vskin-strength-out').textContent = s.strength + ' %';
+    $('#vskin-texture').value = String(s.texture);
+    $('#vskin-texture-out').textContent = s.texture + ' %';
+    const playing = !player.paused;
+    $('#vskin-out').textContent = !s.strength ? 'Off: strength 0.' : playing ? 'Playing: pause to see the smoothing.' :
+      this.found === null ? 'Finding the skin.' :
+      (this.found < BG_MIN_PERSON ? 'No skin in this frame.' : 'Skin found in ' + Math.round(this.found * 100) + ' % of this frame.');
+    const lines = [];
+    if (s.strength) {
+      const pic = j.pic;
+      lines.push('Export will re-encode the picture to H.264 and run the skin model and filter on all ' + j.frames + ' frames, so it takes a while.' +
+        (skinGPU.can(pic.w, pic.h) ? '' : ' This phone\'s graphics chip cannot run the filter (' + (skinGPU.why || 'not available') + '), so it runs in JavaScript: much slower.') +
+        (j.hdr ? ' HDR becomes SDR.' : ''));
+    }
+    const note = $('#vskin-note');
+    note.hidden = !lines.length;
+    note.textContent = lines.join(' ');
+  },
+  apply() {
+    const v = app.video, skin = this.s.strength ? { strength: this.s.strength, texture: this.s.texture } : null;
+    if (JSON.stringify(skin) === JSON.stringify(v.history.current.skin || null)) return;
+    v.history.push({ skin }, skin ? 'Smooth skin' : 'No skin smoothing');
+    afterHistoryChange();
+  },
+};
+$('#vskin-strength').addEventListener('input', (e) => tools.vskin.set('strength', +e.target.value));
+$('#vskin-texture').addEventListener('input', (e) => tools.vskin.set('texture', +e.target.value));
+for (const ev of ['pause', 'play', 'seeked', 'loadeddata']) player.addEventListener(ev, () => { if (app.tool === tools.vskin) tools.vskin.refresh(); });
+new ResizeObserver(() => { if (app.tool === tools.vskin) tools.vskin.place(); }).observe($('#stage'));
+
 /* ---------- Video export ---------- */
 
 // Where the new file is written: the browser's private storage on this phone when
@@ -5875,25 +6453,29 @@ async function copyPackets(MB, v, r, j, vsrc, asrc, progress, wanted) {
 // Round it goes the canvas fill: a colour, or this very frame stretched to cover the
 // frame and blurred; black where there is no canvas and a clip's shape differs. The
 // frames are evenly spaced at the export's rate; each shows the clip's frame that is
-// on screen at that moment, so a lower rate drops frames.
+// on screen at that moment, so a lower rate drops frames. With skin smoothing on,
+// each frame is smoothed at its size in the picture before it is drawn; the steadied
+// mask starts again at each piece.
 async function encodeFrames(MB, v, r, j, canvas, vsrc, progress, wanted) {
   const ctx = canvas.getContext('2d', { alpha: false });
   ctx.imageSmoothingQuality = 'high';
   let g = 0;
   for (let n = 0; n < r.pieces.length; n++) {
     const c = v.clips[r.pieces[n].clip], box = core.video.fitIn(j.pic, c.info.width, c.info.height);
+    const run = j.skin ? skinRun(j.rate) : null;
     const sink = new MB.CanvasSink(c.vt, { width: box.w, height: box.h, fit: 'fill', poolSize: 2 });
     // A hair past each frame time (0.1 ms, far less than a frame even at 240 fps), so a
     // source frame stamped a rounding later than the grid time is still the one found.
     for await (const wc of sink.canvasesAtTimestamps(j.plans[n].times.map((t) => t + 1e-4))) {
       if (!wanted()) return false;
       if (wc) {                         // none before the clip's first frame: the frame before stays
-        if (j.fill.fill === 'blur') core.drawBlurCover(ctx, wc.canvas, j.w, j.h, j.fill.blur);
+        const pic = run ? (await skinFrame(run, wc.canvas, box.w, box.h, j.skin)).canvas : wc.canvas;
+        if (j.fill.fill === 'blur') core.drawBlurCover(ctx, pic, j.w, j.h, j.fill.blur);
         else { ctx.fillStyle = j.fill.colour; ctx.fillRect(0, 0, j.w, j.h); }
-        ctx.drawImage(wc.canvas, box.x, box.y);
+        ctx.drawImage(pic, box.x, box.y);
       }
       await vsrc.add(g / j.rate, 1 / j.rate);
-      if (++g % 5 === 0) progress(g / j.frames);
+      if (++g % (run ? 1 : 5) === 0) progress(g / j.frames);
     }
   }
   return true;
@@ -6039,6 +6621,10 @@ tools.vexport = {
         (j.shapes ? (r.pad ? ' Clips of another shape sit inside the picture\'s place, with the canvas fill round them.' : ' Clips of another shape get black bars.') : '') +
         (j.hdr ? ' HDR becomes SDR: this phone cannot encode 10-bit HDR video.' : '') + ' This is slower than a copy and loses a little quality.');
     }
+    if (j.skin) {
+      lines.push('The skin model and filter run on every frame (' + j.frames + '), which takes a while' +
+        (skinGPU.can(j.pic.w, j.pic.h) ? '.' : ': this phone\'s graphics chip cannot run the filter (' + (skinGPU.why || 'not available') + '), so it runs in JavaScript, much slower.'));
+    }
     if (j.sound.mode === 'encode') lines.push('The sound is re-encoded: ' + j.sound.why.join('; ') + '.');
     const note = $('#vexport-note');
     note.hidden = !lines.length;
@@ -6133,6 +6719,55 @@ async function checkOne(c) {
   return r;
 }
 
+// The skin checks: the model on a frame, and the filter on the graphics chip at a size.
+async function checkSkin(c) {
+  const r = { supported: false, ran: null, error: null };
+  if (c.kind === 'skin-filter' && !skinGPU.can(c.config.width, c.config.height)) { r.error = skinGPU.why; return r; }
+  r.supported = true;
+  try { r.ran = await withTimeout(c.kind === 'skin-model' ? trialSkinModel(c.config) : trialSkinFilter(c.config), 60000); } catch (err) { r.error = shortError(err); }
+  return r;
+}
+
+// A frame of skin-coloured noise with a darker oval, the mask all skin: the most work
+// the filter can be given.
+function skinTrialFrame(W, H) {
+  const c = core.makeCanvas(W, H), x = c.getContext('2d');
+  const img = x.createImageData(W, H), d = img.data;
+  let s = 1;
+  for (let i = 0; i < d.length; i += 4) {
+    s = (s * 16807) % 2147483647;
+    const n = (s % 41) - 20;
+    d[i] = 200 + n; d[i + 1] = 150 + n; d[i + 2] = 120 + n; d[i + 3] = 255;
+  }
+  x.putImageData(img, 0, 0);
+  x.fillStyle = 'rgba(90,50,40,0.5)';
+  x.beginPath(); x.ellipse(W / 2, H / 2, W / 4, H / 5, 0, 0, 2 * Math.PI); x.fill();
+  return c;
+}
+
+async function trialSkinFilter(cfg) {
+  const { width: W, height: H, frames } = cfg, src = skinTrialFrame(W, H);
+  const prob = { w: 16, h: 16, data: new Float32Array(256).fill(1) };
+  const o = { ...core.skinRadii(0.4 * Math.min(W, H)), eps: core.SKIN_EPS, strength: 0.6, texture: 0.35 };
+  try {
+    const sink = core.makeCanvas(1, 1).getContext('2d');
+    skinGPU.smooth(src, W, H, prob, o);                 // first run sets up the textures
+    const t0 = performance.now();
+    for (let i = 0; i < frames; i++) { sink.drawImage(skinGPU.smooth(src, W, H, prob, o), 0, 0); await nextFrame(); }
+    return { frames, fps: frames / ((performance.now() - t0) / 1000) };
+  } finally { core.release(src); skinGPU.release(); }
+}
+
+async function trialSkinModel(cfg) {
+  const src = skinTrialFrame(1080, 1920), small = core.makeCanvas(1, 1);
+  try {
+    await skinModel(src, 1080, 1920, small);           // first run loads the model
+    const t0 = performance.now();
+    for (let i = 0; i < cfg.frames; i++) await skinModel(src, 1080, 1920, small);
+    return { frames: cfg.frames, fps: cfg.frames / ((performance.now() - t0) / 1000) };
+  } finally { core.release(src); core.release(small); }
+}
+
 const withTimeout = (p, ms) => Promise.race([p, new Promise((res, rej) => setTimeout(() => rej(new Error('no answer after ' + ms / 1000 + ' s')), ms))]);
 
 // Encode 30 frames (20 at 4K) of moving colour; report frames per second.
@@ -6203,7 +6838,7 @@ tools.vcheck = {
     for (const c of core.video.CHECKS) {
       if (ticket !== this.ticket) return;
       $('#vcheck-out').textContent = 'checking ' + (++i) + ' of ' + core.video.CHECKS.length;
-      app.check.results[c.id] = await checkOne(c);
+      app.check.results[c.id] = await (c.kind.startsWith('skin') ? checkSkin(c) : checkOne(c));
       this.render();
     }
     app.check.done = true;
@@ -6349,6 +6984,7 @@ window.retouch = {
   BG_MIN_PERSON, BG_PREVIEW_LONG, BG_FEATHER_STEP, BG_VENDOR, SPOT_LARGE,
   core, app, view, tools, segmenter, openFile, openTool, closeTool, commit, commitTexts, encodeImage, fontsReady, undo, redo, draw,
   player, pl, loadMediabunny, readClip, exportClip, joinPlan, checkOne, VIDEO_EXPORT_TEMP,
+  skinGPU, skinCPU, skinRun, skinFrame, SKIN_GPU_TILE,
   readPixels(src, x = 0, y = 0, w = src.width, h = src.height) {
     const c = core.makeCanvas(src.width, src.height);
     const ctx = c.getContext('2d', { willReadFrequently: true });

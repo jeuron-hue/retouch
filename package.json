@@ -1,6 +1,6 @@
 {
   "name": "retouch",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "description": "Test tooling for retouch. The app itself has no build step and no dependencies.",
   "scripts": {
