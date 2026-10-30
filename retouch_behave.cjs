@@ -16,6 +16,8 @@
 // Core only:      RETOUCH_ONLY=core node retouch_behave.cjs   (used by retouch_mutate.sh)
 // Other page:     RETOUCH_HTML=/path/to/mutant.html node retouch_behave.cjs
 // Filter by name: RETOUCH_GREP=crop node retouch_behave.cjs
+// On Windows the tests run on the installed Google Chrome: Playwright's own Chromium
+// has no H.264 encoder there.
 
 'use strict';
 const fs = require('fs');
@@ -1122,7 +1124,8 @@ test('text: drag, pinch and the handle change the stored transform and the expor
   near(b.x, 200 + 60 / c0.s, 0.01, 'dragged x'); near(b.y, 150 - 30 / c0.s, 0.01, 'dragged y');
   assert(b.size === 30 && b.rotation === 0, 'a drag must not scale or turn: ' + JSON.stringify(b));
   const s1 = await page.evaluate(() => window.__exportStats([255, 0, 255]));
-  near(s1.cx - s0.cx, b.x - 200, 1, 'exported text moved in x'); near(s1.cy - s0.cy, b.y - 150, 1, 'exported text moved in y');
+  // 1.5 px: glyph edges rasterise differently on Windows (60.8 against 61.9 on the rig, 31/10/26).
+  near(s1.cx - s0.cx, b.x - 200, 1.5, 'exported text moved in x'); near(s1.cy - s0.cy, b.y - 150, 1.5, 'exported text moved in y');
   near(s1.bw, s0.bw, 1, 'width unchanged by a drag');
 
   // Pinch: fingers 80 px apart across the box, turned a quarter and spread to 120 px.
@@ -1332,6 +1335,9 @@ test('text: outline, shadow, alignment and line spacing change the right pixels'
   assert(r.plainDark === 0, 'no shadow when shadow is off');
   assert(r.hard.n > 100, 'hard shadow missing');
   near(r.hard.maxX - r.hardFill.maxX, 0.06 * 40, 1, 'hard shadow offset x'); near(r.hard.maxY - r.hardFill.maxY, 0.06 * 40, 1, 'hard shadow offset y');
+  // The left edge too (the shadow of each stem shows below the letters): on Windows the right edge
+  // alone does not move when the clean pass casts a second shadow (mutation run, 31/10/26).
+  near(r.hard.minX - r.hardFill.minX, 0.06 * 40, 1, 'hard shadow offset x, left edge');
   near(r.hardZoom.maxX - r.hardZoomFill.maxX, 2 * 0.06 * 40, 1.5, 'shadow offset scales with the zoom');
   near(r.hardTurned.maxX - r.hardTurnedFill.maxX, 0.06 * 40, 1, 'turned box: shadow still falls right');
   near(r.hardTurned.maxY - r.hardTurnedFill.maxY, 0.06 * 40, 1, 'turned box: shadow still falls down');
@@ -3318,7 +3324,7 @@ test('video check: opens from the empty screen, runs every check, copies a plain
   assert(/works, 30 frames at \d+ fps/.test(rows[0][2]), 'H.264 1080p 30 trial ran: ' + rows[0][2]);
   await page.click('#vcheck-copy');
   await page.waitForSelector('.notice[data-id="vcheck"]');
-  const clip = await page.evaluate(() => navigator.clipboard.readText());
+  const clip = await page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, '\n'));
   const shown = await page.textContent('#vcheck-report');
   assert(clip === shown && /^retouch \d+\.\d+\.\d+ video check, \d\d\/\d\d\/\d\d/.test(clip), 'copied report: ' + clip.slice(0, 80));
   for (const l of ['H.264 encode 1080p 30 fps', 'H.264 encode 1080p 60 fps', 'H.264 encode 4K 30 fps', 'H.264 encode 4K 60 fps', 'AAC encode 48 kHz stereo', 'HDR screen:', 'Open clip: none',
@@ -3984,7 +3990,9 @@ test('video join: another frame rate and HDR re-encode to SDR at the first rate;
   assert(v.sampleCount === 60, 'one second of 25 fps becomes 30 frames: ' + v.sampleCount);
   near(seconds(v), 2, 0.002, 'length');
   assert(!v.colr || v.colr.transfer !== 18, 'not tagged HLG ' + JSON.stringify(v.colr));
-  assert(s && s.codec === 'Opus', 'sound encoded again (Opus here; AAC where the phone has it): ' + (s && s.codec));
+  const aac = await page.evaluate(() => AudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 192000 })
+    .then((r) => r.supported, () => false));
+  assert(s && s.codec === (aac ? 'mp4a' : 'Opus'), 'sound encoded again (AAC where the browser has it, else Opus): ' + (s && s.codec));
   near(seconds(s), 2, 0.05, 'sound as long as the picture');
   const p = await probe(page, bytes, { at: [0.5, 1.5], windows: [[0.1, 0.9], [1.1, 1.9]] });
   assert(p.rms[0] > 0.1 && p.rms[1] < 0.01, 'tone, then silence ' + p.rms);
@@ -4538,7 +4546,7 @@ test('video skin: export re-encodes with the face smoothed in every frame and th
   const pw = loadPlaywright();
   const srv = await startServer();
   BASE = 'http://127.0.0.1:' + srv.address().port;
-  browser = await pw.chromium.launch();
+  browser = await pw.chromium.launch(process.platform === 'win32' ? { channel: 'chrome' } : {});
   let pass = 0, fail = 0, skipped = 0;
   const t0 = Date.now();
   for (const t of tests) {
