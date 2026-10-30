@@ -1335,8 +1335,9 @@ test('text: outline, shadow, alignment and line spacing change the right pixels'
   assert(r.plainDark === 0, 'no shadow when shadow is off');
   assert(r.hard.n > 100, 'hard shadow missing');
   near(r.hard.maxX - r.hardFill.maxX, 0.06 * 40, 1, 'hard shadow offset x'); near(r.hard.maxY - r.hardFill.maxY, 0.06 * 40, 1, 'hard shadow offset y');
-  // The left edge too (the shadow of each stem shows below the letters): on Windows the right edge
-  // alone does not move when the clean pass casts a second shadow (mutation run, 31/10/26).
+  // The left edge too (the shadow of each stem shows below the letters). Keep both edges: when the
+  // clean pass casts a second shadow, only the right edge moves on Linux and only the left edge on
+  // Windows (mutation runs, 31/10/26).
   near(r.hard.minX - r.hardFill.minX, 0.06 * 40, 1, 'hard shadow offset x, left edge');
   near(r.hardZoom.maxX - r.hardZoomFill.maxX, 2 * 0.06 * 40, 1.5, 'shadow offset scales with the zoom');
   near(r.hardTurned.maxX - r.hardTurnedFill.maxX, 0.06 * 40, 1, 'turned box: shadow still falls right');
@@ -3600,6 +3601,8 @@ test('video: phone layout, tap targets at least 44 px in every video sheet', asy
     const stage = await page.locator('#stage').boundingBox();
     assert(stage.height > (t === 'vcheck' ? 150 : 400), t + ': video area ' + stage.height + ' px');
     await page.click('.sheet-panel[data-tool="' + t + '"] [data-cancel]');
+    // Skin's model goes on loading after Cancel, and no tool opens while the app is busy.
+    await page.waitForFunction(() => window.retouch.app.busyCount === 0);
   }
   await page.click('#btn-export');
   await page.waitForFunction(() => !document.querySelector('#vexport-download').disabled);
