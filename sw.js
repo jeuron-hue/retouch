@@ -16,7 +16,7 @@
 // in retouch.html (retouch_checks.cjs fails if they differ). A new version makes
 // the browser install a fresh worker, and the app shows "Update available".
 
-const CACHE_VERSION = '0.8.0';
+const CACHE_VERSION = '0.9.0';
 const CACHE = 'retouch-v' + CACHE_VERSION;
 const SHARE_CACHE = 'retouch-share';
 const SHARE_KEY = 'shared-image';
@@ -121,18 +121,20 @@ async function receiveShare(req) {
   try {
     const form = await req.formData();
     // 'media' is the field name from 0.8.0; an installed app whose Android copy of
-    // the manifest is older still sends 'image', so both are read.
-    const file = [...form.getAll('media'), ...form.getAll('image')].find((f) => f && typeof f !== 'string');
-    if (file) {
-      const cache = await caches.open(SHARE_CACHE);
-      await cache.put(new URL(SHARE_KEY, scope).href, new Response(file, {
+    // the manifest is older still sends 'image', so both are read. Several videos
+    // shared together are joined in the app: each file gets its own key (the first
+    // SHARE_KEY, the second SHARE_KEY-2 and so on) and ?shared= says how many.
+    const files = [...form.getAll('media'), ...form.getAll('image')].filter((f) => f && typeof f !== 'string').slice(0, 50);
+    const cache = await caches.open(SHARE_CACHE);
+    for (let i = 0; i < files.length; i++) {
+      await cache.put(new URL(SHARE_KEY + (i ? '-' + (i + 1) : ''), scope).href, new Response(files[i], {
         headers: {
-          'content-type': file.type || 'application/octet-stream',
-          'x-filename': encodeURIComponent(file.name || 'shared'),
+          'content-type': files[i].type || 'application/octet-stream',
+          'x-filename': encodeURIComponent(files[i].name || 'shared'),
         },
       }));
     }
-    return Response.redirect(new URL('retouch.html?shared=1', scope).href, 303);
+    return Response.redirect(new URL('retouch.html?shared=' + Math.max(1, files.length), scope).href, 303);
   } catch (e) {
     return Response.redirect(new URL('retouch.html?shared=0', scope).href, 303);
   }

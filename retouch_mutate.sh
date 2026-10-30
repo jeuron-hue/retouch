@@ -280,6 +280,35 @@ video: check verdict ignores a failed trial ||| core.video.verdict = (r) => (!r.
 video: check text shows raw fps ||| ' frames at ' + Math.round(r.ran.fps) + ' fps'; ||| ' frames at ' + r.ran.fps + ' fps';
 video: check report trips on a missing row ||| if (!r) continue; ||| if (!r && false) continue;
 video: check asks 4K 60 at the 4K 30 level ||| config: { codec: 'avc1.640034', width: 3840, height: 2160, framerate: 60, bitrate: 60e6 } ||| config: { codec: 'avc1.640033', width: 3840, height: 2160, framerate: 60, bitrate: 60e6 }
+video: rate snap takes the first near rate, not the nearest ||| if (Math.abs(fps - r) <= r * 0.005 && (best === null || Math.abs(fps - r) < Math.abs(fps - best))) best = r; ||| if (Math.abs(fps - r) <= r * 0.005 && best === null) best = r;
+video: rate snap too loose ||| if (Math.abs(fps - r) <= r * 0.005 && (best ||| if (Math.abs(fps - r) <= r * 0.05 && (best
+video: rate kept unrounded ||| return best ?? Math.round(fps * 100) / 100; ||| return best ?? fps;
+video: join ignores the size ||| else if (b.width !== a.width || b.height !== a.height) why.push ||| else if (b.width !== a.width) why.push
+video: join ignores the frame rate ||| else if (b.rate !== a.rate) why.push ||| else if (false) why.push
+video: join ignores HDR ||| else if (b.hdr !== a.hdr) why.push ||| else if (false) why.push
+video: join ignores the turn ||| else if (b.rotation !== a.rotation || b.setup !== a.setup) why.push ||| else if (b.setup !== a.setup) why.push
+video: join copies what MP4 cannot hold ||| if (!a.mp4) why.push(a.name ||| if (false) why.push(a.name
+video: sound copied with a silent clip ||| if (!s.codec) why.push(s.name + ' has no sound'); ||| if (!s.codec) continue;
+video: sound kept when removed ||| if (!keep || !a) return { mode: 'none', why: [] }; ||| if (!a) return { mode: 'none', why: [] };
+video: sound setups not compared ||| else if (s.setup !== a.setup) why.push ||| else if (s.codec !== a.codec) why.push
+video: join offsets start after the piece ||| const at = plans.map((p) => { const o = t; t += p.to - p.from; return o; }); ||| const at = plans.map((p) => { t += p.to - p.from; return t; });
+video: frame grid drops the last part frame ||| const n = Math.max(1, Math.ceil((p.end - p.start) * rate - 1e-3)); ||| const n = Math.max(1, Math.floor((p.end - p.start) * rate));
+video: frame grid lets a sliver vanish ||| const n = Math.max(1, Math.ceil( ||| const n = Math.max(0, Math.ceil(
+video: frame grid piece end ignores the rate ||| return { from: p.start, to: p.start + n / rate, ||| return { from: p.start, to: p.end,
+video: join sound overlap never dropped ||| if (end - t > p.dur / 2) return null; ||| if (false) return null;
+video: join sound overlap always dropped ||| if (end - t > p.dur / 2) return null; ||| return null;
+video: join sound time goes back ||| t = end; ||| void end;
+video: resampler loses its place between chunks ||| pos = Math.max(0, pos + k * step - n); ||| pos = 1;
+video: resampler interpolates the wrong way ||| res[c][j] = src[c][i] + (src[c][i + 1] - src[c][i]) * f; ||| res[c][j] = src[c][i + 1] + (src[c][i] - src[c][i + 1]) * f;
+video: resampler mixes down without dividing ||| m[i] += p[i] / planes.length; ||| m[i] += p[i];
+video: resampler rate upside down ||| const step = fromRate / toRate; ||| const step = toRate / fromRate;
+video: bitrate cap missing ||| Math.round(Math.min(60e6, Math.max(2e6, ||| Math.round(Math.min(600e6, Math.max(2e6,
+video: piece at gives the next piece at a join ||| if (t < o + len - core.video.EPS || i === pieces.length - 1) ||| if (t <= o + len + core.video.EPS || i === pieces.length - 1)
+video: piece at runs past the end ||| at: pieces[i].start + Math.min(len, Math.max(0, t - o)) ||| at: pieces[i].start + Math.max(0, t - o)
+video: time of counts the piece itself ||| for (let k = 0; k < i; k++) o += pieces[k].end - pieces[k].start; ||| for (let k = 0; k <= i; k++) o += pieces[k].end - pieces[k].start;
+video: split at the playhead, not a keyframe ||| return [...pieces.slice(0, i), { ...p, end: k }, { ...p, start: k }, ||| return [...pieces.slice(0, i), { ...p, end: t }, { ...p, start: k },
+video: split at the piece start ||| if (k <= p.start + E || k >= p.end - E) return null; ||| if (k < p.start - E || k >= p.end - E) return null;
+video: split drops the pieces after ||| { ...p, start: k }, ...pieces.slice(i + 1)]; ||| { ...p, start: k }];
 EOF
 )
 
