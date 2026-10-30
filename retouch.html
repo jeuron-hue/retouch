@@ -3091,7 +3091,7 @@ core.video.steadyValue = (prev, cur, k) => (prev === null || prev === undefined 
 // Mean and found share (at BG_FOUND or more) of a probability map.
 core.video.maskShares = (p) => {
   let sum = 0, hit = 0;
-  for (let i = 0; i < p.length; i++) { sum += p[i]; if (p[i] >= core.BG_FOUND) hit++; }
+  for (const v of p) { sum += v; if (v >= core.BG_FOUND) hit++; }
   return { coverage: sum / Math.max(1, p.length), found: hit / Math.max(1, p.length) };
 };
 
