@@ -93,7 +93,7 @@ The same rule runs in every app repo (retouch, filter, travelboard, icantell), a
 - The bump changes APP_VERSION in retouch.html (the header line and the constant) and CACHE_VERSION in sw.js together, in the release commit, and the commit subject ends with (vX.Y.Z).
 - CHANGELOG.md gets the version's entry in the same commit, at the top (newest first): a heading `## vX.Y.Z, dd/mm/yy HHMM hrs`, optionally followed by `, <phase>`, giving the date and time the release commit is made, in Singapore time; then one or more `- ` lines saying what changed, in plain words. Reasons and phone results stay in this file. A released entry is changed only to correct a fact.
 - retouch_checks.cjs fails if a heading lacks the version, date or time, the newest entry is not the current version, versions or times are out of order, or an entry has no change line.
-- Each release is built on its own branch and merged by Gary through a pull request; the branch is deleted after the merge. Once merged, the release is tagged vX.Y.Z on its commit in main; a session that finds a merged release without a tag adds it.
+- Each release is built on its own branch and merged by Gary through a pull request; GitHub deletes the branch when the pull request is merged. Releases are tagged vX.Y.Z on their commit in main from the rig, in a batch when Gary asks (version-release skill, section 2). A build session stops at the merge: it does not tag, delete branches, or mention either (a cloud session cannot push tags or delete branches).
 
 ## Working with Gary
 - Gary is a process chemist learning to code. Explain each layer in plain words as you build it: what it does and why, not just the code.
