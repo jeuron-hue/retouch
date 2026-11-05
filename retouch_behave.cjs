@@ -4543,6 +4543,133 @@ test('video skin: export re-encodes with the face smoothed in every frame and th
   await ctx.close();
 });
 
+
+// The phone locking during an export, imitated: the page's visibility is set by hand,
+// the screen hold is a stub that logs, and the decoders a run already has can be made
+// to stall (take frames and give nothing back, as seen on the Pixel 05/11/26) or be
+// taken back the way Chrome reclaims a codec (closed, error QuotaExceededError).
+const LOCK_INIT = () => {
+  let vis = 'visible';
+  Object.defineProperty(Document.prototype, 'visibilityState', { configurable: true, get: () => vis });
+  Object.defineProperty(Document.prototype, 'hidden', { configurable: true, get: () => vis !== 'visible' });
+  window.__setVisible = (on) => { vis = on ? 'visible' : 'hidden'; document.dispatchEvent(new Event('visibilitychange')); };
+  const log = (window.__wakeLog = []);
+  const wl = { request: async (type) => {
+    log.push('on ' + type);
+    const s = new EventTarget();
+    s.released = false;
+    s.release = async () => { if (s.released) return; s.released = true; log.push('off'); s.dispatchEvent(new Event('release')); };
+    return s;
+  } };
+  Object.defineProperty(Navigator.prototype, 'wakeLock', { configurable: true, get: () => wl });
+  const live = new Set();
+  const C = window.VideoDecoder;
+  window.VideoDecoder = class extends C {
+    constructor(init) { super(init); this.__err = init.error; live.add(this); }
+    close() { live.delete(this); super.close(); }
+  };
+  window.__stallDecoders = () => {
+    for (const d of live) { d.decode = () => {}; d.flush = () => new Promise(() => {}); }
+    live.clear();
+  };
+  window.__reclaimDecoders = () => {
+    for (const d of [...live]) {
+      live.delete(d);
+      if (d.state === 'closed') continue;
+      C.prototype.close.call(d);
+      d.__err(new DOMException('Codec reclaimed due to inactivity.', 'QuotaExceededError'));
+    }
+  };
+};
+
+test('video export: keeps the screen on; after the phone locks, a run that stalls or fails starts again, and gives up after two', async () => {
+  const { ctx, page } = await newApp({ init: [BG_INIT, LOCK_INIT] });
+  await loadVideo(page, await makeClip(page, { face: true, frames: 60 }));
+  await page.evaluate(() => window.__fakeSkin([205, 150, 125], 80));
+  await page.evaluate(() => { retouch.app.video.history.push({ skin: { strength: 80, texture: 30 } }, 'Smooth skin'); });
+  await page.click('#btn-export');
+  assert(/The screen stays on until it is done\./.test(await page.textContent('#vexport-note')), 'note ' + await page.textContent('#vexport-note'));
+  assert((await page.evaluate(() => window.__wakeLog.length)) === 0, 'no hold before Re-encode');
+  await page.evaluate(() => { retouch.tools.vexport.stall = 1; });
+  const status = () => page.evaluate(() => [document.querySelector('#vexport-size').textContent, document.querySelector('#vexport-out').textContent, document.querySelector('#vexport-meta').textContent]);
+  const halfway = () => page.waitForFunction(() => /encoding [2-9]\d %/.test(document.querySelector('#vexport-size').textContent), null, { timeout: 60000 });
+  const done = () => page.waitForFunction(() => !document.querySelector('#vexport-download').disabled || /Fail/.test(document.querySelector('#vexport-meta').textContent), null, { timeout: 60000 });
+  const frames = async () => {
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#vexport-download')]);
+    return vtrack(parseMp4(fs.readFileSync(await dl.path()))).sampleCount;
+  };
+
+  // 1. Locked, and the decoder stalls: it is noticed once the phone is back, and started again.
+  await page.click('#vexport-start');
+  await halfway();
+  assert((await page.evaluate(() => window.__wakeLog.join())) === 'on screen', 'held while encoding: ' + await page.evaluate(() => window.__wakeLog.join()));
+  await page.evaluate(() => { window.__setVisible(false); window.__stallDecoders(); });
+  await page.waitForTimeout(2500);
+  let s = await status();
+  assert(!/started again/.test(s[1]), 'nothing happens while the phone is locked: ' + s);
+  const t0 = Date.now();
+  await page.evaluate(() => window.__setVisible(true));
+  await page.waitForFunction(() => /started again/.test(document.querySelector('#vexport-out').textContent), null, { timeout: 10000 });
+  assert(Date.now() - t0 > 900, 'waits for the stall time before starting again');
+  assert(/stopped while the phone was locked, so it started again from the beginning/.test(await page.textContent('.notice[data-id="export"]')), 'notice: ' + await page.textContent('.notice[data-id="export"]'));
+  await done();
+  s = await status();
+  assert(/^ready/.test(s[1]) && /Pass/.test(s[2]), 'finished after one start again: ' + s);
+  assert((await frames()) === 60, 'every frame is in the file');
+  assert((await page.evaluate(() => window.__wakeLog.join())) === 'on screen,off', 'one hold, let go at the end: ' + await page.evaluate(() => window.__wakeLog.join()));
+
+  // 2. Locked, and Chrome takes the decoder back while hidden: no failure shown; it starts again on return.
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  await page.click('#btn-export');
+  await page.click('#vexport-start');
+  await halfway();
+  const k2 = await page.evaluate(() => retouch.tools.vexport.ticket);
+  await page.evaluate(() => { window.__setVisible(false); window.__reclaimDecoders(); });
+  await page.waitForTimeout(1000);
+  s = await status();
+  assert(!/Fail/.test(s[2]) && !/started again/.test(s[1]), 'waits for the phone: ' + s);
+  await page.evaluate(() => window.__setVisible(true));
+  await done();
+  s = await status();
+  assert(/^ready/.test(s[1]) && (await page.evaluate(() => retouch.tools.vexport.ticket)) === k2 + 2, 'started again once and finished: ' + s);
+  assert((await frames()) === 60, 'every frame is in the file after a reclaim');
+
+  // 3. Taken back with no lock: a real fault, so it fails and says why.
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  await page.click('#btn-export');
+  await page.click('#vexport-start');
+  await halfway();
+  await page.evaluate(() => window.__reclaimDecoders());
+  await done();
+  s = await status();
+  assert(/Fail/.test(s[2]) && /reclaimed/.test(s[2]), 'fails without a lock: ' + s);
+  assert(/off$/.test(await page.evaluate(() => window.__wakeLog.join())), 'the hold is let go on a failure');
+
+  // 4. Stalls after every lock: starts again twice, then stops and says what to do.
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  await page.click('#btn-export');
+  await page.click('#vexport-start');
+  for (let n = 0; n < 3; n++) {
+    await halfway();
+    const k = await page.evaluate(() => retouch.tools.vexport.ticket);
+    await page.evaluate(() => { window.__setVisible(false); window.__stallDecoders(); window.__setVisible(true); });
+    if (n < 2) await page.waitForFunction((k) => retouch.tools.vexport.ticket >= k + 2, k, { timeout: 10000 });
+  }
+  await done();
+  s = await status();
+  assert(/Fail/.test(s[2]) && /stopped each time the phone locked; keep the screen on and open Export again/.test(s[2]) && s[1] === 'failed', 'gives up: ' + s);
+  assert(/off$/.test(await page.evaluate(() => window.__wakeLog.join())), 'the hold is let go when it gives up');
+  // Closing the sheet mid-run lets the hold go too.
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  await page.click('#btn-export');
+  await page.click('#vexport-start');
+  await halfway();
+  await page.click('.sheet-panel[data-tool="vexport"] [data-cancel]');
+  assert(/off$/.test(await page.evaluate(() => window.__wakeLog.join())), 'closing the sheet lets the hold go');
+  assert(page.errors.length === 0, page.errors.join('; '));
+  await ctx.close();
+});
+
 /* ---------- Runner ---------- */
 
 (async () => {

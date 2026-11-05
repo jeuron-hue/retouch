@@ -2,7 +2,7 @@
 <!--
 retouch: personal photo editor, installed as a PWA. Everything runs on the phone.
 
-APP_VERSION 0.11.0 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
+APP_VERSION 0.11.1 (sw.js CACHE_VERSION must match; retouch_checks.cjs enforces it)
 
 Build notes: vendored files and their pinned versions. Never upgrade one silently;
 change the version here in the same commit as the file.
@@ -968,7 +968,7 @@ fieldset:disabled{opacity:.4}
    a. Constants
    ============================================================ */
 
-const APP_VERSION = '0.11.0';
+const APP_VERSION = '0.11.1';
 
 // Working-size ceiling. A Pixel 9 Pro XL default photo is 4080 x 3072 (12.5 MP);
 // anything up to that is edited at full resolution. Bigger images (50 MP mode,
@@ -4984,6 +4984,12 @@ const SNAP_OFFER = 0.5;
 // size if that is larger. A canvas around a 4K clip is scaled down to stay under it,
 // since the Pixel's H.264 encoder is only known to work up to 4K (video check, 30/10/26).
 const VIDEO_MAX_PIXELS = 3840 * 2160;
+// An export that has gone this long (seconds) without a frame after the phone was
+// locked, plus three times its slowest frame so far, is taken as stalled and started
+// again, at most VIDEO_RESTARTS times. Chrome on the Pixel left a skin export stuck at
+// 26 % after the screen locked and came back on (05/11/26).
+const VIDEO_STALL = 20;
+const VIDEO_RESTARTS = 2;
 
 let mediabunny = null;
 function loadMediabunny() {
@@ -6530,7 +6536,8 @@ async function encodeSound(MB, v, r, j, audio, asrc, progress, wanted) {
 
 // Write the recipe into a new MP4. progress(share) is told how far it got; wanted()
 // going false stops it. Returns { file, j, sound, where, seconds } or null if stopped.
-async function exportClip(v, r, name, progress = () => {}, wanted = () => true) {
+// hooks.cancel is set to a function that stops the writer, for a run that is stuck.
+async function exportClip(v, r, name, progress = () => {}, wanted = () => true, hooks = {}) {
   const MB = await loadMediabunny();
   const t0 = performance.now();
   const j = joinPlan(v, r);
@@ -6554,6 +6561,7 @@ async function exportClip(v, r, name, progress = () => {}, wanted = () => true) 
   }
   const sink = await exportTarget(MB);
   const out = new MB.Output({ format: new MB.Mp4OutputFormat({ fastStart: false }), target: sink.target });
+  hooks.cancel = () => { try { out.cancel().catch(() => {}); } catch (err) { /* already stopped */ } };
   let vsrc, canvas = null;
   if (j.encode) {
     canvas = document.createElement('canvas');
@@ -6596,6 +6604,35 @@ async function exportClip(v, r, name, progress = () => {}, wanted = () => true) 
   return { file: new File([blob], name + '.mp4', { type: 'video/mp4' }), j, sound: !!asrc, audio, where: sink.where, seconds: (performance.now() - t0) / 1000 };
 }
 
+// Keep the screen on while an export runs, so the phone does not lock itself halfway.
+// Chrome drops the hold when the page is hidden; it is taken again when the page comes back.
+const wake = {
+  want: false, lock: null,
+  async on() { this.want = true; await this.get(); },
+  async get() {
+    if (!this.want || this.lock || !navigator.wakeLock || document.visibilityState !== 'visible') return;
+    try {
+      const l = await navigator.wakeLock.request('screen');
+      if (!this.want) { l.release().catch(() => {}); return; }
+      this.lock = l;
+      l.addEventListener('release', () => { if (this.lock === l) this.lock = null; });
+    } catch (err) { /* not allowed here (battery saver): the export runs all the same */ }
+  },
+  off() {
+    this.want = false;
+    const l = this.lock;
+    this.lock = null;
+    if (l) l.release().catch(() => {});
+  },
+};
+
+// Resolves once the page is on screen.
+const shown = () => new Promise((resolve) => {
+  if (document.visibilityState === 'visible') { resolve(); return; }
+  const f = () => { if (document.visibilityState === 'visible') { document.removeEventListener('visibilitychange', f); resolve(); } };
+  document.addEventListener('visibilitychange', f);
+});
+
 // A copy starts as soon as the sheet opens. A re-encode is slow and changes the
 // picture (HDR becomes SDR), so the sheet says so and waits for a tap.
 tools.vexport = {
@@ -6626,6 +6663,7 @@ tools.vexport = {
         (skinGPU.can(j.pic.w, j.pic.h) ? '.' : ': this phone\'s graphics chip cannot run the filter (' + (skinGPU.why || 'not available') + '), so it runs in JavaScript, much slower.'));
     }
     if (j.sound.mode === 'encode') lines.push('The sound is re-encoded: ' + j.sound.why.join('; ') + '.');
+    if (j.encode && navigator.wakeLock) lines.push('The screen stays on until it is done.');
     const note = $('#vexport-note');
     note.hidden = !lines.length;
     note.textContent = lines.join(' ');
@@ -6638,8 +6676,10 @@ tools.vexport = {
       $('#vexport-out').textContent = 'tap Re-encode to start';
     } else this.run();
   },
-  close() { this.ticket = (this.ticket || 0) + 1; },
-  run() {
+  close() { this.ticket = (this.ticket || 0) + 1; this.watch = null; wake.off(); },
+  stall: VIDEO_STALL,
+  // again counts the times this export has been started again after the phone was locked.
+  run(again = 0) {
     const ticket = (this.ticket = (this.ticket || 0) + 1);
     const verb = this.j.encode ? 'encoding' : 'copying';
     $('#vexport-start').hidden = true;
@@ -6648,13 +6688,47 @@ tools.vexport = {
     $('#vexport-download').disabled = true; $('#vexport-share').disabled = true;
     $('#vexport-size').textContent = verb;
     $('#vexport-meta').textContent = '';
-    $('#vexport-out').textContent = this.j.encode ? 'encoding ' + this.j.frames + ' frames' : 'copying the packets';
+    $('#vexport-out').textContent = (this.j.encode ? 'encoding ' + this.j.frames + ' frames' : 'copying the packets') + (again ? ', started again' : '');
     const wanted = () => ticket === this.ticket && app.tool === this;
+    // The watch: when the last frame came, the slowest frame so far (not counting a
+    // spell with the page hidden), whether the phone was locked during this run, and
+    // when the page came back. The visibility listener below fills in the last two.
+    const watch = this.watch = { last: performance.now(), gap: 0, hid: false, locked: false, back: 0, hooks: {} };
+    const moved = () => {
+      const t = performance.now();
+      if (!watch.hid) watch.gap = Math.max(watch.gap, t - watch.last);
+      watch.hid = false;
+      watch.last = t;
+    };
+    // Start again after a lock: when the run stalls, or fails, once the phone is back.
+    const restart = () => {
+      if (!wanted()) return false;
+      clearInterval(timer);
+      this.ticket++;                    // the stuck run stops wherever it wakes
+      if (watch.hooks.cancel) watch.hooks.cancel();
+      if (again >= VIDEO_RESTARTS) {
+        wake.off();
+        $('#vexport-size').textContent = '';
+        $('#vexport-meta').innerHTML = '<span class="status-fail">Fail</span> ';
+        $('#vexport-meta').append(document.createTextNode('stopped each time the phone locked; keep the screen on and open Export again'));
+        $('#vexport-out').textContent = 'failed';
+        return true;
+      }
+      notify('The export stopped while the phone was locked, so it started again from the beginning.', 'watch', { id: 'export', timeout: 8000 });
+      this.run(again + 1);
+      return true;
+    };
+    const timer = setInterval(() => {
+      if (!wanted()) { clearInterval(timer); return; }
+      if (!watch.locked || document.visibilityState !== 'visible') return;
+      if (performance.now() - Math.max(watch.last, watch.back) > this.stall * 1000 + 3 * watch.gap) restart();
+    }, 1000);
+    wake.on();
     this.pending = (async () => {
       await nextFrame();
       try {
         const r = await exportClip(app.video, app.video.history.current, exportName(),
-          (f) => { if (wanted()) $('#vexport-size').textContent = verb + ' ' + Math.round(f * 100) + ' %'; }, wanted);
+          (f) => { if (wanted()) { moved(); $('#vexport-size').textContent = verb + ' ' + Math.round(f * 100) + ' %'; } }, wanted, watch.hooks);
         if (!r || !wanted()) return null;
         this.result = r;
         $('#vexport-size').textContent = fmtBytes(r.file.size);
@@ -6664,11 +6738,17 @@ tools.vexport = {
         return r;
       } catch (err) {
         if (!wanted()) return null;
+        if (watch.locked) {             // failed after a lock (a decoder taken back while hidden): wait for the phone, then start again
+          await shown();
+          if (restart()) return null;
+        }
         $('#vexport-size').textContent = '';
         $('#vexport-meta').innerHTML = '<span class="status-fail">Fail</span> ';
         $('#vexport-meta').append(document.createTextNode(shortError(err)));
         $('#vexport-out').textContent = 'failed';
         return null;
+      } finally {
+        if (wanted()) { clearInterval(timer); wake.off(); }
       }
     })();
     return this.pending;
@@ -6701,6 +6781,13 @@ tools.vexport = {
 $('#vexport-download').addEventListener('click', () => tools.vexport.download());
 $('#vexport-share').addEventListener('click', () => tools.vexport.share());
 $('#vexport-start').addEventListener('click', () => tools.vexport.run());
+document.addEventListener('visibilitychange', () => {
+  const w = tools.vexport.watch;
+  if (document.visibilityState === 'visible') {
+    wake.get();
+    if (w) w.back = performance.now();
+  } else if (w) { w.locked = true; w.hid = true; }
+});
 
 /* ---------- Tool: video check ---------- */
 
