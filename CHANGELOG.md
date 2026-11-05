@@ -2,6 +2,11 @@
 
 What changed in each version, newest first. Each entry gives the version, the date and time it was released (Singapore time, 24-hour) and what changed. Why each change was made, and what Gary's runs on the Pixel showed, is in CLAUDE.md.
 
+## v0.11.1, 05/11/26 2118 hrs
+- Video export keeps the screen on while it runs.
+- An export that stops while the phone is locked starts again by itself when you come back, instead of sitting still.
+- Notes and tests since v0.11.0: the change history (this file) and its check, the tests run on the Windows rig, the Pixel notes from V2 and V3 added to the project notes.
+
 ## v0.11.0, 30/10/26 1827 hrs, V4
 - Video: skin smoothing on every frame, and the filter runs on the graphics chip.
 
